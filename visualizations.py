@@ -212,14 +212,13 @@ def agent_mobility_heatmap(worker_positions: List[Tuple[int, int]],
     _savefig(fig, f"{output_dir}/mobility_heatmap_{condition}_step{step}.png")
 
 
-def resource_heatmap(grid_resources, resource: str,
+def resource_heatmap(resource_array: np.ndarray,
+                     resource: str,
                      grid_width: int, grid_height: int,
                      condition: str, step: int,
                      output_dir: str = "results/plots"):
-    """Heatmap of a single resource type."""
-    grid = np.array([[grid_resources[x][y][resource]
-                      for y in range(grid_height)]
-                     for x in range(grid_width)])
+    """Heatmap of a single resource type.  resource_array is a (W,H) ndarray."""
+    grid = resource_array
     fig, ax = plt.subplots(figsize=(7, 6))
     im = ax.imshow(grid.T, origin="lower", cmap="Greens", aspect="auto")
     plt.colorbar(im, ax=ax, label=f"{resource} level")
@@ -515,7 +514,7 @@ def generate_all_plots(
     metrics_history: List[Dict],
     condition: str,
     final_wealth: np.ndarray,
-    grid_resources=None,
+    food_grid: np.ndarray = None,   # (W,H) numpy array
     grid_width: int = 80,
     grid_height: int = 80,
     active_cartels: Dict = None,
@@ -556,8 +555,8 @@ def generate_all_plots(
                                metrics_df["step"].max() if not metrics_df.empty else 0,
                                plots_dir)
 
-    if grid_resources is not None:
-        resource_heatmap(grid_resources, "food", grid_width, grid_height,
+    if food_grid is not None:
+        resource_heatmap(food_grid, "food", grid_width, grid_height,
                          condition,
                          metrics_df["step"].max() if not metrics_df.empty else 0,
                          plots_dir)

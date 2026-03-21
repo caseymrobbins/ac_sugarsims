@@ -70,12 +70,12 @@ def run_single_episode(args: Tuple) -> Optional[Dict]:
     """
     Run one full episode.  Designed to be called from a worker process.
 
-    args = (objective, seed, n_steps, episode_id, output_dir, save_raw)
+    args = (objective, seed, n_steps, episode_id, output_dir, save_raw, accel_cfg)
+    accel_cfg may be None (auto-detect inside worker).
     """
-    objective, seed, n_steps, episode_id, output_dir, save_raw = args
+    objective, seed, n_steps, episode_id, output_dir, save_raw, accel_cfg = args
 
     try:
-        # Import inside worker to avoid pickling issues
         from environment import EconomicModel
         from metrics import episode_summary
 
@@ -87,6 +87,7 @@ def run_single_episode(args: Tuple) -> Optional[Dict]:
             n_firms=20,
             n_landowners=15,
             objective=objective,
+            accel_config=accel_cfg,
         )
 
         # Run steps
@@ -130,13 +131,14 @@ def build_experiment_list(objectives: List[str],
                            seeds: List[int],
                            n_steps: int,
                            output_dir: str,
-                           save_raw: bool) -> List[Tuple]:
-    """Build the flat list of (objective, seed, n_steps, episode_id, ...) tuples."""
+                           save_raw: bool,
+                           accel_cfg=None) -> List[Tuple]:
+    """Build the flat list of episode task tuples."""
     tasks = []
     ep = 0
     for obj in objectives:
         for seed in seeds:
-            tasks.append((obj, seed, n_steps, ep, output_dir, save_raw))
+            tasks.append((obj, seed, n_steps, ep, output_dir, save_raw, accel_cfg))
             ep += 1
     return tasks
 
@@ -263,8 +265,8 @@ def main():
     parser.add_argument("--steps", type=int, default=None,
                         help="Steps per episode (overrides protocol default)")
     parser.add_argument("--workers", type=int,
-                        default=min(4, cpu_count()),
-                        help="Number of parallel worker processes")
+                        default=None,  # set after hardware detection
+                        help="Number of parallel worker processes (default: auto)")
     parser.add_argument("--output-dir", default="results",
                         help="Root output directory")
     parser.add_argument("--no-save-raw", action="store_true",
@@ -273,14 +275,18 @@ def main():
                         help="Skip visualisation pass")
     args = parser.parse_args()
 
-    # Protocol parameters
+    # Auto-detect hardware and pick acceleration backend
+    from hardware import auto_configure
+    accel_cfg = auto_configure(verbose=True)
+
+    # Protocol parameters (use hardware-recommended defaults if not overridden)
     if args.test:
         n_seeds = args.seeds or 10
         n_steps = args.steps or 150
         logger.info(f"TEST PROTOCOL: {n_seeds} seeds × {n_steps} steps × {len(args.objectives)} conditions")
     else:
-        n_seeds = args.seeds or 20
-        n_steps = args.steps or 1500
+        n_seeds = args.seeds or accel_cfg.recommended_seeds
+        n_steps = args.steps or accel_cfg.recommended_steps
         logger.info(f"FULL PROTOCOL: {n_seeds} seeds × {n_steps} steps × {len(args.objectives)} conditions")
 
     seeds = list(range(n_seeds))
@@ -294,13 +300,14 @@ def main():
 
     # Build task list
     tasks = build_experiment_list(args.objectives, seeds, n_steps,
-                                  output_dir, save_raw)
+                                  output_dir, save_raw, accel_cfg)
     total = len(tasks)
     logger.info(f"Total episodes to run: {total}")
 
     # Run in parallel
     t_start = time.time()
-    n_workers = min(args.workers, total)
+    n_workers_cfg = args.workers if args.workers is not None else accel_cfg.n_workers
+    n_workers = min(n_workers_cfg, total)
 
     results = []
     if n_workers <= 1:

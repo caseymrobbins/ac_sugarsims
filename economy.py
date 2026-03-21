@@ -187,21 +187,17 @@ class Economy:
         """
         if agent_a.pos is None or agent_b.pos is None:
             return
-        pa = (int(agent_a.pos[0]), int(agent_a.pos[1]))
-        pb = (int(agent_b.pos[0]), int(agent_b.pos[1]))
-        cell_a = self.model.grid_resources[pa[0]][pa[1]]
-        cell_b = self.model.grid_resources[pb[0]][pb[1]]
+        ax, ay = int(agent_a.pos[0]), int(agent_a.pos[1])
+        bx, by = int(agent_b.pos[0]), int(agent_b.pos[1])
 
-        # Agent A surplus / deficit
-        surplus_food_a = cell_a["food"] - 5.0
-        surplus_food_b = cell_b["food"] - 5.0
+        surplus_food_a = float(self.model.food_grid[ax, ay]) - 5.0
+        surplus_food_b = float(self.model.food_grid[bx, by]) - 5.0
 
         if surplus_food_a > 0 and surplus_food_b < 0:
             trade_amount = min(surplus_food_a, abs(surplus_food_b))
             value = trade_amount * self.prices["food"]
-            # Transfer food and payment
-            cell_a["food"] -= trade_amount
-            cell_b["food"] += trade_amount * 0.9  # friction
+            self.model.food_grid[ax, ay] -= trade_amount
+            self.model.food_grid[bx, by] += trade_amount * 0.9
             agent_a.wealth += value * 0.9
             agent_b.wealth -= value
 

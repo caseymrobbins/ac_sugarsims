@@ -181,14 +181,16 @@ class WorkerAgent(Agent):
         pos = self._tpos()
         if pos is None:
             return
-        cell = self.model.grid_resources[pos[0]][pos[1]]
-        amount = min(cell["food"] + cell["raw_materials"] * 0.5,
+        x, y = pos
+        food_val = float(self.model.food_grid[x, y])
+        raw_val  = float(self.model.raw_grid[x, y])
+        amount = min(food_val + raw_val * 0.5,
                      self.skill * 5.0 * (1 + self.model.rng.exponential(0.1)))
         amount = max(0, amount)
-        take_food = min(cell["food"], amount * 0.7)
-        take_raw = min(cell["raw_materials"], amount * 0.3)
-        cell["food"] = max(0, cell["food"] - take_food)
-        cell["raw_materials"] = max(0, cell["raw_materials"] - take_raw)
+        take_food = min(food_val, amount * 0.7)
+        take_raw  = min(raw_val,  amount * 0.3)
+        self.model.food_grid[x, y] = max(0.0, food_val - take_food)
+        self.model.raw_grid[x, y]  = max(0.0, raw_val  - take_raw)
         value = (take_food + take_raw) * self.model.economy.prices["food"]
         self.wealth += value
         self.income_last_step += value
@@ -230,8 +232,9 @@ class WorkerAgent(Agent):
         if not empty_cells:
             return
         def cell_value(pos):
-            r = self.model.grid_resources[pos[0]][pos[1]]
-            return r["food"] + r["raw_materials"] + r["capital"]
+            return (float(self.model.food_grid[pos[0], pos[1]])
+                    + float(self.model.raw_grid[pos[0], pos[1]])
+                    + float(self.model.capital_grid[pos[0], pos[1]]))
         best_cell = max(empty_cells, key=cell_value)
         grid.move_agent(self, best_cell)
 
@@ -294,8 +297,9 @@ class WorkerAgent(Agent):
         resources = max(self.wealth, 1e-9)
         if self.pos is not None:
             p = (int(self.pos[0]), int(self.pos[1]))
-            cell = self.model.grid_resources[p[0]][p[1]]
-            local_density = cell["food"] + cell["raw_materials"] + cell["capital"]
+            local_density = (float(self.model.food_grid[p[0], p[1]])
+                             + float(self.model.raw_grid[p[0], p[1]])
+                             + float(self.model.capital_grid[p[0], p[1]]))
         else:
             local_density = 1.0
         options = max(self.skill * (local_density + 1), 1e-9)
