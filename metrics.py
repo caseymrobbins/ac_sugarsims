@@ -103,6 +103,36 @@ def collect_step_metrics(model: "EconomicModel") -> Dict[str, Any]:
     m["planner_min_wage"] = model.planner.policy["min_wage"]
     m["planner_tax_worker"] = model.planner.policy["tax_rate_worker"]
     m["planner_tax_firm"] = model.planner.policy["tax_rate_firm"]
+    m["planner_agriculture_inv"]    = model.planner.policy["agriculture_investment"]
+    m["planner_infrastructure_inv"] = model.planner.policy["infrastructure_investment"]
+    m["planner_healthcare_inv"]     = model.planner.policy["healthcare_investment"]
+    m["planner_education_inv"]      = model.planner.policy["education_investment"]
+
+    # Public investment effects (current bonus levels)
+    m["infrastructure_level"]  = model._infrastructure_level
+    m["healthcare_bonus"]      = model._healthcare_bonus
+    m["education_quality"]     = model._education_quality
+    m["agriculture_bonus"]     = model._agriculture_bonus
+
+    # Water resource
+    m["mean_water"] = float(np.mean(model.water_grid))
+    m["min_water"]  = float(np.min(model.water_grid))
+
+    # Pollution
+    m["mean_pollution"]    = float(np.mean(model.pollution_grid))
+    m["max_pollution"]     = float(np.max(model.pollution_grid))
+    m["total_pollution"]   = float(np.sum(model.pollution_grid))
+    m["n_polluted_cells"]  = int(np.sum(model.pollution_grid > 1.0))
+    m["total_firm_emissions"] = float(sum(f.total_pollution_emitted for f in model.firms if not f.defunct))
+    # Health burden: extra metabolism cost workers bear from pollution this step
+    health_burden = 0.0
+    for w in model.workers:
+        if w.pos is not None:
+            p = float(model.pollution_grid[int(w.pos[0]), int(w.pos[1])])
+            health_burden += p * 0.05
+    m["pollution_health_burden"] = health_burden
+    m["planner_pollution_tax"]      = model.planner.policy["pollution_tax"]
+    m["planner_cleanup_investment"] = model.planner.policy["cleanup_investment"]
 
     # Power-law exponent (Pareto tail)
     m["wealth_power_law_alpha"] = _pareto_alpha(all_w)
@@ -289,6 +319,14 @@ def episode_summary(metrics_history: List[Dict]) -> Dict[str, Any]:
         "trade_density", "trade_max_centrality",
         "planner_ubi", "planner_min_wage",
         "planner_tax_worker", "planner_tax_firm",
+        "planner_agriculture_inv", "planner_infrastructure_inv",
+        "planner_healthcare_inv", "planner_education_inv",
+        "infrastructure_level", "healthcare_bonus",
+        "education_quality", "agriculture_bonus",
+        "mean_water", "min_water",
+        "mean_pollution", "max_pollution", "total_pollution",
+        "n_polluted_cells", "pollution_health_burden",
+        "planner_pollution_tax", "planner_cleanup_investment",
         "monopoly_detected", "cartel_detected", "poverty_trap_detected",
     ]
     for key in scalar_keys:

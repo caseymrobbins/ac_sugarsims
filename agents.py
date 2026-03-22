@@ -101,8 +101,13 @@ class WorkerAgent(Agent):
         self.income_last_step = 0.0
         self.harvested_this_step = 0.0
 
-        # Pay metabolism cost
-        self.wealth -= self.metabolism
+        # Pay metabolism cost (reduced by healthcare, increased by local pollution)
+        local_pollution = 0.0
+        if self.pos is not None:
+            local_pollution = float(self.model.pollution_grid[int(self.pos[0]), int(self.pos[1])])
+        effective_metabolism = (self.metabolism * max(0.0, 1.0 - self.model._healthcare_bonus)
+                                + local_pollution * 0.05)
+        self.wealth -= effective_metabolism
         if self.wealth <= SURVIVAL_THRESHOLD:
             self._die()
             return
@@ -146,9 +151,10 @@ class WorkerAgent(Agent):
         # Pay rent for occupied cell
         self._pay_rent()
 
-        # Possibly reproduce
+        # Possibly reproduce (pollution reduces reproductive probability)
         if self.wealth >= REPRODUCTION_THRESHOLD:
-            if self.model.rng.random() < 0.005:
+            repro_prob = 0.005 * max(0.1, 1.0 - local_pollution * 0.02)
+            if self.model.rng.random() < repro_prob:
                 self._reproduce()
 
         # Possibly borrow
@@ -182,10 +188,17 @@ class WorkerAgent(Agent):
         if pos is None:
             return
         x, y = pos
-        food_val = float(self.model.food_grid[x, y])
-        raw_val  = float(self.model.raw_grid[x, y])
+        food_val      = float(self.model.food_grid[x, y])
+        raw_val       = float(self.model.raw_grid[x, y])
+        water_val     = float(self.model.water_grid[x, y])
+        pollution_val = float(self.model.pollution_grid[x, y])
+        # Infrastructure TFP and water availability boost harvest; pollution degrades it
+        tfp = self.model.infrastructure_bonus
+        water_bonus      = 1.0 + 0.1 * min(water_val / max(self.model.water_grid.max(), 1.0), 1.0)
+        pollution_penalty = max(0.5, 1.0 - pollution_val * 0.01)   # up to -50% at cap
         amount = min(food_val + raw_val * 0.5,
-                     self.skill * 5.0 * (1 + self.model.rng.exponential(0.1)))
+                     self.skill * 5.0 * tfp * water_bonus * pollution_penalty
+                     * (1 + self.model.rng.exponential(0.1)))
         amount = max(0, amount)
         take_food = min(food_val, amount * 0.7)
         take_raw  = min(raw_val,  amount * 0.3)
@@ -234,7 +247,8 @@ class WorkerAgent(Agent):
         def cell_value(pos):
             return (float(self.model.food_grid[pos[0], pos[1]])
                     + float(self.model.raw_grid[pos[0], pos[1]])
-                    + float(self.model.capital_grid[pos[0], pos[1]]))
+                    + float(self.model.capital_grid[pos[0], pos[1]])
+                    + float(self.model.water_grid[pos[0], pos[1]]) * 0.5)
         best_cell = max(empty_cells, key=cell_value)
         grid.move_agent(self, best_cell)
 
@@ -253,8 +267,10 @@ class WorkerAgent(Agent):
         if self.wealth < REPRODUCTION_THRESHOLD:
             return
         self.wealth -= REPRODUCTION_COST
+        # Education quality gives a small intergenerational skill boost
+        edu_boost = (self.model._education_quality - 1.0) * 0.05
         child_skill = float(np.clip(
-            self.skill + self.model.rng.normal(0, 0.05), 0.05, 1.0))
+            self.skill + edu_boost + self.model.rng.normal(0, 0.05), 0.05, 1.0))
         child = WorkerAgent(
             model=self.model,
             wealth=REPRODUCTION_COST * 0.8,
@@ -339,6 +355,9 @@ class FirmAgent(Agent):
         self.market_share: float = 0.0
         self.total_wages_paid: float = 0.0
         self.total_profit_accumulated: float = 0.0
+        # Pollution: how much pollution is emitted per unit of output
+        self.pollution_factor: float = float(rng.uniform(0.05, 0.30))
+        self.total_pollution_emitted: float = 0.0
 
     def step(self):
         if self.defunct:
@@ -367,7 +386,7 @@ class FirmAgent(Agent):
         if n_workers == 0:
             return
         alpha = 0.35
-        A = 1.5
+        A = 1.5 * self.model.infrastructure_bonus  # TFP scaled by public infrastructure
         K = max(self.capital_stock, 1.0)
         L = max(sum(w.skill for w in self.workers.values()), 0.01)
         output = A * (K ** alpha) * (L ** (1 - alpha))
@@ -378,6 +397,16 @@ class FirmAgent(Agent):
         self.profit = self.revenue - wage_bill
         self.wealth += self.profit
         self.total_profit_accumulated += max(self.profit, 0)
+
+        # Emit pollution at this firm's cell (proportional to output)
+        if self.pos is not None:
+            fx, fy = int(self.pos[0]), int(self.pos[1])
+            emission = output * self.pollution_factor
+            from hardware import POLLUTION_CAP
+            self.model.pollution_grid[fx, fy] = min(
+                POLLUTION_CAP,
+                self.model.pollution_grid[fx, fy] + emission)
+            self.total_pollution_emitted += emission
 
     def _set_wage(self):
         if self.cartel_id is not None:
@@ -414,6 +443,9 @@ class FirmAgent(Agent):
             self.cartel_partners = [candidate.unique_id]
             candidate.cartel_partners = [self.unique_id]
             self.model.active_cartels[cartel_id] = {self.unique_id, candidate.unique_id}
+            # Cartel coordination reduces regulatory compliance: both firms pollute more
+            self.pollution_factor = min(0.60, self.pollution_factor * 1.4)
+            candidate.pollution_factor = min(0.60, candidate.pollution_factor * 1.4)
 
     def hire_worker(self, worker: "WorkerAgent"):
         if worker.unique_id not in self.workers:
