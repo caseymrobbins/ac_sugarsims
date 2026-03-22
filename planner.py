@@ -158,6 +158,13 @@ class EvolutionStrategy:
         if len(fitnesses) < 2:
             return
 
+        # Sanitize: drop NaN/inf fitnesses
+        valid = np.isfinite(fitnesses)
+        if valid.sum() < 2:
+            return
+        fitnesses = fitnesses[valid]
+        perturbations = perturbations[valid]
+
         # Fitness ranking (rank transform for robustness)
         ranks = np.zeros_like(fitnesses)
         order = np.argsort(fitnesses)
@@ -234,6 +241,9 @@ class LinearPolicy:
         Compute policy adjustment given state.
         Returns adjustment in normalized [0, 1] space (added to ES base).
         """
+        # Sanitize state: replace NaN/inf before any computation
+        state = np.nan_to_num(state, nan=0.0, posinf=50.0, neginf=-50.0)
+
         norm_state = self._normalize_state(state)
         mu = self.W @ norm_state + self.bias
 
@@ -402,20 +412,26 @@ class PlannerAgent(Agent):
         total_debt = sum(w.debt for w in workers)
         total_production = sum(f.production_this_step for f in firms)
 
+        # Use max(..., 0) before log1p to prevent NaN from negative wealth.
+        # Workers can have negative wealth (metabolism cost exceeds balance),
+        # and log1p(x) is NaN for x < -1.
         state = np.array([
-            np.log1p(worker_w.mean()),               # 0: log mean wealth
-            np.log1p(worker_w.min()),                 # 1: log min wealth
-            float(_gini_fast(worker_w)),              # 2: Gini coefficient
-            np.log1p(agencies.min()),                 # 3: log agency floor
-            agencies.mean(),                          # 4: mean agency
-            1.0 - n_employed / max(n_workers, 1),     # 5: unemployment rate
-            np.log1p(total_debt),                     # 6: log total debt
-            np.log1p(total_production),               # 7: log production
-            np.log1p(self.tax_revenue),               # 8: log tax revenue
-            float(np.mean(self.model.pollution_grid)), # 9: mean pollution
-            float(len(firms)) / 20.0,                 # 10: normalized firm count
-            float(self.model.current_step) / 300.0,   # 11: time fraction
+            np.log1p(max(worker_w.mean(), 0.0)),      # 0: log mean wealth
+            np.log1p(max(worker_w.min(), 0.0)),        # 1: log min wealth (clamped)
+            float(_gini_fast(worker_w)),               # 2: Gini coefficient
+            np.log1p(max(agencies.min(), 0.0)),        # 3: log agency floor
+            float(np.nanmean(agencies)),               # 4: mean agency
+            1.0 - n_employed / max(n_workers, 1),      # 5: unemployment rate
+            np.log1p(max(total_debt, 0.0)),            # 6: log total debt
+            np.log1p(max(total_production, 0.0)),      # 7: log production
+            np.log1p(max(self.tax_revenue, 0.0)),      # 8: log tax revenue
+            float(np.mean(self.model.pollution_grid)),  # 9: mean pollution
+            float(len(firms)) / 20.0,                  # 10: normalized firm count
+            float(self.model.current_step) / 300.0,    # 11: time fraction
         ], dtype=np.float64)
+
+        # Final safety: replace any residual NaN/inf with 0
+        np.nan_to_num(state, copy=False, nan=0.0, posinf=50.0, neginf=-50.0)
 
         return state
 
@@ -435,6 +451,12 @@ class PlannerAgent(Agent):
         """
         # Score the current policy
         current_obj = self.compute_objective()
+
+        # NaN firewall: if objective is NaN or inf, use baseline as fallback.
+        # This prevents corrupted rewards from poisoning the ES/linear policy.
+        if not np.isfinite(current_obj):
+            current_obj = self._reward_baseline if np.isfinite(self._reward_baseline) else 0.0
+
         self.last_objective_value = current_obj
         self.objective_history.append(current_obj)
 
@@ -481,6 +503,13 @@ class PlannerAgent(Agent):
         # Combine: ES provides base in [0,1], linear adds small adjustments
         combined = np.clip(es_params + linear_adj * 0.1, 0.01, 0.99)
 
+        # NaN firewall: if any component is NaN (from corrupted state),
+        # fall back to ES base params only
+        if np.any(np.isnan(combined)):
+            combined = np.clip(es_params, 0.01, 0.99)
+        if np.any(np.isnan(combined)):
+            combined = np.full(POLICY_DIM, 0.5)  # absolute fallback
+
         # Convert from normalized [0,1] to actual instrument values
         actual = INSTRUMENT_LO + combined * INSTRUMENT_RANGE
 
@@ -498,33 +527,44 @@ class PlannerAgent(Agent):
         """Deduct taxes from agent and add to revenue pool."""
         from agents import WorkerAgent, FirmAgent, LandownerAgent
 
+        def _safe_rate(key, default=0.0):
+            v = self.policy.get(key, default)
+            return v if np.isfinite(v) else default
+
         if isinstance(agent, WorkerAgent):
-            rate = self.policy["tax_rate_worker"]
+            rate = _safe_rate("tax_rate_worker", 0.05)
             taxable = max(0.0, agent.income_last_step)
             tax = taxable * rate
-            # Enforce min wage
+            # Enforce min wage: top up from tax revenue IF affordable
             if agent.employed:
-                floor = self.policy["min_wage"]
+                floor = _safe_rate("min_wage", 1.0)
                 if agent.wage < floor:
                     shortfall = floor - agent.wage
-                    agent.wealth += shortfall
-                    self.tax_revenue -= shortfall
+                    # Only subsidize if we can afford it
+                    if self.tax_revenue >= shortfall:
+                        agent.wealth += shortfall
+                        self.tax_revenue -= shortfall
+                    elif self.tax_revenue > 0:
+                        # Partial top-up: spend what we have
+                        agent.wealth += self.tax_revenue
+                        self.tax_revenue = 0.0
 
         elif isinstance(agent, FirmAgent):
-            rate = self.policy["tax_rate_firm"]
+            rate = _safe_rate("tax_rate_firm", 0.10)
             taxable = max(0.0, agent.profit)
             tax = taxable * rate
             # Pollution tax
             pollution_charge = (agent.production_this_step
                                 * agent.pollution_factor
-                                * self.policy["pollution_tax"])
+                                * _safe_rate("pollution_tax", 0.0))
             tax += pollution_charge
             # Enforce min wage on firm offer
-            if agent.offered_wage < self.policy["min_wage"]:
-                agent.offered_wage = self.policy["min_wage"]
+            min_w = _safe_rate("min_wage", 1.0)
+            if agent.offered_wage < min_w:
+                agent.offered_wage = min_w
 
         elif isinstance(agent, LandownerAgent):
-            rate = self.policy["tax_rate_landowner"]
+            rate = _safe_rate("tax_rate_landowner", 0.08)
             taxable = max(0.0, agent.total_rent_collected * 0.01)
             tax = taxable * rate
 
@@ -546,9 +586,11 @@ class PlannerAgent(Agent):
             return
 
         ubi = self.policy["ubi_payment"]
+        if not np.isfinite(ubi):
+            ubi = 0.0
         total_ubi = ubi * len(workers)
 
-        if total_ubi <= 0:
+        if total_ubi <= 0 or self.tax_revenue <= 0:
             return
 
         if self.tax_revenue >= total_ubi:
@@ -568,25 +610,33 @@ class PlannerAgent(Agent):
         """
         COST_PER_UNIT = 0.5
 
-        agri  = self.policy["agriculture_investment"]
-        infra = self.policy["infrastructure_investment"]
-        hlth  = self.policy["healthcare_investment"]
-        edu   = self.policy["education_investment"]
+        # Read policy values with NaN guard: if any instrument is NaN,
+        # fall back to its default value. This prevents int(NaN) crashes
+        # downstream in environment.py's range(max(1, int(agri))).
+        def _safe(key, default):
+            v = self.policy.get(key, default)
+            return v if np.isfinite(v) else default
+
+        agri  = _safe("agriculture_investment", 0.5)
+        infra = _safe("infrastructure_investment", 0.5)
+        hlth  = _safe("healthcare_investment", 0.0)
+        edu   = _safe("education_investment", 0.0)
 
         total_cost = (agri + infra + hlth + edu) * COST_PER_UNIT
-        if total_cost > 0:
+        if total_cost > 0 and self.tax_revenue > 0:
             ratio = min(1.0, self.tax_revenue / (total_cost + 1e-9))
             self.tax_revenue = max(0.0, self.tax_revenue - total_cost * ratio)
         else:
-            ratio = 1.0
+            ratio = 0.0  # No revenue = no investment effect (not negative!)
 
-        self.model._agriculture_bonus    = 1.0 + 0.3  * agri  * ratio
-        self.model._infrastructure_level = 1.0 + 0.2  * infra * ratio
-        self.model._healthcare_bonus     =       0.10 * hlth  * ratio
-        self.model._education_quality    = 1.0 + 0.3  * edu   * ratio
+        # Map investments to model bonus variables, clamped to valid ranges
+        self.model._agriculture_bonus    = max(1.0, 1.0 + 0.3 * agri * ratio)
+        self.model._infrastructure_level = max(0.5, 1.0 + 0.2 * infra * ratio)
+        self.model._healthcare_bonus     = max(0.0, min(0.30, 0.10 * hlth * ratio))
+        self.model._education_quality    = max(1.0, 1.0 + 0.3 * edu * ratio)
 
         # Pollution cleanup
-        cleanup = self.policy["cleanup_investment"]
+        cleanup = _safe("cleanup_investment", 0.0)
         if cleanup > 0 and self.tax_revenue > 0:
             cleanup_cost = cleanup * 2.0
             if self.tax_revenue >= cleanup_cost:
@@ -612,21 +662,31 @@ class PlannerAgent(Agent):
     def _objective_sum(self) -> float:
         """R = sum(wealth_i) -- utilitarian aggregate."""
         wealths = self.model.get_all_agent_wealths()
+        # Filter out NaN/inf to prevent poisoning
+        wealths = wealths[np.isfinite(wealths)]
+        if len(wealths) == 0:
+            return 0.0
         return float(np.sum(wealths))
 
     def _objective_nash(self) -> float:
         """R = sum(log(wealth_i + eps)) -- Nash social welfare."""
         wealths = self.model.get_all_agent_wealths()
+        wealths = wealths[np.isfinite(wealths)]
+        if len(wealths) == 0:
+            return 0.0
         return float(np.sum(np.log(np.maximum(wealths, EPSILON))))
 
     def _objective_jam(self) -> float:
         """R = log(min(agency_i)) -- maximize the agency floor."""
         workers = self.model.workers
         if not workers:
-            return -math.inf
-        agencies = [w.compute_agency() for w in workers]
-        floor = min(agencies)
-        return math.log(max(floor, EPSILON))
+            return float(math.log(EPSILON))
+        agencies = np.array([w.compute_agency() for w in workers], dtype=np.float64)
+        agencies = agencies[np.isfinite(agencies)]
+        if len(agencies) == 0:
+            return float(math.log(EPSILON))
+        floor = float(np.min(agencies))
+        return float(math.log(max(floor, EPSILON)))
 
     # ------------------------------------------------------------------
     # Accessors

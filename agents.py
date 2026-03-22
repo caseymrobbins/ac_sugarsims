@@ -9,6 +9,13 @@ Agent types:
   - WorkerAgent
   - FirmAgent
   - LandownerAgent
+
+Changes from original:
+  - Workers get initial network connections (fixes trade deadlock)
+  - _choose_action allows trade attempts with nearby strangers
+  - Workers can found firms (entrepreneurship)
+  - Lower reproduction threshold with population floor via immigration
+  - Firms have survival mechanics (cost cutting, downsizing)
 """
 
 from __future__ import annotations
@@ -37,7 +44,9 @@ class AgentType(Enum):
 
 SURVIVAL_THRESHOLD = 1.0       # agents with wealth <= this die
 REPRODUCTION_COST = 50.0       # wealth deducted when reproducing
-REPRODUCTION_THRESHOLD = 150.0 # minimum wealth to reproduce
+REPRODUCTION_THRESHOLD = 100.0 # minimum wealth to reproduce (lowered from 150)
+ENTREPRENEURSHIP_THRESHOLD = 200.0  # minimum wealth to found a firm
+ENTREPRENEURSHIP_PROB = 0.005       # probability per step of founding
 
 
 # ---------------------------------------------------------------------------
@@ -80,7 +89,7 @@ class WorkerAgent(Agent):
         self.debt_interest: float = 0.0
         self.loan_count: int = 0
 
-        # Social network
+        # Social network (seeded with a few random connections at init)
         self.network_connections: List[int] = []
 
         # Tracking
@@ -153,9 +162,15 @@ class WorkerAgent(Agent):
 
         # Possibly reproduce (pollution reduces reproductive probability)
         if self.wealth >= REPRODUCTION_THRESHOLD:
-            repro_prob = 0.005 * max(0.1, 1.0 - local_pollution * 0.02)
+            repro_prob = 0.01 * max(0.1, 1.0 - local_pollution * 0.02)
             if self.model.rng.random() < repro_prob:
                 self._reproduce()
+
+        # Possibly found a firm (entrepreneurship)
+        if (self.wealth >= ENTREPRENEURSHIP_THRESHOLD
+                and not self.employed
+                and self.model.rng.random() < ENTREPRENEURSHIP_PROB):
+            self._found_firm()
 
         # Possibly borrow
         if self.wealth < 10.0 and self.debt < 50.0 and self.model.rng.random() < self.risk_tolerance:
@@ -163,6 +178,10 @@ class WorkerAgent(Agent):
 
         # Apply tax
         self.model.planner.apply_tax(self)
+
+        # Occasionally discover new trade partners (breaks chicken-and-egg)
+        if self.model.rng.random() < 0.02:
+            self._discover_neighbor()
 
     def _tpos(self):
         """Return pos as a plain Python tuple (needed for Mesa 3.x numpy pos)."""
@@ -173,14 +192,20 @@ class WorkerAgent(Agent):
     def _choose_action(self) -> str:
         if not self.employed:
             self.consecutive_unemployed_steps += 1
-            if self.model.rng.random() < 0.6:
-                return "seek_work"
+            # Check if there are any firms to work for
+            if any(not f.defunct for f in self.model.firms):
+                if self.model.rng.random() < 0.6:
+                    return "seek_work"
         else:
             self.consecutive_unemployed_steps = 0
+
         if self.wealth < 30.0:
             return "harvest"
-        if self.network_connections and self.model.rng.random() < 0.3:
+
+        # Trade: allow even without existing connections (meet-and-trade)
+        if self.model.rng.random() < 0.25:
             return "trade"
+
         return "harvest"
 
     def _harvest(self):
@@ -211,8 +236,11 @@ class WorkerAgent(Agent):
         self.lifetime_harvested += value
 
     def _seek_employment(self):
+        pos = self._tpos()
+        if pos is None:
+            return
         neighbours = self.model.grid.get_neighborhood(
-            self._tpos(), moore=True, include_center=False, radius=5)
+            pos, moore=True, include_center=False, radius=5)
         firms_nearby = [
             a for cell in neighbours
             for a in self.model.grid.get_cell_list_contents([cell])
@@ -229,18 +257,68 @@ class WorkerAgent(Agent):
             best.hire_worker(self)
 
     def _trade(self):
-        if not self.network_connections:
+        """Trade with a known partner or discover a new one nearby."""
+        # Try existing connections first
+        if self.network_connections:
+            partner_id = self.model.rng.choice(self.network_connections)
+            partner = self.model.get_agent_by_id(partner_id)
+            if partner is None or not isinstance(partner, WorkerAgent):
+                self.network_connections.remove(partner_id)
+            else:
+                self.model.economy.bilateral_trade(self, partner)
+                return
+
+        # No connections or failed: find a nearby worker to trade with
+        self._discover_and_trade()
+
+    def _discover_neighbor(self):
+        """Find a nearby worker and add them as a trade connection."""
+        pos = self._tpos()
+        if pos is None:
             return
-        partner_id = self.model.rng.choice(self.network_connections)
-        partner = self.model.get_agent_by_id(partner_id)
-        if partner is None or not isinstance(partner, WorkerAgent):
-            self.network_connections.remove(partner_id)
+        neighbours = self.model.grid.get_neighborhood(
+            pos, moore=True, include_center=False, radius=3)
+        nearby_workers = [
+            a for cell in neighbours
+            for a in self.model.grid.get_cell_list_contents([cell])
+            if isinstance(a, WorkerAgent) and a.unique_id != self.unique_id
+        ]
+        if nearby_workers:
+            partner = self.model.rng.choice(nearby_workers)
+            if partner.unique_id not in self.network_connections:
+                self.network_connections.append(partner.unique_id)
+            if self.unique_id not in partner.network_connections:
+                partner.network_connections.append(self.unique_id)
+
+    def _discover_and_trade(self):
+        """Find a nearby worker, form a connection, and trade."""
+        pos = self._tpos()
+        if pos is None:
             return
+        neighbours = self.model.grid.get_neighborhood(
+            pos, moore=True, include_center=False, radius=3)
+        nearby_workers = [
+            a for cell in neighbours
+            for a in self.model.grid.get_cell_list_contents([cell])
+            if isinstance(a, WorkerAgent) and a.unique_id != self.unique_id
+        ]
+        if not nearby_workers:
+            return
+        partner = self.model.rng.choice(nearby_workers)
+        # Form connection
+        if partner.unique_id not in self.network_connections:
+            self.network_connections.append(partner.unique_id)
+        if self.unique_id not in partner.network_connections:
+            partner.network_connections.append(self.unique_id)
+        # Trade
         self.model.economy.bilateral_trade(self, partner)
 
     def _migrate(self):
         grid = self.model.grid
-        neighbourhood = grid.get_neighborhood(self._tpos(), moore=True, include_center=False, radius=3)
+        pos = self._tpos()
+        if pos is None:
+            return
+        neighbourhood = grid.get_neighborhood(pos, moore=True, include_center=False, radius=3)
         empty_cells = [c for c in neighbourhood if grid.is_cell_empty(c)]
         if not empty_cells:
             return
@@ -279,13 +357,39 @@ class WorkerAgent(Agent):
             risk_tolerance=self.risk_tolerance,
             mobility=self.mobility,
         )
+        pos = self._tpos()
+        if pos is None:
+            return
         neighbourhood = self.model.grid.get_neighborhood(
-            self._tpos(), moore=True, include_center=False, radius=2)
+            pos, moore=True, include_center=False, radius=2)
         empty_cells = [c for c in neighbourhood if self.model.grid.is_cell_empty(c)]
         if empty_cells:
-            pos = self.model.rng.choice(empty_cells)
-            self.model.grid.place_agent(child, pos)
+            place_pos = self.model.rng.choice(empty_cells)
+            self.model.grid.place_agent(child, place_pos)
             self.model.workers.append(child)
+            self.model._id_cache[child.unique_id] = child
+
+    def _found_firm(self):
+        """Wealthy unemployed worker founds a new firm."""
+        capital = self.wealth * 0.4
+        self.wealth -= capital
+        firm = FirmAgent(model=self.model, capital=capital)
+        pos = self._tpos()
+        if pos is None:
+            return
+        # Place firm near the founder
+        neighbourhood = self.model.grid.get_neighborhood(
+            pos, moore=True, include_center=True, radius=2)
+        empty_cells = [c for c in neighbourhood if self.model.grid.is_cell_empty(c)]
+        if empty_cells:
+            place_pos = self.model.rng.choice(empty_cells)
+        else:
+            place_pos = pos  # MultiGrid allows stacking
+        self.model.grid.place_agent(firm, place_pos)
+        self.model.firms.append(firm)
+        self.model._id_cache[firm.unique_id] = firm
+        # Founder becomes first employee
+        firm.hire_worker(self)
 
     def _die(self):
         if self.employed and self.employer_id:
@@ -334,6 +438,12 @@ class FirmAgent(Agent):
     """
     Firms hire workers, produce goods, set wages, invest, and accumulate profit.
     Firms can naturally form cartels.
+
+    Changes from original:
+      - Firms downsize (fire workers) when unprofitable instead of bleeding to death
+      - Bankruptcy threshold raised (less fragile)
+      - Wage setting is more responsive to profitability
+      - Capital stock depreciates but can be reinvested
     """
 
     agent_type = AgentType.FIRM
@@ -344,7 +454,7 @@ class FirmAgent(Agent):
         self.wealth: float = capital if capital is not None else float(rng.lognormal(mean=5.5, sigma=1.5))
         self.capital_stock: float = self.wealth * 0.4
         self.workers: Dict[int, "WorkerAgent"] = {}
-        self.offered_wage: float = float(rng.uniform(3.0, 8.0))
+        self.offered_wage: float = float(rng.uniform(2.0, 5.0))
         self.profit: float = 0.0
         self.revenue: float = 0.0
         self.production_this_step: float = 0.0
@@ -358,6 +468,8 @@ class FirmAgent(Agent):
         # Pollution: how much pollution is emitted per unit of output
         self.pollution_factor: float = float(rng.uniform(0.05, 0.30))
         self.total_pollution_emitted: float = 0.0
+        # Track consecutive loss steps for downsizing decisions
+        self._consecutive_losses: int = 0
 
     def step(self):
         if self.defunct:
@@ -367,15 +479,21 @@ class FirmAgent(Agent):
         self.revenue = 0.0
 
         self._produce()
+        self._manage_workforce()
         self._set_wage()
         self._consider_cartel()
 
-        if self.wealth > 200 and self.model.rng.random() < 0.1:
-            invest = self.wealth * 0.05
+        # Capital depreciation (small fraction per step)
+        self.capital_stock *= 0.998
+
+        # Reinvest profits into capital
+        if self.profit > 0 and self.wealth > 50:
+            invest = min(self.wealth * 0.08, self.profit * 0.3)
             self.capital_stock += invest
             self.wealth -= invest
 
-        if self.wealth < -500:
+        # Bankruptcy: only if deeply insolvent AND no workers
+        if self.wealth < -200 and len(self.workers) == 0:
             self._go_bankrupt()
             return
 
@@ -398,6 +516,12 @@ class FirmAgent(Agent):
         self.wealth += self.profit
         self.total_profit_accumulated += max(self.profit, 0)
 
+        # Track losses for workforce management
+        if self.profit < 0:
+            self._consecutive_losses += 1
+        else:
+            self._consecutive_losses = 0
+
         # Emit pollution at this firm's cell (proportional to output)
         if self.pos is not None:
             fx, fy = int(self.pos[0]), int(self.pos[1])
@@ -408,15 +532,41 @@ class FirmAgent(Agent):
                 self.model.pollution_grid[fx, fy] + emission)
             self.total_pollution_emitted += emission
 
+    def _manage_workforce(self):
+        """Downsize if consistently unprofitable instead of bleeding to bankruptcy."""
+        if self._consecutive_losses >= 3 and len(self.workers) > 1:
+            # Fire the least skilled worker to cut costs
+            if self.workers:
+                worst_id = min(self.workers.keys(),
+                               key=lambda wid: self.workers[wid].skill)
+                self.fire_worker(worst_id)
+                self._consecutive_losses = 0  # Reset after action
+
+        # If no workers and wealth is positive, keep firm alive to rehire
+        # (do nothing, firm persists as an empty shell)
+
     def _set_wage(self):
+        """Set wage based on profitability and labor market conditions."""
         if self.cartel_id is not None:
-            self.offered_wage = max(2.0, self.offered_wage * 0.99)
-        else:
-            labour_scarcity = len(self.workers) / max(1, self.model.n_workers_initial * 0.5)
-            if labour_scarcity < 0.5:
-                self.offered_wage = min(20.0, self.offered_wage * 1.02)
+            # Cartels suppress wages
+            self.offered_wage = max(1.5, self.offered_wage * 0.99)
+        elif self.profit > 0:
+            # Profitable: can afford to raise wages to attract workers
+            n_workers = len(self.workers)
+            if n_workers < 3:
+                # Desperate for workers
+                self.offered_wage = min(15.0, self.offered_wage * 1.05)
             else:
-                self.offered_wage = max(1.5, self.offered_wage * 0.99)
+                # Stable, modest raises
+                self.offered_wage = min(15.0, self.offered_wage * 1.01)
+        else:
+            # Unprofitable: cut wages
+            self.offered_wage = max(1.0, self.offered_wage * 0.95)
+
+        # Wage should never exceed revenue per worker
+        n = max(len(self.workers), 1)
+        max_affordable = max(1.0, self.revenue / n * 0.8)
+        self.offered_wage = min(self.offered_wage, max_affordable)
 
     def _consider_cartel(self):
         if self.cartel_id is not None:

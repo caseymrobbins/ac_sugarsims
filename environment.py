@@ -1,19 +1,11 @@
 """
 environment.py — 80x80 grid economic world, Mesa 3.x.
 
-Grid arrays (W x H numpy float64):
-  food_grid, raw_grid, land_grid, water_grid, capital_grid, pollution_grid
-
-Planner-budget bonuses (set by planner.py each step):
-  _agriculture_bonus    → multiplied into regen rates
-  _infrastructure_level → multiplier on all production (TFP)
-  _healthcare_bonus     → reduces agent metabolism cost
-  _education_quality    → improves new-agent skill gain
-
-Pollution dynamics (each step):
-  1. regen_fn applies per-cell natural decay (POLLUTION_DECAY)
-  2. NumPy-roll diffusion spreads pollution to neighbours (POLLUTION_DIFFUSE)
-  3. planner cleanup_investment uniformly reduces pollution_grid
+Changes from original:
+  - NaN guard on agriculture_bonus before int() cast
+  - Immigration: periodic new worker spawning as population floor
+  - Initial network connections seeded for workers (breaks trade deadlock)
+  - Periodic firm spawning if firm count drops too low
 """
 
 from __future__ import annotations
@@ -30,6 +22,13 @@ from planner import PlannerAgent
 from hardware import (auto_configure, build_regen_fn, AccelConfig,
                       FOOD_CAP, WATER_CAP, RAW_CAP, LAND_CAP,
                       POLLUTION_CAP, POLLUTION_DIFFUSE)
+
+
+# Population management constants
+MIN_WORKERS = 150          # immigration kicks in below this
+IMMIGRATION_RATE = 0.02    # fraction of deficit filled per step
+MIN_FIRMS = 3              # firm spawning kicks in below this
+FIRM_SPAWN_PROB = 0.05     # probability per step when below min
 
 
 class EconomicModel(Model):
@@ -88,7 +87,7 @@ class EconomicModel(Model):
         # Lookup cache
         self._id_cache: Dict[int, object] = {}
 
-        # Economy and planner (planner needs objective before agent creation)
+        # Economy and planner
         self.economy = Economy(self)
         self.planner = PlannerAgent(model=self)
 
@@ -96,6 +95,9 @@ class EconomicModel(Model):
         self._create_workers(n_workers)
         self._create_firms(n_firms)
         self._create_landowners(n_landowners)
+
+        # Seed initial social network connections (fixes trade deadlock)
+        self._seed_network_connections()
 
         # Metrics history
         self.metrics_history: List[Dict] = []
@@ -164,6 +166,21 @@ class EconomicModel(Model):
                     a.controlled_cells.append(cell)
                     self.cell_ownership[cell] = a.unique_id
 
+    def _seed_network_connections(self):
+        """Give each worker 2-4 random initial trade connections."""
+        worker_ids = [w.unique_id for w in self.workers]
+        if len(worker_ids) < 5:
+            return
+        for w in self.workers:
+            n_connections = int(self.rng.integers(2, 5))
+            candidates = [wid for wid in worker_ids if wid != w.unique_id]
+            if len(candidates) < n_connections:
+                continue
+            chosen = self.rng.choice(candidates, size=n_connections, replace=False)
+            for cid in chosen:
+                if cid not in w.network_connections:
+                    w.network_connections.append(int(cid))
+
     # ── Mesa step ─────────────────────────────────────────────────────────────
 
     def step(self):
@@ -171,6 +188,9 @@ class EconomicModel(Model):
 
         # Resource regeneration — agriculture_bonus scales regen passes
         agri = self._agriculture_bonus
+        # NaN/negative guard: prevent int(NaN) crash and negative regen passes
+        if not np.isfinite(agri) or agri < 0:
+            agri = 1.0
         for _ in range(max(1, int(agri))):
             self._regen_fn(self.food_grid, self.raw_grid,
                            self.land_grid, self.water_grid,
@@ -205,20 +225,58 @@ class EconomicModel(Model):
         self._update_market_shares()
         self.economy.refresh_trade_network()
 
-        # Register any newly spawned workers
+        # Population management: immigration and firm spawning
+        self._manage_population()
+
+        # Register any newly spawned workers/firms
         for w in self.workers:
             if w.unique_id not in self._id_cache:
                 self._id_cache[w.unique_id] = w
+        for f in self.firms:
+            if f.unique_id not in self._id_cache:
+                self._id_cache[f.unique_id] = f
 
         # Collect metrics
         from metrics import collect_step_metrics
         self.metrics_history.append(collect_step_metrics(self))
 
+    # ── Population management ─────────────────────────────────────────────────
+
+    def _manage_population(self):
+        """Immigration and firm spawning to prevent total economic collapse."""
+        # Immigration: add workers if population drops too low
+        n_workers = len(self.workers)
+        if n_workers < MIN_WORKERS:
+            deficit = MIN_WORKERS - n_workers
+            n_immigrants = max(1, int(deficit * IMMIGRATION_RATE))
+            for _ in range(n_immigrants):
+                w = WorkerAgent(model=self)
+                pos = self._random_cell()
+                self.grid.place_agent(w, pos)
+                self.workers.append(w)
+                self._id_cache[w.unique_id] = w
+                # Give immigrant a few connections
+                if len(self.workers) > 3:
+                    candidates = [x.unique_id for x in self.workers
+                                  if x.unique_id != w.unique_id]
+                    n_conn = min(3, len(candidates))
+                    chosen = self.rng.choice(candidates, size=n_conn, replace=False)
+                    w.network_connections = [int(c) for c in chosen]
+
+        # Firm spawning: ensure minimum viable economy
+        active_firms = [f for f in self.firms if not f.defunct]
+        if len(active_firms) < MIN_FIRMS and self.rng.random() < FIRM_SPAWN_PROB:
+            f = FirmAgent(model=self)
+            pos = self._random_cell()
+            self.grid.place_agent(f, pos)
+            self.firms.append(f)
+            self._id_cache[f.unique_id] = f
+
     # ── Helpers ───────────────────────────────────────────────────────────────
 
     @property
     def infrastructure_bonus(self) -> float:
-        return self._infrastructure_level
+        return max(self._infrastructure_level, 0.1)  # Never let TFP go negative
 
     def _update_market_shares(self):
         total = sum(f.production_this_step for f in self.firms if not f.defunct)
