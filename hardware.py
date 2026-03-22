@@ -1,11 +1,14 @@
 """
 hardware.py — hardware detection and acceleration config.
 
-Regen function signature: regen_fn(food, raw_mat, land, water) → None (in-place)
+Regen function signature: regen_fn(food, raw_mat, land, water, pollution) → None (in-place)
 All arrays shape (W, H), dtype float64.
 
 Agriculture bonus (from planner budget) is applied in environment.step()
 by multiplying the regen rates before calling this function.
+
+Pollution spatial diffusion is handled in environment.step() using NumPy rolls
+(independent of backend) so the kernels here only apply the per-cell decay.
 """
 
 from __future__ import annotations
@@ -25,6 +28,12 @@ RAW_CAP,   RAW_RATE   = 25.0, 0.05
 LAND_CAP,  LAND_RATE  = 20.0, 0.01
 WATER_CAP, WATER_RATE = 40.0, 0.12
 NUDGE = 0.01
+
+# Pollution: cap and natural decay rate (per step).
+# Spatial diffusion is applied separately in environment.step().
+POLLUTION_CAP   = 50.0
+POLLUTION_DECAY = 0.02    # 2 % natural degradation per cell per step
+POLLUTION_DIFFUSE = 0.08  # fraction that spreads to 4 neighbours per step
 
 
 # ── Data classes ─────────────────────────────────────────────────────────────
@@ -206,7 +215,9 @@ def get_accel_config(hw: HardwareInfo) -> AccelConfig:
 
 
 # ── Regen function factory ────────────────────────────────────────────────────
-# Signature: regen_fn(food, raw_mat, land, water) -> None (all in-place)
+# Signature: regen_fn(food, raw_mat, land, water, pollution) -> None (all in-place)
+# Pollution diffusion is applied in environment.step() via NumPy rolls.
+# The kernel here only applies per-cell natural decay.
 
 def build_regen_fn(backend: str):
     """
@@ -220,20 +231,23 @@ def build_regen_fn(backend: str):
         import numpy as np
 
         @jax.jit
-        def _jax(f, r, l, w):
+        def _jax(f, r, l, w, p):
             f = jnp.clip(f + FOOD_RATE  * f * (1 - f/FOOD_CAP)  + NUDGE, 0, FOOD_CAP)
             r = jnp.clip(r + RAW_RATE   * r * (1 - r/RAW_CAP)   + NUDGE, 0, RAW_CAP)
             l = jnp.clip(l + LAND_RATE  * l * (1 - l/LAND_CAP)  + NUDGE, 0, LAND_CAP)
             w = jnp.clip(w + WATER_RATE * w * (1 - w/WATER_CAP) + NUDGE, 0, WATER_CAP)
-            return f, r, l, w
+            p = jnp.clip(p * (1 - POLLUTION_DECAY), 0, POLLUTION_CAP)
+            return f, r, l, w, p
 
-        def regen_jax(food, raw_mat, land, water):
-            jf, jr, jl, jw = _jax(jnp.asarray(food), jnp.asarray(raw_mat),
-                                   jnp.asarray(land),  jnp.asarray(water))
-            food[:]    = np.asarray(jf)
-            raw_mat[:] = np.asarray(jr)
-            land[:]    = np.asarray(jl)
-            water[:]   = np.asarray(jw)
+        def regen_jax(food, raw_mat, land, water, pollution):
+            jf, jr, jl, jw, jp = _jax(
+                jnp.asarray(food), jnp.asarray(raw_mat),
+                jnp.asarray(land), jnp.asarray(water), jnp.asarray(pollution))
+            food[:]      = np.asarray(jf)
+            raw_mat[:]   = np.asarray(jr)
+            land[:]      = np.asarray(jl)
+            water[:]     = np.asarray(jw)
+            pollution[:] = np.asarray(jp)
         return regen_jax
 
     # ── Numba CUDA ───────────────────────────────────────────────────────────
@@ -242,24 +256,27 @@ def build_regen_fn(backend: str):
         if cuda.is_available():
             try:
                 @cuda.jit
-                def _cuda_kernel(food, raw_mat, land, water):
+                def _cuda_kernel(food, raw_mat, land, water, pollution):
                     x, y = cuda.grid(2)
                     W, H = food.shape
                     if x < W and y < H:
-                        f = food[x,y]; food[x,y] = min(FOOD_CAP, f + FOOD_RATE*f*(1-f/FOOD_CAP) + NUDGE)
-                        r = raw_mat[x,y]; raw_mat[x,y] = min(RAW_CAP, r + RAW_RATE*r*(1-r/RAW_CAP) + NUDGE)
-                        l = land[x,y]; land[x,y] = min(LAND_CAP, l + LAND_RATE*l*(1-l/LAND_CAP) + NUDGE)
-                        w = water[x,y]; water[x,y] = min(WATER_CAP, w + WATER_RATE*w*(1-w/WATER_CAP) + NUDGE)
+                        f = food[x,y];      food[x,y]      = min(FOOD_CAP,      f + FOOD_RATE*f*(1-f/FOOD_CAP)            + NUDGE)
+                        r = raw_mat[x,y];   raw_mat[x,y]   = min(RAW_CAP,       r + RAW_RATE*r*(1-r/RAW_CAP)              + NUDGE)
+                        l = land[x,y];      land[x,y]      = min(LAND_CAP,      l + LAND_RATE*l*(1-l/LAND_CAP)            + NUDGE)
+                        w = water[x,y];     water[x,y]     = min(WATER_CAP,     w + WATER_RATE*w*(1-w/WATER_CAP)          + NUDGE)
+                        p = pollution[x,y]; pollution[x,y] = min(POLLUTION_CAP, max(0.0, p * (1 - POLLUTION_DECAY)))
 
-                def regen_cuda(food, raw_mat, land, water):
+                def regen_cuda(food, raw_mat, land, water, pollution):
                     W, H = food.shape
                     tpb = (16, 16)
                     bpg = ((W+15)//16, (H+15)//16)
-                    df = cuda.to_device(food); dr = cuda.to_device(raw_mat)
-                    dl = cuda.to_device(land); dw = cuda.to_device(water)
-                    _cuda_kernel[bpg, tpb](df, dr, dl, dw)
-                    df.copy_to_host(food); dr.copy_to_host(raw_mat)
-                    dl.copy_to_host(land); dw.copy_to_host(water)
+                    df = cuda.to_device(food);      dr = cuda.to_device(raw_mat)
+                    dl = cuda.to_device(land);      dw = cuda.to_device(water)
+                    dp = cuda.to_device(pollution)
+                    _cuda_kernel[bpg, tpb](df, dr, dl, dw, dp)
+                    df.copy_to_host(food);      dr.copy_to_host(raw_mat)
+                    dl.copy_to_host(land);      dw.copy_to_host(water)
+                    dp.copy_to_host(pollution)
                 return regen_cuda
             except Exception:
                 pass
@@ -270,17 +287,18 @@ def build_regen_fn(backend: str):
             from numba import njit, prange
 
             @njit(parallel=True, cache=True)
-            def _numba(food, raw_mat, land, water):
+            def _numba(food, raw_mat, land, water, pollution):
                 W, H = food.shape
                 for x in prange(W):
                     for y in range(H):
-                        f = food[x,y]; food[x,y] = min(FOOD_CAP, f + FOOD_RATE*f*(1-f/FOOD_CAP) + NUDGE)
-                        r = raw_mat[x,y]; raw_mat[x,y] = min(RAW_CAP, r + RAW_RATE*r*(1-r/RAW_CAP) + NUDGE)
-                        l = land[x,y]; land[x,y] = min(LAND_CAP, l + LAND_RATE*l*(1-l/LAND_CAP) + NUDGE)
-                        w = water[x,y]; water[x,y] = min(WATER_CAP, w + WATER_RATE*w*(1-w/WATER_CAP) + NUDGE)
+                        f = food[x,y];      food[x,y]      = min(FOOD_CAP,      f + FOOD_RATE*f*(1-f/FOOD_CAP)            + NUDGE)
+                        r = raw_mat[x,y];   raw_mat[x,y]   = min(RAW_CAP,       r + RAW_RATE*r*(1-r/RAW_CAP)              + NUDGE)
+                        l = land[x,y];      land[x,y]      = min(LAND_CAP,      l + LAND_RATE*l*(1-l/LAND_CAP)            + NUDGE)
+                        w = water[x,y];     water[x,y]     = min(WATER_CAP,     w + WATER_RATE*w*(1-w/WATER_CAP)          + NUDGE)
+                        p = pollution[x,y]; pollution[x,y] = min(POLLUTION_CAP, max(0.0, p * (1 - POLLUTION_DECAY)))
 
-            def regen_numba(food, raw_mat, land, water):
-                _numba(food, raw_mat, land, water)
+            def regen_numba(food, raw_mat, land, water, pollution):
+                _numba(food, raw_mat, land, water, pollution)
             return regen_numba
         except Exception:
             pass
@@ -288,11 +306,12 @@ def build_regen_fn(backend: str):
     # ── NumPy fallback ───────────────────────────────────────────────────────
     import numpy as np
 
-    def regen_numpy(food, raw_mat, land, water):
-        np.clip(food    + FOOD_RATE  * food    * (1 - food    / FOOD_CAP)  + NUDGE, 0, FOOD_CAP,  out=food)
-        np.clip(raw_mat + RAW_RATE   * raw_mat * (1 - raw_mat / RAW_CAP)   + NUDGE, 0, RAW_CAP,   out=raw_mat)
-        np.clip(land    + LAND_RATE  * land    * (1 - land    / LAND_CAP)  + NUDGE, 0, LAND_CAP,  out=land)
-        np.clip(water   + WATER_RATE * water   * (1 - water   / WATER_CAP) + NUDGE, 0, WATER_CAP, out=water)
+    def regen_numpy(food, raw_mat, land, water, pollution):
+        np.clip(food    + FOOD_RATE  * food    * (1 - food    / FOOD_CAP)  + NUDGE, 0, FOOD_CAP,      out=food)
+        np.clip(raw_mat + RAW_RATE   * raw_mat * (1 - raw_mat / RAW_CAP)   + NUDGE, 0, RAW_CAP,       out=raw_mat)
+        np.clip(land    + LAND_RATE  * land    * (1 - land    / LAND_CAP)  + NUDGE, 0, LAND_CAP,      out=land)
+        np.clip(water   + WATER_RATE * water   * (1 - water   / WATER_CAP) + NUDGE, 0, WATER_CAP,     out=water)
+        np.clip(pollution * (1 - POLLUTION_DECAY),                                  0, POLLUTION_CAP,  out=pollution)
     return regen_numpy
 
 

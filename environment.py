@@ -2,13 +2,18 @@
 environment.py — 80x80 grid economic world, Mesa 3.x.
 
 Grid arrays (W x H numpy float64):
-  food_grid, raw_grid, land_grid, water_grid, capital_grid
+  food_grid, raw_grid, land_grid, water_grid, capital_grid, pollution_grid
 
 Planner-budget bonuses (set by planner.py each step):
-  _agriculture_bonus   → multiplied into regen rates
+  _agriculture_bonus    → multiplied into regen rates
   _infrastructure_level → multiplier on all production (TFP)
-  _healthcare_bonus    → reduces agent metabolism cost
-  _education_quality   → improves new-agent skill gain
+  _healthcare_bonus     → reduces agent metabolism cost
+  _education_quality    → improves new-agent skill gain
+
+Pollution dynamics (each step):
+  1. regen_fn applies per-cell natural decay (POLLUTION_DECAY)
+  2. NumPy-roll diffusion spreads pollution to neighbours (POLLUTION_DIFFUSE)
+  3. planner cleanup_investment uniformly reduces pollution_grid
 """
 
 from __future__ import annotations
@@ -22,7 +27,9 @@ from mesa.space import MultiGrid
 from agents import WorkerAgent, FirmAgent, LandownerAgent
 from economy import Economy
 from planner import PlannerAgent
-from hardware import auto_configure, build_regen_fn, AccelConfig, FOOD_CAP, WATER_CAP, RAW_CAP, LAND_CAP
+from hardware import (auto_configure, build_regen_fn, AccelConfig,
+                      FOOD_CAP, WATER_CAP, RAW_CAP, LAND_CAP,
+                      POLLUTION_CAP, POLLUTION_DIFFUSE)
 
 
 class EconomicModel(Model):
@@ -63,6 +70,7 @@ class EconomicModel(Model):
          self.raw_grid,
          self.land_grid,
          self.water_grid,
+         self.pollution_grid,
          self.capital_grid) = self._init_resource_arrays()
 
         # Cell ownership: (x,y) -> landowner unique_id
@@ -96,12 +104,13 @@ class EconomicModel(Model):
 
     def _init_resource_arrays(self):
         W, H = self.grid_width, self.grid_height
-        food    = self._gaussian_clusters(W, H, 12, FOOD_CAP,  sigma=10.0)
-        raw_mat = self._gaussian_clusters(W, H, 10, RAW_CAP,   sigma=9.0)
-        land    = self._gaussian_clusters(W, H,  8, LAND_CAP,  sigma=12.0)
-        water   = self._gaussian_clusters(W, H, 15, WATER_CAP, sigma=8.0)
-        capital = np.zeros((W, H), dtype=np.float64)
-        return food, raw_mat, land, water, capital
+        food      = self._gaussian_clusters(W, H, 12, FOOD_CAP,  sigma=10.0)
+        raw_mat   = self._gaussian_clusters(W, H, 10, RAW_CAP,   sigma=9.0)
+        land      = self._gaussian_clusters(W, H,  8, LAND_CAP,  sigma=12.0)
+        water     = self._gaussian_clusters(W, H, 15, WATER_CAP, sigma=8.0)
+        pollution = np.zeros((W, H), dtype=np.float64)   # starts clean
+        capital   = np.zeros((W, H), dtype=np.float64)
+        return food, raw_mat, land, water, pollution, capital
 
     def _gaussian_clusters(self, W, H, n_clusters, peak, sigma=10.0):
         grid = np.zeros((W, H), dtype=np.float64)
@@ -160,17 +169,22 @@ class EconomicModel(Model):
     def step(self):
         self.current_step += 1
 
-        # Resource regeneration — agriculture_bonus scales food and water rates
+        # Resource regeneration — agriculture_bonus scales regen passes
         agri = self._agriculture_bonus
-        if agri != 1.0:
-            # Temporarily scale caps to simulate higher regen
-            # Simpler: run regen twice if bonus ≥ 2, else run once with boosted nudge
-            for _ in range(max(1, int(agri))):
-                self._regen_fn(self.food_grid, self.raw_grid,
-                               self.land_grid, self.water_grid)
-        else:
+        for _ in range(max(1, int(agri))):
             self._regen_fn(self.food_grid, self.raw_grid,
-                           self.land_grid, self.water_grid)
+                           self.land_grid, self.water_grid,
+                           self.pollution_grid)
+
+        # Pollution spatial diffusion: spread fraction to 4 neighbours
+        neighbours = (
+            np.roll(self.pollution_grid,  1, axis=0) +
+            np.roll(self.pollution_grid, -1, axis=0) +
+            np.roll(self.pollution_grid,  1, axis=1) +
+            np.roll(self.pollution_grid, -1, axis=1)
+        ) / 4.0
+        self.pollution_grid += POLLUTION_DIFFUSE * (neighbours - self.pollution_grid)
+        np.clip(self.pollution_grid, 0, POLLUTION_CAP, out=self.pollution_grid)
 
         # Planner first (sets bonuses, runs elections, redistributes)
         self.planner.step()
@@ -240,9 +254,10 @@ class EconomicModel(Model):
 
     def resource_snapshot(self, resource: str) -> np.ndarray:
         return {
-            "food":  self.food_grid,
-            "water": self.water_grid,
+            "food":        self.food_grid,
+            "water":       self.water_grid,
             "raw_materials": self.raw_grid,
-            "land":  self.land_grid,
-            "capital": self.capital_grid,
+            "land":        self.land_grid,
+            "capital":     self.capital_grid,
+            "pollution":   self.pollution_grid,
         }.get(resource, self.food_grid).copy()

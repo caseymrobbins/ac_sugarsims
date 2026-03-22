@@ -101,8 +101,12 @@ class WorkerAgent(Agent):
         self.income_last_step = 0.0
         self.harvested_this_step = 0.0
 
-        # Pay metabolism cost (reduced by healthcare investment)
-        effective_metabolism = self.metabolism * max(0.0, 1.0 - self.model._healthcare_bonus)
+        # Pay metabolism cost (reduced by healthcare, increased by local pollution)
+        local_pollution = 0.0
+        if self.pos is not None:
+            local_pollution = float(self.model.pollution_grid[int(self.pos[0]), int(self.pos[1])])
+        effective_metabolism = (self.metabolism * max(0.0, 1.0 - self.model._healthcare_bonus)
+                                + local_pollution * 0.05)
         self.wealth -= effective_metabolism
         if self.wealth <= SURVIVAL_THRESHOLD:
             self._die()
@@ -147,9 +151,10 @@ class WorkerAgent(Agent):
         # Pay rent for occupied cell
         self._pay_rent()
 
-        # Possibly reproduce
+        # Possibly reproduce (pollution reduces reproductive probability)
         if self.wealth >= REPRODUCTION_THRESHOLD:
-            if self.model.rng.random() < 0.005:
+            repro_prob = 0.005 * max(0.1, 1.0 - local_pollution * 0.02)
+            if self.model.rng.random() < repro_prob:
                 self._reproduce()
 
         # Possibly borrow
@@ -183,14 +188,17 @@ class WorkerAgent(Agent):
         if pos is None:
             return
         x, y = pos
-        food_val  = float(self.model.food_grid[x, y])
-        raw_val   = float(self.model.raw_grid[x, y])
-        water_val = float(self.model.water_grid[x, y])
-        # Infrastructure TFP and water availability both boost harvest capacity
+        food_val      = float(self.model.food_grid[x, y])
+        raw_val       = float(self.model.raw_grid[x, y])
+        water_val     = float(self.model.water_grid[x, y])
+        pollution_val = float(self.model.pollution_grid[x, y])
+        # Infrastructure TFP and water availability boost harvest; pollution degrades it
         tfp = self.model.infrastructure_bonus
-        water_bonus = 1.0 + 0.1 * min(water_val / max(self.model.water_grid.max(), 1.0), 1.0)
+        water_bonus      = 1.0 + 0.1 * min(water_val / max(self.model.water_grid.max(), 1.0), 1.0)
+        pollution_penalty = max(0.5, 1.0 - pollution_val * 0.01)   # up to -50% at cap
         amount = min(food_val + raw_val * 0.5,
-                     self.skill * 5.0 * tfp * water_bonus * (1 + self.model.rng.exponential(0.1)))
+                     self.skill * 5.0 * tfp * water_bonus * pollution_penalty
+                     * (1 + self.model.rng.exponential(0.1)))
         amount = max(0, amount)
         take_food = min(food_val, amount * 0.7)
         take_raw  = min(raw_val,  amount * 0.3)
@@ -347,6 +355,9 @@ class FirmAgent(Agent):
         self.market_share: float = 0.0
         self.total_wages_paid: float = 0.0
         self.total_profit_accumulated: float = 0.0
+        # Pollution: how much pollution is emitted per unit of output
+        self.pollution_factor: float = float(rng.uniform(0.05, 0.30))
+        self.total_pollution_emitted: float = 0.0
 
     def step(self):
         if self.defunct:
@@ -387,6 +398,16 @@ class FirmAgent(Agent):
         self.wealth += self.profit
         self.total_profit_accumulated += max(self.profit, 0)
 
+        # Emit pollution at this firm's cell (proportional to output)
+        if self.pos is not None:
+            fx, fy = int(self.pos[0]), int(self.pos[1])
+            emission = output * self.pollution_factor
+            from hardware import POLLUTION_CAP
+            self.model.pollution_grid[fx, fy] = min(
+                POLLUTION_CAP,
+                self.model.pollution_grid[fx, fy] + emission)
+            self.total_pollution_emitted += emission
+
     def _set_wage(self):
         if self.cartel_id is not None:
             self.offered_wage = max(2.0, self.offered_wage * 0.99)
@@ -422,6 +443,9 @@ class FirmAgent(Agent):
             self.cartel_partners = [candidate.unique_id]
             candidate.cartel_partners = [self.unique_id]
             self.model.active_cartels[cartel_id] = {self.unique_id, candidate.unique_id}
+            # Cartel coordination reduces regulatory compliance: both firms pollute more
+            self.pollution_factor = min(0.60, self.pollution_factor * 1.4)
+            candidate.pollution_factor = min(0.60, candidate.pollution_factor * 1.4)
 
     def hire_worker(self, worker: "WorkerAgent"):
         if worker.unique_id not in self.workers:

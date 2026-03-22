@@ -66,6 +66,9 @@ class PlannerAgent(Agent):
             "infrastructure_investment": 0.5,   # → _infrastructure_level
             "healthcare_investment": 0.0,       # → _healthcare_bonus
             "education_investment": 0.0,        # → _education_quality
+            # Pollution regulation
+            "pollution_tax": 0.0,               # per unit of output × pollution_factor
+            "cleanup_investment": 0.0,          # budget per step → reduces pollution_grid
         }
 
         # Revenue pool for redistribution
@@ -121,6 +124,11 @@ class PlannerAgent(Agent):
             rate = self.policy["tax_rate_firm"]
             taxable = max(0, agent.profit)
             tax = taxable * rate
+            # Pollution tax: charged per unit of output × pollution intensity
+            pollution_charge = (agent.production_this_step
+                                * agent.pollution_factor
+                                * self.policy["pollution_tax"])
+            tax += pollution_charge
             # Enforce minimum wage on firm's offer
             if agent.offered_wage < self.policy["min_wage"]:
                 agent.offered_wage = self.policy["min_wage"]
@@ -168,6 +176,16 @@ class PlannerAgent(Agent):
         self.model._infrastructure_level = 1.0 + 0.2  * infra * ratio
         self.model._healthcare_bonus     =       0.10 * hlth  * ratio   # up to 30 % metabolism reduction
         self.model._education_quality    = 1.0 + 0.3  * edu   * ratio
+
+        # Pollution cleanup: reduce entire pollution_grid proportionally to investment
+        cleanup = self.policy["cleanup_investment"]
+        if cleanup > 0 and self.tax_revenue > 0:
+            cleanup_cost = cleanup * 2.0
+            if self.tax_revenue >= cleanup_cost:
+                self.tax_revenue -= cleanup_cost
+                cleanup_rate = min(0.10, cleanup * 0.02)   # up to 10 % reduction at max
+                import numpy as np
+                self.model.pollution_grid *= max(0.0, 1.0 - cleanup_rate)
 
     def _redistribute(self):
         """Distribute UBI and targeted transfers."""
@@ -274,6 +292,8 @@ class PlannerAgent(Agent):
             "infrastructure_investment": (0.0, 5.0),
             "healthcare_investment": (0.0, 3.0),
             "education_investment": (0.0, 3.0),
+            "pollution_tax": (0.0, 2.0),
+            "cleanup_investment": (0.0, 5.0),
         }
         lo, hi = limits.get(key, (0.0, 1.0))
         return float(np.clip(val, lo, hi))
