@@ -304,6 +304,11 @@ def episode_summary(metrics_history: List[Dict]) -> Dict[str, Any]:
             if key in m:
                 return m[key]
         return float("nan")
+   
+    def max_val(key):
+    vals = [m[key] for m in metrics_history if key in m 
+            and not (isinstance(m[key], float) and math.isnan(m[key]))]
+    return float(np.max(vals)) if vals else float("nan")
 
     summary = {}
     scalar_keys = [
@@ -337,10 +342,26 @@ def episode_summary(metrics_history: List[Dict]) -> Dict[str, Any]:
     summary["frac_cartel"] = float(np.mean([m.get("cartel_detected", False) for m in metrics_history]))
     summary["frac_poverty_trap"] = float(np.mean([m.get("poverty_trap_detected", False) for m in metrics_history]))
 
-    # Terminal values
+    #Terminal values
     summary["terminal_n_workers"] = last("n_workers")
     summary["terminal_all_gini"] = last("all_gini")
     summary["terminal_worker_min"] = last("worker_min")
     summary["terminal_agency_floor"] = last("agency_floor")
+
+    # Information layer metrics (if present)
+    info_keys = [
+        "mean_authority_trust", "min_authority_trust",
+        "weight_polarization", "info_r0",
+        "n_news_firms", "n_captured_news",
+        "epistemic_health", "trust_gini", "pct_low_trust",
+    ]
+    for key in info_keys:
+        summary[key] = avg(key)
+    summary["terminal_epistemic_health"] = last("epistemic_health")
+    summary["terminal_authority_trust"] = last("mean_authority_trust")
+    summary["terminal_polarization"] = last("weight_polarization")
+    summary["terminal_info_r0"] = last("info_r0")
+    summary["max_info_r0"] = max_val("info_r0")
+    summary["max_captured_news"] = max_val("n_captured_news")
 
     return summary

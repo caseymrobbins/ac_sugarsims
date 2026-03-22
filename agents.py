@@ -406,8 +406,26 @@ class WorkerAgent(Agent):
         if self.wealth < REPRODUCTION_THRESHOLD:
             return
         self.wealth -= REPRODUCTION_COST
-        # Education quality gives a small intergenerational skill boost
-        edu_boost = (self.model._education_quality - 1.0) * 0.05
+
+        # Tiered education: elite vs public
+        # Elite education: workers employed by wealthy firms or renting from
+        # landowners get a private education bonus regardless of public funding.
+        # Public education: everyone else gets the planner's education quality.
+        is_elite = False
+        if self.employed and self.employer_id is not None:
+            firm = self.model.get_agent_by_id(self.employer_id)
+            if firm and hasattr(firm, 'wealth') and firm.wealth > 500:
+                is_elite = True
+        if not is_elite and self.wealth > 300:
+            is_elite = True  # wealthy enough for private education
+
+        if is_elite:
+            # Private education: high quality, independent of public investment
+            edu_boost = 0.08  # fixed high bonus
+        else:
+            # Public education: depends on planner investment
+            edu_boost = (self.model._education_quality - 1.0) * 0.05
+
         child_skill = float(np.clip(
             self.skill + edu_boost + self.model.rng.normal(0, 0.05), 0.05, 1.0))
         child = WorkerAgent(
@@ -555,13 +573,15 @@ class FirmAgent(Agent):
         self._manage_workforce()
         self._set_wage()
         self._consider_cartel()
+        self._consider_acquisition()
 
         # Capital depreciation (small fraction per step)
         self.capital_stock *= 0.998
 
-        # Reinvest profits into capital
+        # Reinvest profits: larger firms reinvest more aggressively
         if self.profit > 0 and self.wealth > 50:
-            invest = min(self.wealth * 0.08, self.profit * 0.3)
+            reinvest_rate = 0.08 + 0.02 * min(self.market_share * 10, 1.0)
+            invest = min(self.wealth * reinvest_rate, self.profit * 0.4)
             self.capital_stock += invest
             self.wealth -= invest
 
@@ -577,7 +597,9 @@ class FirmAgent(Agent):
         if n_workers == 0:
             return
         alpha = 0.35
-        A = 3.0 * self.model.infrastructure_bonus  # TFP: higher base for viable wages
+        # Economies of scale: larger firms get a productivity bonus
+        scale_bonus = 1.0 + 0.1 * np.log1p(n_workers)  # ~1.0 at 1, ~1.3 at 20
+        A = 3.0 * self.model.infrastructure_bonus * scale_bonus
         K = max(self.capital_stock, 1.0)
         L = max(sum(w.skill for w in self.workers.values()), 0.01)
         output = A * (K ** alpha) * (L ** (1 - alpha))
@@ -704,13 +726,58 @@ class FirmAgent(Agent):
         # Pollution factor slowly recovers when leaving cartel
         self.pollution_factor = max(0.05, self.pollution_factor * 0.85)
 
+    def _consider_acquisition(self):
+        """Large firms attempt to acquire smaller nearby competitors (M&A)."""
+        if self.wealth < 500 or self.market_share < 0.05:
+            return
+        if self.model.rng.random() > 0.01:
+            return
+        if self.pos is None:
+            return
+
+        pos_t = (int(self.pos[0]), int(self.pos[1]))
+        neighbours = self.model.grid.get_neighborhood(
+            pos_t, moore=True, include_center=False, radius=15)
+        nearby_firms = [
+            a for cell in neighbours
+            for a in self.model.grid.get_cell_list_contents([cell])
+            if isinstance(a, FirmAgent) and a.unique_id != self.unique_id
+            and not a.defunct and a.wealth < self.wealth * 0.5
+        ]
+        if not nearby_firms:
+            return
+
+        target = min(nearby_firms, key=lambda f: f.wealth)
+        acquisition_cost = max(target.wealth * 0.5, 50)
+
+        if self.wealth < acquisition_cost:
+            return
+
+        # Execute acquisition
+        self.wealth -= acquisition_cost
+        self.capital_stock += target.capital_stock
+
+        # Absorb target's workers
+        for wid, worker in list(target.workers.items()):
+            target.fire_worker(wid)
+            self.hire_worker(worker)
+
+        # Absorb cartel position
+        if target.cartel_id is not None and self.cartel_id is None:
+            self.cartel_id = target.cartel_id
+            if target.cartel_id in self.model.active_cartels:
+                self.model.active_cartels[target.cartel_id].discard(target.unique_id)
+                self.model.active_cartels[target.cartel_id].add(self.unique_id)
+
+        target._go_bankrupt()
+
     def hire_worker(self, worker: "WorkerAgent"):
         """Hire worker only if the marginal product justifies the wage."""
         if worker.unique_id in self.workers:
             return
         # Check marginal product: would adding this worker produce enough?
         n_current = len(self.workers)
-        max_workers = max(5, int(self.capital_stock ** 0.5))  # capacity scales with capital
+        max_workers = max(5, int(self.capital_stock ** 0.6))  # steeper scaling with capital
         if n_current >= max_workers:
             return  # at capacity
         # Estimate marginal product (Cobb-Douglas derivative w.r.t. L)

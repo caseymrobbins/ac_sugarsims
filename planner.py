@@ -395,7 +395,12 @@ class PlannerAgent(Agent):
     def _observe_state(self) -> np.ndarray:
         """
         Compress the economy into a fixed-size state vector.
-        All values are raw (normalization happens in LinearPolicy).
+
+        ELITE DISTORTION: The planner doesn't see ground truth directly.
+        Its observation is a weighted blend of actual state and elite-reported
+        state. The blend weight depends on wealth concentration (HHI).
+        More concentrated wealth = more distortion = planner makes worse
+        decisions for floor agents because it can't see them accurately.
         """
         workers = self.model.workers
         firms = [f for f in self.model.firms if not f.defunct]
@@ -412,22 +417,53 @@ class PlannerAgent(Agent):
         total_debt = sum(w.debt for w in workers)
         total_production = sum(f.production_this_step for f in firms)
 
-        # Use max(..., 0) before log1p to prevent NaN from negative wealth.
-        # Workers can have negative wealth (metabolism cost exceeds balance),
-        # and log1p(x) is NaN for x < -1.
+        # Compute elite distortion factor based on wealth concentration
+        # HHI of firm market shares: higher = more concentrated = more distortion
+        if firms:
+            shares = np.array([f.market_share for f in firms])
+            hhi = float(np.sum(shares ** 2))
+        else:
+            hhi = 0.0
+
+        # Also factor in landowner concentration
+        if self.model.landowners:
+            lo_wealth = np.array([lo.wealth for lo in self.model.landowners])
+            lo_total = lo_wealth.sum()
+            if lo_total > 0:
+                lo_shares = lo_wealth / lo_total
+                hhi = max(hhi, float(np.sum(lo_shares ** 2)))
+
+        # Distortion: 0 = perfect information, 1 = fully elite-captured
+        # Scales with HHI: at HHI=0.05 (competitive) distortion is ~5%
+        # At HHI=0.5 (near-monopoly) distortion is ~40%
+        elite_distortion = min(0.5, hhi * 0.8)
+
+        # Elite-reported state: systematically optimistic
+        # Elites report higher wages, lower unemployment, lower pollution
+        true_mean_wealth = max(worker_w.mean(), 0.0)
+        true_min_wealth = max(worker_w.min(), 0.0)
+        true_unemployment = 1.0 - n_employed / max(n_workers, 1)
+        true_pollution = float(np.mean(self.model.pollution_grid))
+
+        # Blend: reported = true * (1 - distortion) + optimistic * distortion
+        reported_mean_wealth = true_mean_wealth * (1 + elite_distortion * 0.5)
+        reported_min_wealth = true_min_wealth * (1 + elite_distortion * 2.0)
+        reported_unemployment = true_unemployment * (1 - elite_distortion * 0.6)
+        reported_pollution = true_pollution * (1 - elite_distortion * 0.5)
+
         state = np.array([
-            np.log1p(max(worker_w.mean(), 0.0)),      # 0: log mean wealth
-            np.log1p(max(worker_w.min(), 0.0)),        # 1: log min wealth (clamped)
-            float(_gini_fast(worker_w)),               # 2: Gini coefficient
-            np.log1p(max(agencies.min(), 0.0)),        # 3: log agency floor
-            float(np.nanmean(agencies)),               # 4: mean agency
-            1.0 - n_employed / max(n_workers, 1),      # 5: unemployment rate
-            np.log1p(max(total_debt, 0.0)),            # 6: log total debt
-            np.log1p(max(total_production, 0.0)),      # 7: log production
-            np.log1p(max(self.tax_revenue, 0.0)),      # 8: log tax revenue
-            float(np.mean(self.model.pollution_grid)),  # 9: mean pollution
-            float(len(firms)) / 20.0,                  # 10: normalized firm count
-            float(self.model.current_step) / 300.0,    # 11: time fraction
+            np.log1p(reported_mean_wealth),               # 0: distorted mean wealth
+            np.log1p(reported_min_wealth),                 # 1: distorted min wealth
+            float(_gini_fast(worker_w)),                   # 2: Gini (hard to fake)
+            np.log1p(max(agencies.min(), 0.0)),            # 3: log agency floor
+            float(np.nanmean(agencies)),                   # 4: mean agency
+            reported_unemployment,                          # 5: distorted unemployment
+            np.log1p(max(total_debt, 0.0)),                # 6: log total debt
+            np.log1p(max(total_production, 0.0)),          # 7: log production
+            np.log1p(max(self.tax_revenue, 0.0)),          # 8: log tax revenue
+            reported_pollution,                             # 9: distorted pollution
+            float(len(firms)) / 20.0,                      # 10: normalized firm count
+            float(self.model.current_step) / 300.0,        # 11: time fraction
         ], dtype=np.float64)
 
         # Final safety: replace any residual NaN/inf with 0
