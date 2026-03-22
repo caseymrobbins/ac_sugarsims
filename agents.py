@@ -40,6 +40,7 @@ class AgentType(Enum):
     FIRM = auto()
     LANDOWNER = auto()
     PLANNER = auto()
+    MEDIA = auto()
 
 
 SURVIVAL_THRESHOLD = 1.0       # agents with wealth <= this die
@@ -91,6 +92,13 @@ class WorkerAgent(Agent):
 
         # Social network (seeded with a few random connections at init)
         self.network_connections: List[int] = []
+
+        # Decision matrix intelligence
+        from information import init_decision_weights
+        self.decision_weights: Dict[str, float] = init_decision_weights(rng)
+        self.authority_trust: float = float(rng.uniform(0.5, 0.9))  # trust in institutional signals
+        self._last_action: str = "harvest"
+        self._last_action_outcome: float = 0.0
 
         # Tracking
         self.age: int = 0
@@ -193,23 +201,73 @@ class WorkerAgent(Agent):
         return (int(self.pos[0]), int(self.pos[1]))
 
     def _choose_action(self) -> str:
+        """Decision matrix: score actions using weights × situational context."""
+        from information import choose_action_from_weights, compute_action_context, update_weights_from_experience
+
+        # Learn from last step's outcome before choosing new action
+        if self._last_action:
+            # Outcome = income change (positive = good decision)
+            outcome = self.income_last_step - self.income_prev_step
+            update_weights_from_experience(
+                self.decision_weights, self._last_action, outcome)
+
+        # Update unemployment tracking
         if not self.employed:
             self.consecutive_unemployed_steps += 1
-            # Check if there are any firms to work for
-            if any(not f.defunct for f in self.model.firms):
-                if self.model.rng.random() < 0.6:
-                    return "seek_work"
         else:
             self.consecutive_unemployed_steps = 0
 
-        if self.wealth < 30.0:
-            return "harvest"
+        # Compute context and choose
+        context = compute_action_context(self, self.model)
+        action = choose_action_from_weights(
+            self.decision_weights, context, self.model.rng)
 
-        # Trade: allow even without existing connections (meet-and-trade)
-        if self.model.rng.random() < 0.25:
-            return "trade"
+        # Map non-standard actions to available methods
+        if action == "save":
+            action = "harvest"  # save = don't spend, just harvest minimally
+        elif action == "invest" and self.wealth >= 50:
+            action = "harvest"  # invest through capital accumulation
+        elif action == "found_firm":
+            if (self.wealth >= ENTREPRENEURSHIP_THRESHOLD
+                    and not self.employed):
+                self._last_action = action
+                return action  # handled in step() already
+            action = "harvest"
 
-        return "harvest"
+        self._last_action = action
+        return action
+
+    def receive_information(self, signal):
+        """
+        Receive an information signal and blend it into decision weights.
+        Trust-weighted: high authority_trust = accept more of the signal.
+        """
+        from information import NEWS_ABSORPTION_RATE, ACTIONS
+
+        effective_trust = self.authority_trust * signal.trust
+        if effective_trust < 0.01:
+            return  # below perception threshold
+
+        for action in ACTIONS:
+            delta = signal.weight_deltas.get(action, 0.0)
+            current = self.decision_weights.get(action, 0.5)
+            adjustment = NEWS_ABSORPTION_RATE * effective_trust * delta
+            self.decision_weights[action] = float(
+                np.clip(current + adjustment, 0.01, 0.99))
+
+        # Update authority trust based on whether signal matches experience
+        # If signal says "seek_work" but agent just failed to find work,
+        # trust decreases. Simplified: compare signal direction to last outcome.
+        signal_avg = np.mean(list(signal.weight_deltas.values()))
+        experience_direction = np.sign(self._last_action_outcome)
+        signal_direction = np.sign(signal_avg)
+        if experience_direction != 0 and signal_direction != 0:
+            if experience_direction == signal_direction:
+                self.authority_trust = min(0.95, self.authority_trust + 0.005)
+            else:
+                self.authority_trust = max(0.05, self.authority_trust - 0.01)
+
+        self._last_action_outcome = self.income_last_step - self.income_prev_step
 
     def _harvest(self):
         pos = self._tpos()
@@ -371,6 +429,12 @@ class WorkerAgent(Agent):
             self.model.grid.place_agent(child, place_pos)
             self.model.workers.append(child)
             self.model._id_cache[child.unique_id] = child
+            # Cultural transmission: child inherits parent's decision weights with noise
+            for action, w in self.decision_weights.items():
+                child.decision_weights[action] = float(np.clip(
+                    w + self.model.rng.normal(0, 0.05), 0.01, 0.99))
+            child.authority_trust = float(np.clip(
+                self.authority_trust + self.model.rng.normal(0, 0.05), 0.05, 0.95))
 
     def _found_firm(self):
         """Wealthy unemployed worker founds a new firm."""
@@ -416,7 +480,7 @@ class WorkerAgent(Agent):
     # ------------------------------------------------------------------
 
     def compute_agency(self) -> float:
-        """Agency proxy = geometric mean(resources, options, levers, impact)."""
+        """Agency proxy = geometric mean(resources, options, levers, impact) * EH filter."""
         resources = max(self.wealth, 1e-9)
         if self.pos is not None:
             p = (int(self.pos[0]), int(self.pos[1]))
@@ -429,8 +493,14 @@ class WorkerAgent(Agent):
         levers = 1.0 + float(self.employed) + float(self.debt < 100) + float(len(self.network_connections) > 0)
         delta_income = abs(self.income_last_step - self.income_prev_step) + 1e-9
         impact = max(delta_income, 1e-9)
-        agency = (resources * options * levers * impact) ** 0.25
-        return float(agency)
+
+        raw_agency = (resources * options * levers * impact) ** 0.25
+
+        # Epistemic health filter: agents with degraded information
+        # environment have reduced effective agency
+        eh_filter = 0.5 + 0.5 * self.authority_trust  # ranges 0.525 to 0.975
+
+        return float(raw_agency * eh_filter)
 
 
 # ---------------------------------------------------------------------------

@@ -19,6 +19,7 @@ from mesa.space import MultiGrid
 from agents import WorkerAgent, FirmAgent, LandownerAgent
 from economy import Economy
 from planner import PlannerAgent
+from information import NewsFirm, propagate_peer_information, compute_information_metrics
 from hardware import (auto_configure, build_regen_fn, AccelConfig,
                       FOOD_CAP, WATER_CAP, RAW_CAP, LAND_CAP,
                       POLLUTION_CAP, POLLUTION_DIFFUSE)
@@ -79,6 +80,7 @@ class EconomicModel(Model):
         self.workers:    List[WorkerAgent]    = []
         self.firms:      List[FirmAgent]      = []
         self.landowners: List[LandownerAgent] = []
+        self.news_firms: List[NewsFirm]       = []
 
         # Cartel tracking
         self._cartel_counter = 0
@@ -95,6 +97,7 @@ class EconomicModel(Model):
         self._create_workers(n_workers)
         self._create_firms(n_firms)
         self._create_landowners(n_landowners)
+        self._create_news_firms(3)  # start with 3 news firms
 
         # Seed initial social network connections (fixes trade deadlock)
         self._seed_network_connections()
@@ -181,6 +184,17 @@ class EconomicModel(Model):
                 if cid not in w.network_connections:
                     w.network_connections.append(int(cid))
 
+    def _create_news_firms(self, n):
+        """Create initial news firms with varying accuracy and capital."""
+        for i in range(n):
+            accuracy = float(self.rng.uniform(0.3, 0.9))
+            capital = float(self.rng.lognormal(mean=4.5, sigma=1.0))
+            nf = NewsFirm(model=self, capital=capital, accuracy=accuracy)
+            pos = self._random_cell()
+            self.grid.place_agent(nf, pos)
+            self.news_firms.append(nf)
+            self._id_cache[nf.unique_id] = nf
+
     # ── Mesa step ─────────────────────────────────────────────────────────────
 
     def step(self):
@@ -209,14 +223,18 @@ class EconomicModel(Model):
         # Planner first (sets bonuses, runs elections, redistributes)
         self.planner.step()
 
-        # Shuffle-step all agents
-        agent_list = list(self.workers) + list(self.firms) + list(self.landowners)
+        # Shuffle-step all agents (including news firms)
+        agent_list = (list(self.workers) + list(self.firms)
+                      + list(self.landowners) + list(self.news_firms))
         idx = self.rng.permutation(len(agent_list))
         for i in idx:
             a = agent_list[i]
             if getattr(a, "defunct", False):
                 continue
             a.step()
+
+        # Information propagation: peer-to-peer weight sharing
+        propagate_peer_information(self)
 
         # Economy post-processing
         self.economy.update_prices()
@@ -236,9 +254,12 @@ class EconomicModel(Model):
             if f.unique_id not in self._id_cache:
                 self._id_cache[f.unique_id] = f
 
-        # Collect metrics
+        # Collect metrics (including information/epistemic health)
         from metrics import collect_step_metrics
-        self.metrics_history.append(collect_step_metrics(self))
+        step_metrics = collect_step_metrics(self)
+        info_metrics = compute_information_metrics(self)
+        step_metrics.update(info_metrics)
+        self.metrics_history.append(step_metrics)
 
     # ── Population management ─────────────────────────────────────────────────
 
