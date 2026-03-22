@@ -3,23 +3,8 @@ metrics.py
 ----------
 Metric collection, computation, and emergence detection.
 
-Tracked every timestep:
-  - wealth statistics (min, median, mean, Gini, power-law exponent)
-  - top 1/5/10 % wealth share
-  - firm market concentration (HHI, top firm share)
-  - cartel count
-  - rent extraction rate
-  - debt concentration
-  - worker mobility / unemployment
-  - trade network centralisation
-  - agency floor (for JAM objective)
-  - planner policy snapshot
-
-Emergence detection:
-  - monopoly (single firm >40% market share)
-  - cartel formation
-  - power-law wealth distribution (Pareto fit)
-  - persistent poverty trap (bottom quintile static)
+Includes economic, information, and banking metrics.
+Fixed poverty trap detection (structural trap, not near-death).
 """
 
 from __future__ import annotations
@@ -42,52 +27,42 @@ def collect_step_metrics(model: "EconomicModel") -> Dict[str, Any]:
     """Return a flat dict of all metrics for the current step."""
     m: Dict[str, Any] = {"step": model.current_step}
 
-    # Wealth stats
     all_w = model.get_all_agent_wealths()
     worker_w = model.get_worker_wealths()
 
     m.update(_wealth_stats(all_w, prefix="all"))
     m.update(_wealth_stats(worker_w, prefix="worker"))
-
-    # Firm concentration
     m.update(_firm_stats(model))
 
-    # Cartel detection
     m["n_active_cartels"] = sum(
         1 for members in model.active_cartels.values() if len(members) >= 2
     )
 
-    # Rent extraction
     m["total_rent_collected"] = sum(lo.total_rent_collected for lo in model.landowners)
     m["mean_rent_rate"] = float(np.mean([lo.rent_rate for lo in model.landowners])) if model.landowners else 0.0
 
-    # Debt
     m["total_debt"] = model.economy.total_debt_outstanding
     m["total_defaults"] = model.economy.total_defaults
     worker_debts = np.array([w.debt for w in model.workers], dtype=float)
     m["debt_gini"] = _gini(worker_debts)
     m["fraction_in_debt"] = float(np.mean(worker_debts > 0)) if len(worker_debts) else 0.0
 
-    # Labour market
     employed = [w for w in model.workers if w.employed]
     m["n_workers"] = len(model.workers)
     m["n_employed"] = len(employed)
     m["unemployment_rate"] = 1.0 - len(employed) / max(1, len(model.workers))
     m["mean_wage"] = float(np.mean([w.wage for w in employed])) if employed else 0.0
 
-    # Worker mobility
     m["mean_consecutive_unemployed"] = float(
         np.mean([w.consecutive_unemployed_steps for w in model.workers])
     ) if model.workers else 0.0
 
-    # Trade network
     net_stats = model.economy.get_network_stats()
     m["trade_nodes"] = net_stats["nodes"]
     m["trade_edges"] = net_stats["edges"]
     m["trade_density"] = net_stats["density"]
     m["trade_max_centrality"] = net_stats["max_centrality"]
 
-    # Agency floor (JAM)
     if model.workers:
         agencies = [w.compute_agency() for w in model.workers]
         m["agency_floor"] = float(min(agencies))
@@ -96,51 +71,60 @@ def collect_step_metrics(model: "EconomicModel") -> Dict[str, Any]:
         m["agency_floor"] = 0.0
         m["agency_mean"] = 0.0
 
-    # Planner
     m["planner_objective_value"] = model.planner.last_objective_value
     m["planner_tax_revenue"] = model.planner.tax_revenue
     m["planner_ubi"] = model.planner.policy["ubi_payment"]
     m["planner_min_wage"] = model.planner.policy["min_wage"]
     m["planner_tax_worker"] = model.planner.policy["tax_rate_worker"]
     m["planner_tax_firm"] = model.planner.policy["tax_rate_firm"]
-    m["planner_agriculture_inv"]    = model.planner.policy["agriculture_investment"]
+    m["planner_agriculture_inv"] = model.planner.policy["agriculture_investment"]
     m["planner_infrastructure_inv"] = model.planner.policy["infrastructure_investment"]
-    m["planner_healthcare_inv"]     = model.planner.policy["healthcare_investment"]
-    m["planner_education_inv"]      = model.planner.policy["education_investment"]
+    m["planner_healthcare_inv"] = model.planner.policy["healthcare_investment"]
+    m["planner_education_inv"] = model.planner.policy["education_investment"]
 
-    # Public investment effects (current bonus levels)
-    m["infrastructure_level"]  = model._infrastructure_level
-    m["healthcare_bonus"]      = model._healthcare_bonus
-    m["education_quality"]     = model._education_quality
-    m["agriculture_bonus"]     = model._agriculture_bonus
+    m["infrastructure_level"] = model._infrastructure_level
+    m["healthcare_bonus"] = model._healthcare_bonus
+    m["education_quality"] = model._education_quality
+    m["agriculture_bonus"] = model._agriculture_bonus
 
-    # Water resource
     m["mean_water"] = float(np.mean(model.water_grid))
-    m["min_water"]  = float(np.min(model.water_grid))
+    m["min_water"] = float(np.min(model.water_grid))
 
-    # Pollution
-    m["mean_pollution"]    = float(np.mean(model.pollution_grid))
-    m["max_pollution"]     = float(np.max(model.pollution_grid))
-    m["total_pollution"]   = float(np.sum(model.pollution_grid))
-    m["n_polluted_cells"]  = int(np.sum(model.pollution_grid > 1.0))
+    m["mean_pollution"] = float(np.mean(model.pollution_grid))
+    m["max_pollution"] = float(np.max(model.pollution_grid))
+    m["total_pollution"] = float(np.sum(model.pollution_grid))
+    m["n_polluted_cells"] = int(np.sum(model.pollution_grid > 1.0))
     m["total_firm_emissions"] = float(sum(f.total_pollution_emitted for f in model.firms if not f.defunct))
-    # Health burden: extra metabolism cost workers bear from pollution this step
     health_burden = 0.0
     for w in model.workers:
         if w.pos is not None:
             p = float(model.pollution_grid[int(w.pos[0]), int(w.pos[1])])
             health_burden += p * 0.05
     m["pollution_health_burden"] = health_burden
-    m["planner_pollution_tax"]      = model.planner.policy["pollution_tax"]
+    m["planner_pollution_tax"] = model.planner.policy["pollution_tax"]
     m["planner_cleanup_investment"] = model.planner.policy["cleanup_investment"]
 
-    # Power-law exponent (Pareto tail)
     m["wealth_power_law_alpha"] = _pareto_alpha(all_w)
 
-    # Emergence flags
     m["monopoly_detected"] = _detect_monopoly(model)
     m["cartel_detected"] = m["n_active_cartels"] > 0
     m["poverty_trap_detected"] = _detect_poverty_trap(worker_w)
+
+    # Skill distribution
+    if model.workers:
+        skills = np.array([w.skill for w in model.workers])
+        m["mean_skill"] = float(np.mean(skills))
+        m["skill_gini"] = _gini(skills)
+
+    # Investment metrics
+    if model.workers:
+        total_invested = sum(sum(w.investments.values()) for w in model.workers
+                           if hasattr(w, 'investments'))
+        n_investors = sum(1 for w in model.workers
+                        if hasattr(w, 'investments') and w.investments)
+        m["total_investment"] = total_invested
+        m["n_investors"] = n_investors
+        m["investment_concentration"] = n_investors / max(len(model.workers), 1)
 
     return m
 
@@ -173,7 +157,6 @@ def _wealth_stats(w: np.ndarray, prefix: str) -> Dict[str, float]:
 
 
 def _gini(w: np.ndarray) -> float:
-    """Compute Gini coefficient."""
     w = np.sort(w[w > 0])
     if len(w) == 0:
         return 0.0
@@ -184,11 +167,6 @@ def _gini(w: np.ndarray) -> float:
 
 
 def _pareto_alpha(w: np.ndarray) -> float:
-    """
-    Estimate the Pareto tail exponent using the Hill estimator.
-    Uses the top 10% of the wealth distribution.
-    Returns NaN if insufficient data.
-    """
     w = w[w > 0]
     if len(w) < 20:
         return float("nan")
@@ -196,7 +174,6 @@ def _pareto_alpha(w: np.ndarray) -> float:
     tail = w[w >= threshold]
     if len(tail) < 5:
         return float("nan")
-    # Hill estimator
     alpha = len(tail) / np.sum(np.log(tail / threshold))
     return float(alpha)
 
@@ -233,26 +210,25 @@ def _firm_stats(model: "EconomicModel") -> Dict[str, float]:
 # ---------------------------------------------------------------------------
 
 def _detect_monopoly(model: "EconomicModel") -> bool:
-    """True if any single firm has >40% market share."""
     return any(f.market_share > 0.40 for f in model.firms if not f.defunct)
 
 
 def _detect_poverty_trap(worker_w: np.ndarray, window: int = 50) -> bool:
     """
-    Heuristic: bottom quintile trapped if their average is < 2x survival threshold.
+    Poverty trap = bottom quintile stuck near subsistence.
+    Not 'almost dead' but 'alive and unable to escape.'
+    Trapped when bottom 20% wealth is < 10% of median.
     """
-    from agents import SURVIVAL_THRESHOLD
-    if len(worker_w) == 0:
+    if len(worker_w) < 10:
         return False
     bottom20 = np.percentile(worker_w, 20)
-    return float(bottom20) < SURVIVAL_THRESHOLD * 2.0
+    median = np.median(worker_w)
+    if median <= 0:
+        return False
+    return float(bottom20) < max(median * 0.10, 20.0)
 
 
 def detect_power_law(w: np.ndarray) -> Dict[str, Any]:
-    """
-    Statistical test for power-law distribution in upper tail.
-    Returns dict with alpha, p_value, and is_power_law flag.
-    """
     w = np.sort(w[w > 0])
     if len(w) < 50:
         return {"alpha": float("nan"), "p_value": float("nan"), "is_power_law": False}
@@ -262,9 +238,7 @@ def detect_power_law(w: np.ndarray) -> Dict[str, Any]:
     if len(tail) < 10:
         return {"alpha": float("nan"), "p_value": float("nan"), "is_power_law": False}
 
-    # Fit log-normal (null) vs Pareto (alternative)
     log_tail = np.log(tail)
-    # Kolmogorov-Smirnov test against fitted lognormal
     mu, sigma = log_tail.mean(), log_tail.std()
     if sigma < 1e-10:
         return {"alpha": float("nan"), "p_value": 1.0, "is_power_law": False}
@@ -284,14 +258,10 @@ def detect_power_law(w: np.ndarray) -> Dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 def episode_summary(metrics_history: List[Dict]) -> Dict[str, Any]:
-    """
-    Compute aggregate statistics over a full episode.
-    Returns a flat dict suitable for DataFrame storage.
-    """
+    """Compute aggregate statistics over a full episode."""
     if not metrics_history:
         return {}
 
-    # Use the final 20% of steps (steady-state estimate)
     n = len(metrics_history)
     tail = metrics_history[max(0, int(n * 0.8)):]
 
@@ -304,13 +274,15 @@ def episode_summary(metrics_history: List[Dict]) -> Dict[str, Any]:
             if key in m:
                 return m[key]
         return float("nan")
-   
+
     def max_val(key):
-    vals = [m[key] for m in metrics_history if key in m 
-            and not (isinstance(m[key], float) and math.isnan(m[key]))]
-    return float(np.max(vals)) if vals else float("nan")
+        vals = [m[key] for m in metrics_history if key in m
+                and not (isinstance(m[key], float) and math.isnan(m[key]))]
+        return float(np.max(vals)) if vals else float("nan")
 
     summary = {}
+
+    # Economic metrics
     scalar_keys = [
         "all_gini", "all_min", "all_mean", "all_top10_share",
         "worker_gini", "worker_min", "worker_mean", "worker_top1_share",
@@ -333,22 +305,24 @@ def episode_summary(metrics_history: List[Dict]) -> Dict[str, Any]:
         "n_polluted_cells", "pollution_health_burden",
         "planner_pollution_tax", "planner_cleanup_investment",
         "monopoly_detected", "cartel_detected", "poverty_trap_detected",
+        "mean_skill", "skill_gini",
+        "total_investment", "n_investors", "investment_concentration",
     ]
     for key in scalar_keys:
         summary[key] = avg(key)
 
-    # Fraction of steps with specific emergent phenomena
+    # Emergence fractions
     summary["frac_monopoly"] = float(np.mean([m.get("monopoly_detected", False) for m in metrics_history]))
     summary["frac_cartel"] = float(np.mean([m.get("cartel_detected", False) for m in metrics_history]))
     summary["frac_poverty_trap"] = float(np.mean([m.get("poverty_trap_detected", False) for m in metrics_history]))
 
-    #Terminal values
+    # Terminal values
     summary["terminal_n_workers"] = last("n_workers")
     summary["terminal_all_gini"] = last("all_gini")
     summary["terminal_worker_min"] = last("worker_min")
     summary["terminal_agency_floor"] = last("agency_floor")
 
-    # Information layer metrics (if present)
+    # Information layer metrics
     info_keys = [
         "mean_authority_trust", "min_authority_trust",
         "weight_polarization", "info_r0",
@@ -357,11 +331,21 @@ def episode_summary(metrics_history: List[Dict]) -> Dict[str, Any]:
     ]
     for key in info_keys:
         summary[key] = avg(key)
+
     summary["terminal_epistemic_health"] = last("epistemic_health")
     summary["terminal_authority_trust"] = last("mean_authority_trust")
     summary["terminal_polarization"] = last("weight_polarization")
     summary["terminal_info_r0"] = last("info_r0")
     summary["max_info_r0"] = max_val("info_r0")
     summary["max_captured_news"] = max_val("n_captured_news")
+
+    # Banking metrics
+    banking_keys = [
+        "n_banks", "total_bank_deposits", "total_bank_loans",
+        "bank_leverage_ratio", "bank_default_rate", "bank_profit",
+        "deposit_concentration",
+    ]
+    for key in banking_keys:
+        summary[key] = avg(key)
 
     return summary

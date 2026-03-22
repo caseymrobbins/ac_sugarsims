@@ -100,6 +100,10 @@ class WorkerAgent(Agent):
         self._last_action: str = "harvest"
         self._last_action_outcome: float = 0.0
 
+        # Investment portfolio: {firm_unique_id: amount_invested}
+        self.investments: Dict[int, float] = {}
+        self.dividend_income: float = 0.0
+
         # Tracking
         self.age: int = 0
         self.income_last_step: float = 0.0
@@ -137,6 +141,27 @@ class WorkerAgent(Agent):
                 self.debt *= (1 + self.debt_interest)
             else:
                 self.model.economy.handle_default(self)
+
+        # Investment returns: wealthy workers invest in firms (stock market)
+        # Returns come from actual firm profits, not created from nothing
+        if self.wealth > 100 and self.model.firms:
+            self._invest_in_firms()
+
+        # Skill dynamics: meaningful experience gain, real decay
+        if not self.employed:
+            # Unemployed: skills decay (~15% loss over 100 steps)
+            self.skill = max(0.05, self.skill * 0.998)
+        else:
+            # Employed: learning by doing (~10% gain over 100 steps)
+            self.skill = min(1.0, self.skill * 1.001)
+
+        # Quit check: skilled workers leave underpaying firms
+        if self.employed and self.employer_id is not None:
+            expected_wage = self.skill * 5.0  # what this worker is "worth"
+            if self.wage < expected_wage * 0.5 and self.model.rng.random() < 0.05:
+                firm = self.model.get_agent_by_id(self.employer_id)
+                if firm and isinstance(firm, FirmAgent):
+                    firm.fire_worker(self.unique_id)  # quit = fire from worker side
 
         # Decide action
         action = self._choose_action()
@@ -374,6 +399,67 @@ class WorkerAgent(Agent):
         # Trade
         self.model.economy.bilateral_trade(self, partner)
 
+    def _invest_in_firms(self):
+        """
+        Simple stock market: invest surplus wealth in firms.
+        Returns come from firm profits (dividends), not created from nothing.
+        Wealthier agents invest more and in better firms (information advantage).
+        """
+        # Investment budget: fraction of wealth above threshold
+        surplus = self.wealth - 100
+        if surplus <= 0:
+            return
+        invest_amount = surplus * 0.02  # invest 2% of surplus per step
+
+        # Pick a firm to invest in (biased toward profitable ones)
+        active_firms = [f for f in self.model.firms if not f.defunct and f.profit > 0]
+        if not active_firms:
+            return
+
+        # Wealthier workers pick better firms (information advantage)
+        if self.wealth > 500 and len(active_firms) > 1:
+            # Rich: invest in the most profitable firm
+            target = max(active_firms, key=lambda f: f.profit)
+        else:
+            # Others: random profitable firm
+            target = self.model.rng.choice(active_firms)
+
+        # Transfer wealth to firm as capital investment
+        self.wealth -= invest_amount
+        target.capital_stock += invest_amount * 0.9  # 10% transaction cost
+        target.wealth += invest_amount * 0.1  # firm keeps a fee
+
+        # Record investment
+        fid = target.unique_id
+        self.investments[fid] = self.investments.get(fid, 0) + invest_amount
+
+        # Collect dividends from existing investments
+        self.dividend_income = 0.0
+        dead_investments = []
+        for fid, amount in self.investments.items():
+            firm = self.model.get_agent_by_id(fid)
+            if firm is None or not isinstance(firm, FirmAgent) or firm.defunct:
+                dead_investments.append(fid)
+                continue
+            if firm.profit > 0:
+                # Dividend: proportional to investment relative to total capital
+                if firm.capital_stock > 0:
+                    ownership_share = amount / firm.capital_stock
+                    dividend = firm.profit * 0.2 * ownership_share  # 20% of profit to investors
+                    dividend = min(dividend, firm.wealth * 0.1)  # cap at 10% of firm wealth
+                    if dividend > 0:
+                        self.wealth += dividend
+                        firm.wealth -= dividend
+                        self.dividend_income += dividend
+                        self.income_last_step += dividend
+
+        # Clean up dead investments (partial loss)
+        for fid in dead_investments:
+            lost = self.investments.pop(fid)
+            # Lose 80% of investment in bankrupt firms
+            recovery = lost * 0.2
+            self.wealth += recovery
+
     def _migrate(self):
         grid = self.model.grid
         pos = self._tpos()
@@ -477,6 +563,20 @@ class WorkerAgent(Agent):
         firm.hire_worker(self)
 
     def _die(self):
+        # Inheritance: distribute wealth to network connections
+        if self.wealth > 5.0 and self.network_connections:
+            inheritance = self.wealth * 0.8  # 80% transferred, 20% lost (estate costs)
+            # Split among connections (prioritizes stronger connections)
+            recipients = []
+            for cid in self.network_connections[:5]:  # max 5 heirs
+                heir = self.model.get_agent_by_id(cid)
+                if heir and isinstance(heir, WorkerAgent):
+                    recipients.append(heir)
+            if recipients:
+                share = inheritance / len(recipients)
+                for heir in recipients:
+                    heir.wealth += share
+
         if self.employed and self.employer_id:
             firm = self.model.get_agent_by_id(self.employer_id)
             if firm and isinstance(firm, FirmAgent):
@@ -547,6 +647,7 @@ class FirmAgent(Agent):
         self.workers: Dict[int, "WorkerAgent"] = {}
         self.offered_wage: float = float(rng.uniform(2.0, 5.0))
         self.profit: float = 0.0
+        self.prev_profit: float = 0.0
         self.revenue: float = 0.0
         self.production_this_step: float = 0.0
         self.cartel_id: Optional[int] = None
@@ -556,41 +657,135 @@ class FirmAgent(Agent):
         self.market_share: float = 0.0
         self.total_wages_paid: float = 0.0
         self.total_profit_accumulated: float = 0.0
-        # Pollution: how much pollution is emitted per unit of output
         self.pollution_factor: float = float(rng.uniform(0.05, 0.30))
         self.total_pollution_emitted: float = 0.0
-        # Track consecutive loss steps for downsizing decisions
         self._consecutive_losses: int = 0
+        self.total_dividends_paid: float = 0.0
+
+        # Firm decision intelligence: learned strategy weights
+        self.strategy_weights: Dict[str, float] = {
+            "invest_capital":  float(rng.beta(3, 2)),
+            "raise_wages":     float(rng.beta(2, 3)),
+            "cut_wages":       float(rng.beta(2, 4)),
+            "hire":            float(rng.beta(3, 2)),
+            "downsize":        float(rng.beta(1.5, 4)),
+            "acquire":         float(rng.beta(1, 5)),
+            "form_cartel":     float(rng.beta(1.5, 4)),
+            "capture_media":   float(rng.beta(1, 6)),
+            "pollute_more":    float(rng.beta(2, 3)),
+            "clean_up":        float(rng.beta(1.5, 4)),
+        }
+        self._last_strategy: str = "invest_capital"
 
     def step(self):
         if self.defunct:
             return
         self.age += 1
+        self.prev_profit = self.profit
         self.production_this_step = 0.0
         self.revenue = 0.0
 
         self._produce()
-        self._manage_workforce()
-        self._set_wage()
-        self._consider_cartel()
-        self._consider_acquisition()
 
-        # Capital depreciation (small fraction per step)
+        # Strategic decision via learned weights
+        strategy = self._choose_strategy()
+        self._execute_strategy(strategy)
+        self._last_strategy = strategy
+
+        # Learn from outcome
+        profit_change = self.profit - self.prev_profit
+        self._learn_from_outcome(strategy, profit_change)
+
         self.capital_stock *= 0.998
 
-        # Reinvest profits: larger firms reinvest more aggressively
-        if self.profit > 0 and self.wealth > 50:
-            reinvest_rate = 0.08 + 0.02 * min(self.market_share * 10, 1.0)
-            invest = min(self.wealth * reinvest_rate, self.profit * 0.4)
-            self.capital_stock += invest
-            self.wealth -= invest
-
-        # Bankruptcy: only if deeply insolvent AND no workers
         if self.wealth < -200 and len(self.workers) == 0:
             self._go_bankrupt()
             return
 
         self.model.planner.apply_tax(self)
+
+    def _choose_strategy(self) -> str:
+        rng = self.model.rng
+        n_workers = len(self.workers)
+        profitable = self.profit > 0
+        context = {
+            "invest_capital":  (1.0 if profitable else 0.2) * min(self.wealth / 200, 1),
+            "raise_wages":     (0.3 if n_workers < 3 else 0.1) * (1.0 if profitable else 0.3),
+            "cut_wages":       (0.8 if not profitable else 0.1) * (1.0 if n_workers > 0 else 0.0),
+            "hire":            (0.5 if n_workers < 10 else 0.1) * (1.0 if profitable else 0.2),
+            "downsize":        (0.8 if self._consecutive_losses > 2 else 0.1),
+            "acquire":         min(self.wealth / 500, 1) * self.market_share * 5,
+            "form_cartel":     0.3 if self.cartel_id is None else 0.0,
+            "capture_media":   min(self.wealth / 1000, 1) * (0.5 if self.cartel_id else 0.1),
+            "pollute_more":    0.3 if not profitable else 0.1,
+            "clean_up":        self.model.planner.policy.get("pollution_tax", 0) * 0.5,
+        }
+        scores = {}
+        for action, weight in self.strategy_weights.items():
+            scores[action] = weight * context.get(action, 0.5) + float(rng.normal(0, 0.03))
+        return max(scores, key=scores.get)
+
+    def _execute_strategy(self, strategy: str):
+        if strategy == "invest_capital":
+            if self.profit > 0 and self.wealth > 50:
+                rate = 0.10 + 0.03 * min(self.market_share * 10, 1.0)
+                invest = min(self.wealth * rate, self.profit * 0.5)
+                self.capital_stock += invest
+                self.wealth -= invest
+        elif strategy == "raise_wages":
+            n = max(len(self.workers), 1)
+            rev_per = self.revenue / n if self.revenue > 0 else 0
+            self.offered_wage = max(self.offered_wage, min(20.0, rev_per * 0.65))
+        elif strategy == "cut_wages":
+            self.offered_wage = max(1.0, self.offered_wage * 0.92)
+        elif strategy == "downsize":
+            self._manage_workforce()
+        elif strategy == "acquire":
+            self._consider_acquisition()
+        elif strategy == "form_cartel":
+            self._consider_cartel()
+        elif strategy == "capture_media":
+            self._attempt_media_capture()
+        elif strategy == "pollute_more":
+            self.pollution_factor = min(0.60, self.pollution_factor * 1.05)
+        elif strategy == "clean_up":
+            self.pollution_factor = max(0.02, self.pollution_factor * 0.90)
+        self._maintain_wages()
+
+    def _learn_from_outcome(self, strategy: str, profit_change: float):
+        if strategy in self.strategy_weights:
+            adj = 0.02 * np.tanh(profit_change / max(abs(self.profit) + 1, 1))
+            cur = self.strategy_weights[strategy]
+            self.strategy_weights[strategy] = float(np.clip(cur + adj, 0.01, 0.99))
+        if self.profit < 0:
+            self._consecutive_losses += 1
+        else:
+            self._consecutive_losses = 0
+
+    def _maintain_wages(self):
+        n = max(len(self.workers), 1)
+        rev_per = self.revenue / n if self.revenue > 0 else 0
+        if rev_per > 0:
+            self.offered_wage = min(self.offered_wage, rev_per * 0.85)
+        self.offered_wage = max(1.0, min(20.0, self.offered_wage))
+
+    def _attempt_media_capture(self):
+        if self.wealth < 200:
+            return
+        news_firms = getattr(self.model, 'news_firms', [])
+        targets = [nf for nf in news_firms if not nf.defunct
+                    and nf.captured_by_cartel is None and nf.wealth < 100]
+        if not targets or self.model.rng.random() > 0.05:
+            return
+        target = self.model.rng.choice(targets)
+        investment = min(self.wealth * 0.05, 100)
+        self.wealth -= investment
+        target.wealth += investment
+        target.captured_by_cartel = self.cartel_id or -self.unique_id
+        target.bias_direction = {
+            "harvest": 0.0, "seek_work": -0.03, "trade": 0.0,
+            "migrate": -0.02, "save": 0.02, "invest": -0.02, "found_firm": -0.04,
+        }
 
     def _produce(self):
         n_workers = len(self.workers)
@@ -639,32 +834,6 @@ class FirmAgent(Agent):
 
         # If no workers and wealth is positive, keep firm alive to rehire
         # (do nothing, firm persists as an empty shell)
-
-    def _set_wage(self):
-        """Set wage based on profitability and labor market conditions."""
-        n = max(len(self.workers), 1)
-        revenue_per_worker = self.revenue / n if self.revenue > 0 else 0
-
-        if self.cartel_id is not None:
-            # Cartels suppress wages to ~40% of revenue per worker
-            target = revenue_per_worker * 0.40
-            self.offered_wage = max(1.0, self.offered_wage * 0.97 + target * 0.03)
-        elif self.profit > 0:
-            # Profitable: share ~60% of revenue per worker as wages
-            target = revenue_per_worker * 0.60
-            if len(self.workers) < 5:
-                # Small firm, need to attract: offer more
-                target = revenue_per_worker * 0.70
-            self.offered_wage = max(1.5, self.offered_wage * 0.9 + target * 0.1)
-        else:
-            # Unprofitable: cut toward 50% of revenue
-            target = revenue_per_worker * 0.50
-            self.offered_wage = max(1.0, self.offered_wage * 0.9 + target * 0.1)
-
-        # Hard cap at revenue per worker (can't pay more than you earn)
-        if revenue_per_worker > 0:
-            self.offered_wage = min(self.offered_wage, revenue_per_worker * 0.85)
-        self.offered_wage = max(1.0, min(20.0, self.offered_wage))
 
     def _consider_cartel(self):
         # Existing cartel: check for dissolution
@@ -856,7 +1025,32 @@ class LandownerAgent(Agent):
         self.model.planner.apply_tax(self)
 
     def compute_rent(self, worker: "WorkerAgent") -> float:
-        return self.rent_rate * max(worker.income_last_step, 0.5)
+        """Rent based on location quality, not just worker income.
+        Good locations (near resources and firms) cost more."""
+        base_rent = self.rent_rate * max(worker.income_last_step, 0.5)
+
+        # Location premium: cells near resources and firms are worth more
+        pos = worker._tpos()
+        if pos is not None:
+            x, y = pos
+            local_value = (float(self.model.food_grid[x, y])
+                          + float(self.model.raw_grid[x, y])
+                          + float(self.model.capital_grid[x, y]))
+            # Check for nearby firms (proximity to jobs increases rent)
+            nearby_firms = 0
+            try:
+                neighbours = self.model.grid.get_neighborhood(
+                    pos, moore=True, include_center=False, radius=3)
+                for cell in neighbours[:12]:  # sample for speed
+                    for a in self.model.grid.get_cell_list_contents([cell]):
+                        if isinstance(a, FirmAgent) and not a.defunct:
+                            nearby_firms += 1
+            except Exception:
+                pass
+            location_premium = 1.0 + 0.02 * local_value + 0.05 * nearby_firms
+            return base_rent * location_premium
+
+        return base_rent
 
     def _expand(self):
         if not self.controlled_cells or self.pos is None:

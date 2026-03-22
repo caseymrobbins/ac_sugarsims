@@ -20,6 +20,7 @@ from agents import WorkerAgent, FirmAgent, LandownerAgent
 from economy import Economy
 from planner import PlannerAgent
 from information import NewsFirm, propagate_peer_information, compute_information_metrics
+from banking import BankAgent, compute_banking_metrics
 from hardware import (auto_configure, build_regen_fn, AccelConfig,
                       FOOD_CAP, WATER_CAP, RAW_CAP, LAND_CAP,
                       POLLUTION_CAP, POLLUTION_DIFFUSE)
@@ -81,6 +82,7 @@ class EconomicModel(Model):
         self.firms:      List[FirmAgent]      = []
         self.landowners: List[LandownerAgent] = []
         self.news_firms: List[NewsFirm]       = []
+        self.banks:      List[BankAgent]      = []
 
         # Cartel tracking
         self._cartel_counter = 0
@@ -98,6 +100,7 @@ class EconomicModel(Model):
         self._create_firms(n_firms)
         self._create_landowners(n_landowners)
         self._create_news_firms(3)  # start with 3 news firms
+        self._create_banks(2)      # start with 2 banks
 
         # Seed initial social network connections (fixes trade deadlock)
         self._seed_network_connections()
@@ -195,6 +198,16 @@ class EconomicModel(Model):
             self.news_firms.append(nf)
             self._id_cache[nf.unique_id] = nf
 
+    def _create_banks(self, n):
+        """Create initial banks."""
+        for _ in range(n):
+            capital = float(self.rng.lognormal(mean=5.0, sigma=1.0))
+            bank = BankAgent(model=self, capital=capital)
+            pos = self._random_cell()
+            self.grid.place_agent(bank, pos)
+            self.banks.append(bank)
+            self._id_cache[bank.unique_id] = bank
+
     # ── Mesa step ─────────────────────────────────────────────────────────────
 
     def step(self):
@@ -223,9 +236,10 @@ class EconomicModel(Model):
         # Planner first (sets bonuses, runs elections, redistributes)
         self.planner.step()
 
-        # Shuffle-step all agents (including news firms)
+        # Shuffle-step all agents (including news firms and banks)
         agent_list = (list(self.workers) + list(self.firms)
-                      + list(self.landowners) + list(self.news_firms))
+                      + list(self.landowners) + list(self.news_firms)
+                      + list(self.banks))
         idx = self.rng.permutation(len(agent_list))
         for i in idx:
             a = agent_list[i]
@@ -254,11 +268,13 @@ class EconomicModel(Model):
             if f.unique_id not in self._id_cache:
                 self._id_cache[f.unique_id] = f
 
-        # Collect metrics (including information/epistemic health)
+        # Collect metrics (including information/epistemic health and banking)
         from metrics import collect_step_metrics
         step_metrics = collect_step_metrics(self)
         info_metrics = compute_information_metrics(self)
+        bank_metrics = compute_banking_metrics(self)
         step_metrics.update(info_metrics)
+        step_metrics.update(bank_metrics)
         self.metrics_history.append(step_metrics)
 
     # ── Population management ─────────────────────────────────────────────────
