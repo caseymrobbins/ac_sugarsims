@@ -25,10 +25,10 @@ from hardware import (auto_configure, build_regen_fn, AccelConfig,
 
 
 # Population management constants
-MIN_WORKERS = 150          # immigration kicks in below this
-IMMIGRATION_RATE = 0.02    # fraction of deficit filled per step
-MIN_FIRMS = 3              # firm spawning kicks in below this
-FIRM_SPAWN_PROB = 0.05     # probability per step when below min
+MIN_WORKERS = 100          # immigration only at severe population loss
+IMMIGRATION_RATE = 0.01    # very slow replenishment
+MIN_FIRMS = 2              # firm spawning only at near-total firm death
+FIRM_SPAWN_PROB = 0.03     # probability per step when below min
 
 
 class EconomicModel(Model):

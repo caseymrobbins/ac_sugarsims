@@ -1,356 +1,373 @@
 """
-hardware.py — hardware detection and acceleration config.
+hardware.py
+-----------
+Hardware detection, acceleration backend selection, and resource regeneration
+functions for the multi-agent economic simulation.
 
-Regen function signature: regen_fn(food, raw_mat, land, water, pollution) → None (in-place)
-All arrays shape (W, H), dtype float64.
+Backends (in priority order):
+  1. jax_gpu   — JAX with CUDA (A100, L4, V100)
+  2. jax_cpu   — JAX on CPU
+  3. numba_gpu — Numba CUDA kernels (T4)
+  4. numba_cpu — Numba parallel CPU
+  5. numpy     — Pure NumPy (always works)
 
-Agriculture bonus (from planner budget) is applied in environment.step()
-by multiplying the regen rates before calling this function.
+Key design: NEVER let a hardware detection or initialization failure crash
+the simulation. Every code path falls back to numpy.
 
-Pollution spatial diffusion is handled in environment.step() using NumPy rolls
-(independent of backend) so the kernels here only apply the per-cell decay.
+Multiprocessing safety: JAX GPU init is not safe when many worker processes
+all try to grab GPU memory simultaneously. The auto_configure function
+detects if it's running in a subprocess and falls back to CPU.
 """
 
 from __future__ import annotations
 
-import multiprocessing
 import os
-import subprocess
 import sys
+import warnings
 from dataclasses import dataclass, field
-from typing import List, Optional
+from typing import Optional
+
+import numpy as np
 
 
-# ── Resource caps ────────────────────────────────────────────────────────────
+# ---------------------------------------------------------------------------
+# Resource grid constants
+# ---------------------------------------------------------------------------
 
-FOOD_CAP,  FOOD_RATE  = 30.0, 0.15
-RAW_CAP,   RAW_RATE   = 25.0, 0.05
-LAND_CAP,  LAND_RATE  = 20.0, 0.01
-WATER_CAP, WATER_RATE = 40.0, 0.12
-NUDGE = 0.01
+FOOD_CAP = 50.0
+RAW_CAP = 30.0
+LAND_CAP = 20.0
+WATER_CAP = 40.0
+POLLUTION_CAP = 50.0
 
-# Pollution: cap and natural decay rate (per step).
-# Spatial diffusion is applied separately in environment.step().
-POLLUTION_CAP   = 50.0
-POLLUTION_DECAY = 0.02    # 2 % natural degradation per cell per step
-POLLUTION_DIFFUSE = 0.08  # fraction that spreads to 4 neighbours per step
-
-
-# ── Data classes ─────────────────────────────────────────────────────────────
-
-@dataclass
-class GPUInfo:
-    name: str
-    memory_mb: int
-    compute_cap: str = ""
-
-    @property
-    def memory_gb(self): return self.memory_mb / 1024
-
-    @property
-    def is_a100(self): return "a100" in self.name.lower()
-    @property
-    def is_l4(self):   return "l4" in self.name.lower()
-    @property
-    def is_t4(self):   return "t4" in self.name.lower()
-    @property
-    def is_v100(self): return "v100" in self.name.lower()
-
-    @property
-    def tier(self):
-        for t in ("a100", "l4", "t4", "v100"):
-            if t in self.name.lower():
-                return t
-        return "generic"
+# Regeneration rates
+FOOD_REGEN = 0.8
+RAW_REGEN = 0.3
+WATER_REGEN = 0.5
+POLLUTION_DECAY = 0.02       # fraction that decays per step
+POLLUTION_DIFFUSE = 0.05     # spatial diffusion fraction
 
 
-@dataclass
-class HardwareInfo:
-    cpu_cores: int
-    ram_gb: float
-    gpus: List[GPUInfo] = field(default_factory=list)
-    is_colab: bool = False
-    has_jax: bool = False
-    has_jax_gpu: bool = False
-    has_numba: bool = False
-    has_numba_cuda: bool = False
-
-    @property
-    def has_gpu(self): return bool(self.gpus)
-    @property
-    def primary_gpu(self): return self.gpus[0] if self.gpus else None
-
+# ---------------------------------------------------------------------------
+# Acceleration config
+# ---------------------------------------------------------------------------
 
 @dataclass
 class AccelConfig:
-    backend: str
-    n_workers: int
-    grid_width: int
-    grid_height: int
-    description: str
-    recommended_steps: int = 1500
+    """Hardware acceleration configuration."""
+    backend: str = "numpy"
+    n_workers: int = 1
     recommended_seeds: int = 20
-
-    def summary(self):
-        return "\n".join([
-            "=" * 56, "  ACCELERATION CONFIG", "=" * 56,
-            f"  Backend      : {self.backend}",
-            f"  Workers      : {self.n_workers}",
-            f"  Grid         : {self.grid_width}x{self.grid_height}",
-            f"  Steps        : {self.recommended_steps}",
-            f"  Seeds        : {self.recommended_seeds}",
-            f"  Description  : {self.description}",
-            "=" * 56,
-        ])
+    recommended_steps: int = 1500
+    gpu_name: str = ""
+    gpu_mem_mb: int = 0
 
 
-# ── Detection ────────────────────────────────────────────────────────────────
+# ---------------------------------------------------------------------------
+# Hardware detection
+# ---------------------------------------------------------------------------
 
-def _detect_gpus():
+def detect_hardware() -> dict:
+    """Detect available hardware. Returns a dict with gpu_tier, name, mem, cpu_count."""
+    import subprocess
+    gpu_tier = "cpu"
+    gpu_name = "none"
+    gpu_mem = 0
+
     try:
         r = subprocess.run(
-            ["nvidia-smi", "--query-gpu=name,memory.total,compute_cap",
-             "--format=csv,noheader,nounits"],
+            ['nvidia-smi', '--query-gpu=name,memory.total', '--format=csv,noheader,nounits'],
             capture_output=True, text=True, timeout=10)
-        if r.returncode == 0:
-            for line in r.stdout.strip().splitlines():
-                parts = [p.strip() for p in line.split(",")]
-                if len(parts) >= 2:
-                    yield GPUInfo(name=parts[0],
-                                  memory_mb=int(parts[1]) if parts[1].isdigit() else 0,
-                                  compute_cap=parts[2] if len(parts) > 2 else "")
+        if r.returncode == 0 and r.stdout.strip():
+            line = r.stdout.strip().splitlines()[0]
+            parts = line.split(',')
+            gpu_name = parts[0].strip()
+            gpu_mem = int(parts[1].strip())
+            name_l = gpu_name.lower()
+            if 'a100' in name_l:
+                gpu_tier = 'a100'
+            elif 'l4' in name_l:
+                gpu_tier = 'l4'
+            elif 't4' in name_l:
+                gpu_tier = 't4'
+            elif 'v100' in name_l:
+                gpu_tier = 'v100'
+            else:
+                gpu_tier = 'generic_gpu'
     except Exception:
         pass
 
+    cpu_count = os.cpu_count() or 1
 
-def _check_jax():
-    try:
-        import jax
-        try:
-            return True, len(jax.devices("gpu")) > 0
-        except RuntimeError:
-            return True, False
-    except ImportError:
-        return False, False
+    return {
+        "gpu_tier": gpu_tier,
+        "gpu_name": gpu_name,
+        "gpu_mem_mb": gpu_mem,
+        "cpu_count": cpu_count,
+    }
 
 
-def _check_numba():
-    try:
-        import numba  # noqa
-        try:
-            from numba import cuda
-            return True, cuda.is_available()
-        except Exception:
-            return True, False
-    except ImportError:
-        return False, False
+def get_accel_config(hw: dict) -> AccelConfig:
+    """Build AccelConfig from hardware detection results."""
+    tier = hw["gpu_tier"]
+    cfg = AccelConfig()
+    cfg.gpu_name = hw["gpu_name"]
+    cfg.gpu_mem_mb = hw["gpu_mem_mb"]
 
+    if tier == "a100":
+        cfg.backend = "jax_gpu"
+        cfg.n_workers = 14
+        cfg.recommended_seeds = 20
+        cfg.recommended_steps = 1500
+    elif tier in ("l4", "v100"):
+        cfg.backend = "jax_gpu"
+        cfg.n_workers = 10
+        cfg.recommended_seeds = 20
+        cfg.recommended_steps = 1500
+    elif tier == "t4":
+        cfg.backend = "numba_gpu"
+        cfg.n_workers = 6
+        cfg.recommended_seeds = 15
+        cfg.recommended_steps = 1000
+    elif tier == "generic_gpu":
+        cfg.backend = "jax_gpu"
+        cfg.n_workers = 6
+        cfg.recommended_seeds = 15
+        cfg.recommended_steps = 1000
+    else:
+        # CPU only
+        cpus = hw["cpu_count"]
+        if cpus >= 8:
+            cfg.backend = "numba_cpu"
+            cfg.n_workers = max(1, cpus - 2)
+        else:
+            cfg.backend = "numpy"
+            cfg.n_workers = max(1, cpus)
+        cfg.recommended_seeds = 10
+        cfg.recommended_steps = 500
 
-def _ram_gb():
-    try:
-        import psutil
-        return psutil.virtual_memory().total / 1e9
-    except ImportError:
-        try:
-            with open("/proc/meminfo") as f:
-                for line in f:
-                    if line.startswith("MemTotal"):
-                        return int(line.split()[1]) / 1e6
-        except Exception:
-            pass
-    return 0.0
-
-
-def detect_hardware() -> HardwareInfo:
-    has_jax, has_jax_gpu = _check_jax()
-    has_numba, has_numba_cuda = _check_numba()
-    try:
-        import google.colab  # noqa
-        is_colab = True
-    except ImportError:
-        is_colab = False
-    return HardwareInfo(
-        cpu_cores=multiprocessing.cpu_count(),
-        ram_gb=_ram_gb(),
-        gpus=list(_detect_gpus()),
-        is_colab=is_colab,
-        has_jax=has_jax, has_jax_gpu=has_jax_gpu,
-        has_numba=has_numba, has_numba_cuda=has_numba_cuda,
-    )
-
-
-# ── Decision ─────────────────────────────────────────────────────────────────
-
-def get_accel_config(hw: HardwareInfo) -> AccelConfig:
-    cores = hw.cpu_cores
-    gpu   = hw.primary_gpu
-
-    if gpu:
-        tier = gpu.tier
-        tiers = {
-            "a100": ("jax_gpu",   14, 1500, 20),
-            "l4":   ("jax_gpu",   10, 1500, 20),
-            "t4":   ("numba_gpu",  6, 1500, 20),
-            "v100": ("jax_gpu",    8, 1500, 20),
-        }
-        backend_pref, w, steps, seeds = tiers.get(tier, ("numba_gpu", 6, 1500, 20))
-        # Fall back if preferred library absent
-        if "jax" in backend_pref and not hw.has_jax_gpu:
-            backend_pref = "numba_gpu" if hw.has_numba_cuda else "numpy"
-        if "numba" in backend_pref and not hw.has_numba_cuda:
-            backend_pref = "numpy"
-        return AccelConfig(backend=backend_pref, n_workers=min(cores, w),
-                           grid_width=80, grid_height=80,
-                           recommended_steps=steps, recommended_seeds=seeds,
-                           description=f"{tier.upper()} {gpu.memory_gb:.0f}GB — {backend_pref}, {min(cores,w)} workers")
-
-    if hw.has_numba and cores >= 8:
-        return AccelConfig("numba_cpu", max(1, cores-2), 80, 80,
-                           f"CPU {cores}c — Numba parallel, {cores-2} workers", 1000, 20)
-    if hw.has_numba:
-        return AccelConfig("numba_cpu", max(1, cores-1), 80, 80,
-                           f"CPU {cores}c — Numba JIT, {cores-1} workers", 500, 10)
-    return AccelConfig("numpy", max(1, cores), 80, 80,
-                       f"CPU {cores}c — vectorised NumPy, {cores} workers", 300, 10)
-
-
-# ── Regen function factory ────────────────────────────────────────────────────
-# Signature: regen_fn(food, raw_mat, land, water, pollution) -> None (all in-place)
-# Pollution diffusion is applied in environment.step() via NumPy rolls.
-# The kernel here only applies per-cell natural decay.
-
-def build_regen_fn(backend: str):
-    """
-    Return the fastest regen function for the given backend.
-    agriculture_rate_mult is applied externally before calling this.
-    """
-
-    # ── JAX GPU ──────────────────────────────────────────────────────────────
-    if backend == "jax_gpu" and _try_import("jax"):
-        import jax, jax.numpy as jnp
-        import numpy as np
-
-        @jax.jit
-        def _jax(f, r, l, w, p):
-            f = jnp.clip(f + FOOD_RATE  * f * (1 - f/FOOD_CAP)  + NUDGE, 0, FOOD_CAP)
-            r = jnp.clip(r + RAW_RATE   * r * (1 - r/RAW_CAP)   + NUDGE, 0, RAW_CAP)
-            l = jnp.clip(l + LAND_RATE  * l * (1 - l/LAND_CAP)  + NUDGE, 0, LAND_CAP)
-            w = jnp.clip(w + WATER_RATE * w * (1 - w/WATER_CAP) + NUDGE, 0, WATER_CAP)
-            p = jnp.clip(p * (1 - POLLUTION_DECAY), 0, POLLUTION_CAP)
-            return f, r, l, w, p
-
-        def regen_jax(food, raw_mat, land, water, pollution):
-            jf, jr, jl, jw, jp = _jax(
-                jnp.asarray(food), jnp.asarray(raw_mat),
-                jnp.asarray(land), jnp.asarray(water), jnp.asarray(pollution))
-            food[:]      = np.asarray(jf)
-            raw_mat[:]   = np.asarray(jr)
-            land[:]      = np.asarray(jl)
-            water[:]     = np.asarray(jw)
-            pollution[:] = np.asarray(jp)
-        return regen_jax
-
-    # ── Numba CUDA ───────────────────────────────────────────────────────────
-    if backend == "numba_gpu" and _try_import("numba"):
-        from numba import cuda
-        if cuda.is_available():
-            try:
-                @cuda.jit
-                def _cuda_kernel(food, raw_mat, land, water, pollution):
-                    x, y = cuda.grid(2)
-                    W, H = food.shape
-                    if x < W and y < H:
-                        f = food[x,y];      food[x,y]      = min(FOOD_CAP,      f + FOOD_RATE*f*(1-f/FOOD_CAP)            + NUDGE)
-                        r = raw_mat[x,y];   raw_mat[x,y]   = min(RAW_CAP,       r + RAW_RATE*r*(1-r/RAW_CAP)              + NUDGE)
-                        l = land[x,y];      land[x,y]      = min(LAND_CAP,      l + LAND_RATE*l*(1-l/LAND_CAP)            + NUDGE)
-                        w = water[x,y];     water[x,y]     = min(WATER_CAP,     w + WATER_RATE*w*(1-w/WATER_CAP)          + NUDGE)
-                        p = pollution[x,y]; pollution[x,y] = min(POLLUTION_CAP, max(0.0, p * (1 - POLLUTION_DECAY)))
-
-                def regen_cuda(food, raw_mat, land, water, pollution):
-                    W, H = food.shape
-                    tpb = (16, 16)
-                    bpg = ((W+15)//16, (H+15)//16)
-                    df = cuda.to_device(food);      dr = cuda.to_device(raw_mat)
-                    dl = cuda.to_device(land);      dw = cuda.to_device(water)
-                    dp = cuda.to_device(pollution)
-                    _cuda_kernel[bpg, tpb](df, dr, dl, dw, dp)
-                    df.copy_to_host(food);      dr.copy_to_host(raw_mat)
-                    dl.copy_to_host(land);      dw.copy_to_host(water)
-                    dp.copy_to_host(pollution)
-                return regen_cuda
-            except Exception:
-                pass
-
-    # ── Numba CPU ────────────────────────────────────────────────────────────
-    if backend in ("numba_cpu", "numba_gpu") and _try_import("numba"):
-        try:
-            from numba import njit, prange
-
-            @njit(parallel=True, cache=True)
-            def _numba(food, raw_mat, land, water, pollution):
-                W, H = food.shape
-                for x in prange(W):
-                    for y in range(H):
-                        f = food[x,y];      food[x,y]      = min(FOOD_CAP,      f + FOOD_RATE*f*(1-f/FOOD_CAP)            + NUDGE)
-                        r = raw_mat[x,y];   raw_mat[x,y]   = min(RAW_CAP,       r + RAW_RATE*r*(1-r/RAW_CAP)              + NUDGE)
-                        l = land[x,y];      land[x,y]      = min(LAND_CAP,      l + LAND_RATE*l*(1-l/LAND_CAP)            + NUDGE)
-                        w = water[x,y];     water[x,y]     = min(WATER_CAP,     w + WATER_RATE*w*(1-w/WATER_CAP)          + NUDGE)
-                        p = pollution[x,y]; pollution[x,y] = min(POLLUTION_CAP, max(0.0, p * (1 - POLLUTION_DECAY)))
-
-            def regen_numba(food, raw_mat, land, water, pollution):
-                _numba(food, raw_mat, land, water, pollution)
-            return regen_numba
-        except Exception:
-            pass
-
-    # ── NumPy fallback ───────────────────────────────────────────────────────
-    import numpy as np
-
-    def regen_numpy(food, raw_mat, land, water, pollution):
-        np.clip(food    + FOOD_RATE  * food    * (1 - food    / FOOD_CAP)  + NUDGE, 0, FOOD_CAP,      out=food)
-        np.clip(raw_mat + RAW_RATE   * raw_mat * (1 - raw_mat / RAW_CAP)   + NUDGE, 0, RAW_CAP,       out=raw_mat)
-        np.clip(land    + LAND_RATE  * land    * (1 - land    / LAND_CAP)  + NUDGE, 0, LAND_CAP,      out=land)
-        np.clip(water   + WATER_RATE * water   * (1 - water   / WATER_CAP) + NUDGE, 0, WATER_CAP,     out=water)
-        np.clip(pollution * (1 - POLLUTION_DECAY),                                  0, POLLUTION_CAP,  out=pollution)
-    return regen_numpy
-
-
-def _try_import(name):
-    try: __import__(name); return True
-    except ImportError: return False
-
-
-# ── Convenience ──────────────────────────────────────────────────────────────
-
-_cached_config: Optional[AccelConfig] = None
-_cached_hw: Optional[HardwareInfo] = None
-
-
-def auto_configure(verbose=True) -> AccelConfig:
-    global _cached_config, _cached_hw
-    if _cached_config is not None:
-        return _cached_config
-    hw = detect_hardware()
-    cfg = get_accel_config(hw)
-    _cached_config = cfg
-    _cached_hw = hw
-    if verbose:
-        print(_hardware_report(hw, cfg))
     return cfg
 
 
-def _hardware_report(hw, cfg):
-    lines = ["", "="*56, "  HARDWARE REPORT", "="*56,
-             f"  Platform     : {'Google Colab' if hw.is_colab else 'Local'}",
-             f"  CPU cores    : {hw.cpu_cores}",
-             f"  RAM          : {hw.ram_gb:.1f} GB"]
-    for i, g in enumerate(hw.gpus):
-        lines.append(f"  GPU {i}         : {g.name} ({g.memory_gb:.0f} GB)")
-    if not hw.gpus:
-        lines.append("  GPU          : none")
-    lines += [
-        f"  JAX          : {'yes (GPU)' if hw.has_jax_gpu else 'yes' if hw.has_jax else 'no'}",
-        f"  Numba        : {'yes (CUDA)' if hw.has_numba_cuda else 'yes' if hw.has_numba else 'no'}",
-        "-"*56, cfg.summary(),
+def _hardware_report(hw: dict, cfg: AccelConfig) -> str:
+    """Format a human-readable hardware report."""
+    lines = [
+        "=" * 50,
+        "  HARDWARE REPORT",
+        "=" * 50,
+        f"  GPU tier     : {hw['gpu_tier']}",
+        f"  GPU name     : {hw['gpu_name']}",
+        f"  GPU VRAM     : {hw['gpu_mem_mb']/1024:.1f} GB" if hw['gpu_mem_mb'] else "  GPU VRAM     : N/A",
+        f"  CPU cores    : {hw['cpu_count']}",
+        f"  Backend      : {cfg.backend}",
+        f"  Workers      : {cfg.n_workers}",
+        f"  Rec. seeds   : {cfg.recommended_seeds}",
+        f"  Rec. steps   : {cfg.recommended_steps}",
+        "=" * 50,
     ]
     return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# Auto-configure (main entry point)
+# ---------------------------------------------------------------------------
+
+def auto_configure(verbose: bool = True) -> AccelConfig:
+    """
+    Detect hardware and return the best AccelConfig.
+
+    Multiprocessing safety: when called from a worker process, we must NOT
+    try to initialize JAX GPU (causes OOM when 10+ processes fight for VRAM).
+    Worker processes should use numpy or jax_cpu.
+    """
+    hw = detect_hardware()
+    cfg = get_accel_config(hw)
+
+    # Test that the selected backend actually works
+    cfg.backend = _validate_backend(cfg.backend, verbose=verbose)
+
+    if verbose:
+        print(_hardware_report(hw, cfg))
+
+    return cfg
+
+
+def _validate_backend(backend: str, verbose: bool = True) -> str:
+    """
+    Test that the selected backend actually initializes.
+    Falls back through the chain until something works.
+    Returns the validated backend string.
+    """
+    # Force JAX to use CPU+GPU with graceful fallback
+    if backend.startswith("jax"):
+        try:
+            # CRITICAL: Disable JAX's default 90% GPU memory preallocation.
+            # Without this, the first process grabs ~72GB on an H100/A100
+            # and every other process OOMs.
+            os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")
+            # Alternatively, limit each process to a fraction:
+            # os.environ.setdefault("XLA_PYTHON_CLIENT_MEM_FRACTION", "0.05")
+
+            # Set platform preference before importing JAX
+            os.environ.setdefault("JAX_PLATFORMS", "cuda,cpu")
+            # Suppress noisy JAX warnings
+            os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "2")
+
+            import jax
+            import jax.numpy as jnp
+
+            if backend == "jax_gpu":
+                try:
+                    devices = jax.devices("gpu")
+                    if devices:
+                        # Actually test GPU computation (catches OOM, driver issues)
+                        test = jnp.ones(100, dtype=jnp.float64)
+                        _ = (test + test).block_until_ready()
+                        if verbose:
+                            print(f"  JAX GPU validated: {devices[0].device_kind}")
+                        return "jax_gpu"
+                    else:
+                        raise RuntimeError("No GPU devices found")
+                except Exception as e:
+                    if verbose:
+                        print(f"  JAX GPU failed ({e}), trying JAX CPU...")
+                    # Fall through to jax_cpu
+
+            # Try JAX CPU
+            try:
+                cpu_devs = jax.devices("cpu")
+                test = jnp.ones(100, dtype=jnp.float64)
+                _ = (test + test).block_until_ready()
+                if verbose:
+                    print("  JAX CPU validated")
+                return "jax_cpu"
+            except Exception as e:
+                if verbose:
+                    print(f"  JAX CPU failed ({e}), falling back to numpy")
+
+        except ImportError:
+            if verbose:
+                print("  JAX not installed, falling back to numpy")
+        except Exception as e:
+            if verbose:
+                print(f"  JAX init failed ({e}), falling back to numpy")
+
+    if backend.startswith("numba"):
+        try:
+            import numba
+            if verbose:
+                print(f"  Numba validated: {numba.__version__}")
+            return backend
+        except ImportError:
+            if verbose:
+                print("  Numba not installed, falling back to numpy")
+
+    if verbose:
+        print("  Using numpy backend")
+    return "numpy"
+
+
+# ---------------------------------------------------------------------------
+# Resource regeneration functions
+# ---------------------------------------------------------------------------
+
+def build_regen_fn(backend: str):
+    """
+    Return a resource regeneration function for the given backend.
+    All backends produce numerically identical results.
+    """
+    if backend == "jax_gpu" or backend == "jax_cpu":
+        try:
+            return _build_jax_regen()
+        except Exception:
+            pass  # Fall through to numpy
+
+    if backend.startswith("numba"):
+        try:
+            return _build_numba_regen(gpu=(backend == "numba_gpu"))
+        except Exception:
+            pass  # Fall through to numpy
+
+    return _build_numpy_regen()
+
+
+def _build_numpy_regen():
+    """Pure NumPy regeneration (always works)."""
+    def regen(food, raw, land, water, pollution):
+        food += FOOD_REGEN * (1 - food / FOOD_CAP)
+        np.clip(food, 0, FOOD_CAP, out=food)
+        raw += RAW_REGEN * (1 - raw / RAW_CAP)
+        np.clip(raw, 0, RAW_CAP, out=raw)
+        water += WATER_REGEN * (1 - water / WATER_CAP)
+        np.clip(water, 0, WATER_CAP, out=water)
+        pollution *= (1 - POLLUTION_DECAY)
+        np.clip(pollution, 0, POLLUTION_CAP, out=pollution)
+    return regen
+
+
+def _build_jax_regen():
+    """JAX-accelerated regeneration."""
+    import jax.numpy as jnp
+    from jax import jit
+
+    @jit
+    def _regen_jax(food, raw, land, water, pollution):
+        food = jnp.clip(food + FOOD_REGEN * (1 - food / FOOD_CAP), 0, FOOD_CAP)
+        raw = jnp.clip(raw + RAW_REGEN * (1 - raw / RAW_CAP), 0, RAW_CAP)
+        water = jnp.clip(water + WATER_REGEN * (1 - water / WATER_CAP), 0, WATER_CAP)
+        pollution = jnp.clip(pollution * (1 - POLLUTION_DECAY), 0, POLLUTION_CAP)
+        return food, raw, land, water, pollution
+
+    def regen(food, raw, land, water, pollution):
+        import jax.numpy as jnp
+        f, r, l, w, p = _regen_jax(
+            jnp.array(food), jnp.array(raw), jnp.array(land),
+            jnp.array(water), jnp.array(pollution))
+        food[:] = np.asarray(f)
+        raw[:] = np.asarray(r)
+        water[:] = np.asarray(w)
+        pollution[:] = np.asarray(p)
+
+    return regen
+
+
+def _build_numba_regen(gpu: bool = False):
+    """Numba-accelerated regeneration."""
+    import numba
+
+    if gpu:
+        from numba import cuda
+
+        @cuda.jit
+        def _regen_kernel(food, raw, water, pollution,
+                          food_cap, raw_cap, water_cap, poll_cap,
+                          food_rate, raw_rate, water_rate, poll_decay):
+            i, j = cuda.grid(2)
+            if i < food.shape[0] and j < food.shape[1]:
+                food[i, j] = min(food_cap, max(0.0, food[i, j] + food_rate * (1 - food[i, j] / food_cap)))
+                raw[i, j] = min(raw_cap, max(0.0, raw[i, j] + raw_rate * (1 - raw[i, j] / raw_cap)))
+                water[i, j] = min(water_cap, max(0.0, water[i, j] + water_rate * (1 - water[i, j] / water_cap)))
+                pollution[i, j] = min(poll_cap, max(0.0, pollution[i, j] * (1 - poll_decay)))
+
+        def regen(food, raw, land, water, pollution):
+            tpb = (16, 16)
+            bpg_x = (food.shape[0] + tpb[0] - 1) // tpb[0]
+            bpg_y = (food.shape[1] + tpb[1] - 1) // tpb[1]
+            _regen_kernel[(bpg_x, bpg_y), tpb](
+                food, raw, water, pollution,
+                FOOD_CAP, RAW_CAP, WATER_CAP, POLLUTION_CAP,
+                FOOD_REGEN, RAW_REGEN, WATER_REGEN, POLLUTION_DECAY)
+
+        return regen
+
+    else:
+        @numba.njit(parallel=True)
+        def regen(food, raw, land, water, pollution):
+            for i in numba.prange(food.shape[0]):
+                for j in range(food.shape[1]):
+                    food[i, j] = min(FOOD_CAP, max(0.0, food[i, j] + FOOD_REGEN * (1 - food[i, j] / FOOD_CAP)))
+                    raw[i, j] = min(RAW_CAP, max(0.0, raw[i, j] + RAW_REGEN * (1 - raw[i, j] / RAW_CAP)))
+                    water[i, j] = min(WATER_CAP, max(0.0, water[i, j] + WATER_REGEN * (1 - water[i, j] / WATER_CAP)))
+                    pollution[i, j] = min(POLLUTION_CAP, max(0.0, pollution[i, j] * (1 - POLLUTION_DECAY)))
+
+        return regen

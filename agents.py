@@ -44,9 +44,9 @@ class AgentType(Enum):
 
 SURVIVAL_THRESHOLD = 1.0       # agents with wealth <= this die
 REPRODUCTION_COST = 50.0       # wealth deducted when reproducing
-REPRODUCTION_THRESHOLD = 100.0 # minimum wealth to reproduce (lowered from 150)
-ENTREPRENEURSHIP_THRESHOLD = 200.0  # minimum wealth to found a firm
-ENTREPRENEURSHIP_PROB = 0.005       # probability per step of founding
+REPRODUCTION_THRESHOLD = 200.0 # minimum wealth to reproduce
+ENTREPRENEURSHIP_THRESHOLD = 300.0  # minimum wealth to found a firm
+ENTREPRENEURSHIP_PROB = 0.003       # probability per step of founding
 
 
 # ---------------------------------------------------------------------------
@@ -160,9 +160,12 @@ class WorkerAgent(Agent):
         # Pay rent for occupied cell
         self._pay_rent()
 
-        # Possibly reproduce (pollution reduces reproductive probability)
+        # Possibly reproduce — harder when population is high (carrying capacity)
         if self.wealth >= REPRODUCTION_THRESHOLD:
-            repro_prob = 0.01 * max(0.1, 1.0 - local_pollution * 0.02)
+            # Base prob scaled down by population pressure
+            pop_ratio = len(self.model.workers) / self.model.n_workers_initial
+            carrying_pressure = max(0.1, 1.0 / pop_ratio)  # halves at 2x pop
+            repro_prob = 0.003 * carrying_pressure * max(0.1, 1.0 - local_pollution * 0.02)
             if self.model.rng.random() < repro_prob:
                 self._reproduce()
 
@@ -504,7 +507,7 @@ class FirmAgent(Agent):
         if n_workers == 0:
             return
         alpha = 0.35
-        A = 1.5 * self.model.infrastructure_bonus  # TFP scaled by public infrastructure
+        A = 3.0 * self.model.infrastructure_bonus  # TFP: higher base for viable wages
         K = max(self.capital_stock, 1.0)
         L = max(sum(w.skill for w in self.workers.values()), 0.01)
         output = A * (K ** alpha) * (L ** (1 - alpha))
@@ -547,31 +550,46 @@ class FirmAgent(Agent):
 
     def _set_wage(self):
         """Set wage based on profitability and labor market conditions."""
-        if self.cartel_id is not None:
-            # Cartels suppress wages
-            self.offered_wage = max(1.5, self.offered_wage * 0.99)
-        elif self.profit > 0:
-            # Profitable: can afford to raise wages to attract workers
-            n_workers = len(self.workers)
-            if n_workers < 3:
-                # Desperate for workers
-                self.offered_wage = min(15.0, self.offered_wage * 1.05)
-            else:
-                # Stable, modest raises
-                self.offered_wage = min(15.0, self.offered_wage * 1.01)
-        else:
-            # Unprofitable: cut wages
-            self.offered_wage = max(1.0, self.offered_wage * 0.95)
-
-        # Wage should never exceed revenue per worker
         n = max(len(self.workers), 1)
-        max_affordable = max(1.0, self.revenue / n * 0.8)
-        self.offered_wage = min(self.offered_wage, max_affordable)
+        revenue_per_worker = self.revenue / n if self.revenue > 0 else 0
+
+        if self.cartel_id is not None:
+            # Cartels suppress wages to ~40% of revenue per worker
+            target = revenue_per_worker * 0.40
+            self.offered_wage = max(1.0, self.offered_wage * 0.97 + target * 0.03)
+        elif self.profit > 0:
+            # Profitable: share ~60% of revenue per worker as wages
+            target = revenue_per_worker * 0.60
+            if len(self.workers) < 5:
+                # Small firm, need to attract: offer more
+                target = revenue_per_worker * 0.70
+            self.offered_wage = max(1.5, self.offered_wage * 0.9 + target * 0.1)
+        else:
+            # Unprofitable: cut toward 50% of revenue
+            target = revenue_per_worker * 0.50
+            self.offered_wage = max(1.0, self.offered_wage * 0.9 + target * 0.1)
+
+        # Hard cap at revenue per worker (can't pay more than you earn)
+        if revenue_per_worker > 0:
+            self.offered_wage = min(self.offered_wage, revenue_per_worker * 0.85)
+        self.offered_wage = max(1.0, min(20.0, self.offered_wage))
 
     def _consider_cartel(self):
+        # Existing cartel: check for dissolution
         if self.cartel_id is not None:
+            # Defection: profitable firms leave cartels (cartel suppresses wages,
+            # but if firm is profitable enough it doesn't need the cartel)
+            if self.profit > 20 and self.model.rng.random() < 0.05:
+                self._leave_cartel()
+                return
+            # Random antitrust breakup
+            if self.model.rng.random() < 0.01:
+                self._leave_cartel()
+                return
             return
-        if self.model.rng.random() > 0.02:
+
+        # Formation: lower probability, requires multiple nearby firms
+        if self.model.rng.random() > 0.01:
             return
         if self.pos is None:
             return
@@ -597,12 +615,48 @@ class FirmAgent(Agent):
             self.pollution_factor = min(0.60, self.pollution_factor * 1.4)
             candidate.pollution_factor = min(0.60, candidate.pollution_factor * 1.4)
 
+    def _leave_cartel(self):
+        """Exit current cartel."""
+        if self.cartel_id is not None and self.cartel_id in self.model.active_cartels:
+            self.model.active_cartels[self.cartel_id].discard(self.unique_id)
+            # If only one member left, dissolve the cartel
+            remaining = self.model.active_cartels.get(self.cartel_id, set())
+            if len(remaining) < 2:
+                for member_id in list(remaining):
+                    member = self.model.get_agent_by_id(member_id)
+                    if member and isinstance(member, FirmAgent):
+                        member.cartel_id = None
+                        member.cartel_partners = []
+                if self.cartel_id in self.model.active_cartels:
+                    del self.model.active_cartels[self.cartel_id]
+        self.cartel_id = None
+        self.cartel_partners = []
+        # Pollution factor slowly recovers when leaving cartel
+        self.pollution_factor = max(0.05, self.pollution_factor * 0.85)
+
     def hire_worker(self, worker: "WorkerAgent"):
-        if worker.unique_id not in self.workers:
-            self.workers[worker.unique_id] = worker
-            worker.employed = True
-            worker.employer_id = self.unique_id
-            worker.wage = self.offered_wage
+        """Hire worker only if the marginal product justifies the wage."""
+        if worker.unique_id in self.workers:
+            return
+        # Check marginal product: would adding this worker produce enough?
+        n_current = len(self.workers)
+        max_workers = max(5, int(self.capital_stock ** 0.5))  # capacity scales with capital
+        if n_current >= max_workers:
+            return  # at capacity
+        # Estimate marginal product (Cobb-Douglas derivative w.r.t. L)
+        alpha = 0.35
+        A = 1.5 * self.model.infrastructure_bonus
+        K = max(self.capital_stock, 1.0)
+        L = max(sum(w.skill for w in self.workers.values()) + worker.skill, 0.01)
+        marginal_product = A * (1 - alpha) * (K ** alpha) * (L ** (-alpha))
+        price = self.model.economy.prices.get("goods", 1.0)
+        if marginal_product * price < self.offered_wage * 0.5:
+            return  # not worth hiring
+
+        self.workers[worker.unique_id] = worker
+        worker.employed = True
+        worker.employer_id = self.unique_id
+        worker.wage = self.offered_wage
 
     def fire_worker(self, worker_id: int):
         if worker_id in self.workers:

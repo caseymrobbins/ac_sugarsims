@@ -377,11 +377,11 @@ class PlannerAgent(Agent):
     def step(self):
         self._steps_since_update += 1
 
-        # Redistribute collected tax revenue
-        self._redistribute()
-
-        # Apply public investments -> model bonus variables
+        # Apply public investments FIRST (before UBI eats the revenue)
         self._apply_investments()
+
+        # Then redistribute remaining revenue as UBI
+        self._redistribute()
 
         # Policy update cycle
         if self._steps_since_update >= POLICY_UPDATE_INTERVAL:

@@ -3,27 +3,9 @@ run_experiments.py
 ------------------
 Experiment runner for the multi-agent economic simulation.
 
-Full protocol:
-  - 3 objective conditions: SUM, NASH, JAM
-  - 20 random seeds per condition
-  - 100 episodes per seed (not used in this implementation — 1 episode per seed)
-  - 1500 timesteps per episode
-
-Test protocol (--test):
-  - 3 conditions × 10 seeds × 150 timesteps
-
-Parallelisation:
-  - Uses multiprocessing.Pool (compatible with Google Colab)
-  - Optional Ray support if available
-
-Data storage:
-  - results/raw_data/      : per-episode metrics Parquet
-  - results/processed_data/: episode summaries, trajectories
-  - results/plots/         : all static plots
-  - results/animations/    : GIF animations
-  - results/statistical_tests/
-  - results/summary_tables/
-  - results/logs/          : run logs
+Key fix: Worker processes use CPU/numpy backend instead of all trying to
+initialize JAX GPU simultaneously (which causes CUDA_ERROR_OUT_OF_MEMORY).
+The GPU is only used for the main process's hardware detection and warmup.
 """
 
 from __future__ import annotations
@@ -31,15 +13,24 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import multiprocessing
 import os
 import sys
 import time
 import traceback
-from multiprocessing import Pool, cpu_count
 from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
+
+# CUDA/JAX are incompatible with fork(). Use spawn for worker processes.
+# This must happen before any Pool is created.
+try:
+    multiprocessing.set_start_method("spawn", force=False)
+except RuntimeError:
+    pass  # Already set (e.g. from notebook cell)
+
+from multiprocessing import Pool, cpu_count
 
 # Configure matplotlib before any imports that use it
 import matplotlib
@@ -72,10 +63,27 @@ def run_single_episode(args: Tuple) -> Optional[Dict]:
 
     args = (objective, seed, n_steps, episode_id, output_dir, save_raw, accel_cfg)
     accel_cfg may be None (auto-detect inside worker).
+
+    IMPORTANT: accel_cfg passed to workers should use a CPU backend
+    (numpy or jax_cpu) to avoid GPU OOM when many workers run in parallel.
     """
     objective, seed, n_steps, episode_id, output_dir, save_raw, accel_cfg = args
 
     try:
+        # Force CPU backend in worker processes to avoid GPU OOM
+        if accel_cfg is not None and accel_cfg.backend in ("jax_gpu", "numba_gpu"):
+            from hardware import AccelConfig
+            worker_cfg = AccelConfig(
+                backend="numpy",  # safe for parallel workers
+                n_workers=accel_cfg.n_workers,
+                recommended_seeds=accel_cfg.recommended_seeds,
+                recommended_steps=accel_cfg.recommended_steps,
+                gpu_name=accel_cfg.gpu_name,
+                gpu_mem_mb=accel_cfg.gpu_mem_mb,
+            )
+        else:
+            worker_cfg = accel_cfg
+
         from environment import EconomicModel
         from metrics import episode_summary
 
@@ -87,7 +95,7 @@ def run_single_episode(args: Tuple) -> Optional[Dict]:
             n_firms=20,
             n_landowners=15,
             objective=objective,
-            accel_config=accel_cfg,
+            accel_config=worker_cfg,
         )
 
         # Run steps
@@ -183,10 +191,7 @@ def run_visualisation_pass(results_df: pd.DataFrame,
             raw_df = pd.read_parquet(raw_path)
             trajectories[obj] = raw_df
 
-            # Use terminal worker wealth stats to approximate distribution
             last = raw_df.iloc[-1]
-            # Reconstruct approximate wealth distribution from summary stats
-            # (actual agent wealth not stored in parquet — re-run for one episode)
             final_wealth[obj] = _reconstruct_wealth_distribution(
                 last.get("worker_mean", 50),
                 last.get("worker_std", 30),
@@ -238,10 +243,10 @@ def _reconstruct_wealth_distribution(mean: float, std: float, gini: float,
     Approximate reconstruction of wealth distribution from summary statistics
     using a log-normal parameterisation consistent with the Gini coefficient.
     """
-    # For lognormal: Gini ≈ 2*Φ(σ/√2) - 1, so σ ≈ √2 * Φ⁻¹((Gini+1)/2)
     from scipy.special import erfinv
+    gini = max(0.01, min(0.99, float(gini)))  # clamp to valid range
     sigma = max(0.1, np.sqrt(2) * erfinv(gini))
-    mu = np.log(max(mean, 1.0)) - sigma ** 2 / 2
+    mu = np.log(max(float(mean), 1.0)) - sigma ** 2 / 2
     rng = np.random.default_rng(0)
     w = rng.lognormal(mean=mu, sigma=sigma, size=n)
     return w.clip(0)
@@ -265,7 +270,7 @@ def main():
     parser.add_argument("--steps", type=int, default=None,
                         help="Steps per episode (overrides protocol default)")
     parser.add_argument("--workers", type=int,
-                        default=None,  # set after hardware detection
+                        default=None,
                         help="Number of parallel worker processes (default: auto)")
     parser.add_argument("--output-dir", default="results",
                         help="Root output directory")
@@ -279,7 +284,7 @@ def main():
     from hardware import auto_configure
     accel_cfg = auto_configure(verbose=True)
 
-    # Protocol parameters (use hardware-recommended defaults if not overridden)
+    # Protocol parameters
     if args.test:
         n_seeds = args.seeds or 10
         n_steps = args.steps or 150
@@ -311,7 +316,6 @@ def main():
 
     results = []
     if n_workers <= 1:
-        # Serial execution (debug / Colab)
         for i, task in enumerate(tasks):
             logger.info(f"[{i+1}/{total}] Running {task[0]} seed={task[1]}")
             result = run_single_episode(task)
