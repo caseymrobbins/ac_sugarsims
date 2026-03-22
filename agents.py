@@ -101,8 +101,9 @@ class WorkerAgent(Agent):
         self.income_last_step = 0.0
         self.harvested_this_step = 0.0
 
-        # Pay metabolism cost
-        self.wealth -= self.metabolism
+        # Pay metabolism cost (reduced by healthcare investment)
+        effective_metabolism = self.metabolism * max(0.0, 1.0 - self.model._healthcare_bonus)
+        self.wealth -= effective_metabolism
         if self.wealth <= SURVIVAL_THRESHOLD:
             self._die()
             return
@@ -182,10 +183,14 @@ class WorkerAgent(Agent):
         if pos is None:
             return
         x, y = pos
-        food_val = float(self.model.food_grid[x, y])
-        raw_val  = float(self.model.raw_grid[x, y])
+        food_val  = float(self.model.food_grid[x, y])
+        raw_val   = float(self.model.raw_grid[x, y])
+        water_val = float(self.model.water_grid[x, y])
+        # Infrastructure TFP and water availability both boost harvest capacity
+        tfp = self.model.infrastructure_bonus
+        water_bonus = 1.0 + 0.1 * min(water_val / max(self.model.water_grid.max(), 1.0), 1.0)
         amount = min(food_val + raw_val * 0.5,
-                     self.skill * 5.0 * (1 + self.model.rng.exponential(0.1)))
+                     self.skill * 5.0 * tfp * water_bonus * (1 + self.model.rng.exponential(0.1)))
         amount = max(0, amount)
         take_food = min(food_val, amount * 0.7)
         take_raw  = min(raw_val,  amount * 0.3)
@@ -234,7 +239,8 @@ class WorkerAgent(Agent):
         def cell_value(pos):
             return (float(self.model.food_grid[pos[0], pos[1]])
                     + float(self.model.raw_grid[pos[0], pos[1]])
-                    + float(self.model.capital_grid[pos[0], pos[1]]))
+                    + float(self.model.capital_grid[pos[0], pos[1]])
+                    + float(self.model.water_grid[pos[0], pos[1]]) * 0.5)
         best_cell = max(empty_cells, key=cell_value)
         grid.move_agent(self, best_cell)
 
@@ -253,8 +259,10 @@ class WorkerAgent(Agent):
         if self.wealth < REPRODUCTION_THRESHOLD:
             return
         self.wealth -= REPRODUCTION_COST
+        # Education quality gives a small intergenerational skill boost
+        edu_boost = (self.model._education_quality - 1.0) * 0.05
         child_skill = float(np.clip(
-            self.skill + self.model.rng.normal(0, 0.05), 0.05, 1.0))
+            self.skill + edu_boost + self.model.rng.normal(0, 0.05), 0.05, 1.0))
         child = WorkerAgent(
             model=self.model,
             wealth=REPRODUCTION_COST * 0.8,
@@ -367,7 +375,7 @@ class FirmAgent(Agent):
         if n_workers == 0:
             return
         alpha = 0.35
-        A = 1.5
+        A = 1.5 * self.model.infrastructure_bonus  # TFP scaled by public infrastructure
         K = max(self.capital_stock, 1.0)
         L = max(sum(w.skill for w in self.workers.values()), 0.01)
         output = A * (K ** alpha) * (L ** (1 - alpha))

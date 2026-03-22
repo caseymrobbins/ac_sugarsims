@@ -60,6 +60,7 @@ class Economy:
         "raw_materials": 0.8,
         "capital": 2.0,
         "land": 3.0,
+        "water": 0.5,
     }
 
     def __init__(self, model: "EconomicModel"):
@@ -225,6 +226,11 @@ class Economy:
     # ------------------------------------------------------------------
     # Trade network
     # ------------------------------------------------------------------
+
+    def update_market_sentiment(self):
+        """Update market sentiment based on recent price movements."""
+        # Sentiment is implicit in price volatility; no separate state needed.
+        pass
 
     def refresh_trade_network(self):
         """

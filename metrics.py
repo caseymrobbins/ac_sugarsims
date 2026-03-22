@@ -103,6 +103,20 @@ def collect_step_metrics(model: "EconomicModel") -> Dict[str, Any]:
     m["planner_min_wage"] = model.planner.policy["min_wage"]
     m["planner_tax_worker"] = model.planner.policy["tax_rate_worker"]
     m["planner_tax_firm"] = model.planner.policy["tax_rate_firm"]
+    m["planner_agriculture_inv"]    = model.planner.policy["agriculture_investment"]
+    m["planner_infrastructure_inv"] = model.planner.policy["infrastructure_investment"]
+    m["planner_healthcare_inv"]     = model.planner.policy["healthcare_investment"]
+    m["planner_education_inv"]      = model.planner.policy["education_investment"]
+
+    # Public investment effects (current bonus levels)
+    m["infrastructure_level"]  = model._infrastructure_level
+    m["healthcare_bonus"]      = model._healthcare_bonus
+    m["education_quality"]     = model._education_quality
+    m["agriculture_bonus"]     = model._agriculture_bonus
+
+    # Water resource
+    m["mean_water"] = float(np.mean(model.water_grid))
+    m["min_water"]  = float(np.min(model.water_grid))
 
     # Power-law exponent (Pareto tail)
     m["wealth_power_law_alpha"] = _pareto_alpha(all_w)
@@ -289,6 +303,11 @@ def episode_summary(metrics_history: List[Dict]) -> Dict[str, Any]:
         "trade_density", "trade_max_centrality",
         "planner_ubi", "planner_min_wage",
         "planner_tax_worker", "planner_tax_firm",
+        "planner_agriculture_inv", "planner_infrastructure_inv",
+        "planner_healthcare_inv", "planner_education_inv",
+        "infrastructure_level", "healthcare_bonus",
+        "education_quality", "agriculture_bonus",
+        "mean_water", "min_water",
         "monopoly_detected", "cartel_detected", "poverty_trap_detected",
     ]
     for key in scalar_keys:

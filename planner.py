@@ -61,6 +61,11 @@ class PlannerAgent(Agent):
             "ubi_payment": 0.0,
             "min_wage": 1.0,
             "harvest_limit": 10.0,
+            # Public investment instruments (units of budget per step)
+            "agriculture_investment": 0.5,      # → _agriculture_bonus
+            "infrastructure_investment": 0.5,   # → _infrastructure_level
+            "healthcare_investment": 0.0,       # → _healthcare_bonus
+            "education_investment": 0.0,        # → _education_quality
         }
 
         # Revenue pool for redistribution
@@ -83,6 +88,9 @@ class PlannerAgent(Agent):
 
         # Redistribute collected tax revenue
         self._redistribute()
+
+        # Apply public investments → model bonus variables
+        self._apply_investments()
 
         # Periodically update policy
         if self._steps_since_update >= POLICY_UPDATE_INTERVAL:
@@ -132,6 +140,34 @@ class PlannerAgent(Agent):
     # ------------------------------------------------------------------
     # Redistribution
     # ------------------------------------------------------------------
+
+    def _apply_investments(self):
+        """
+        Translate investment instrument values into model bonus variables.
+
+        Bonuses scale linearly with investment level; investments are funded
+        from tax_revenue (flat cost per unit per step).  If revenue is
+        insufficient the investment level is pro-rated.
+        """
+        COST_PER_UNIT = 0.5   # wealth units deducted per investment unit per step
+
+        agri  = self.policy["agriculture_investment"]
+        infra = self.policy["infrastructure_investment"]
+        hlth  = self.policy["healthcare_investment"]
+        edu   = self.policy["education_investment"]
+
+        total_cost = (agri + infra + hlth + edu) * COST_PER_UNIT
+        if total_cost > 0:
+            ratio = min(1.0, self.tax_revenue / (total_cost + 1e-9))
+            self.tax_revenue = max(0.0, self.tax_revenue - total_cost * ratio)
+        else:
+            ratio = 1.0
+
+        # Map investments → model bonus variables
+        self.model._agriculture_bonus    = 1.0 + 0.3  * agri  * ratio
+        self.model._infrastructure_level = 1.0 + 0.2  * infra * ratio
+        self.model._healthcare_bonus     =       0.10 * hlth  * ratio   # up to 30 % metabolism reduction
+        self.model._education_quality    = 1.0 + 0.3  * edu   * ratio
 
     def _redistribute(self):
         """Distribute UBI and targeted transfers."""
@@ -234,6 +270,10 @@ class PlannerAgent(Agent):
             "ubi_payment": (0.0, 10.0),
             "min_wage": (0.0, 15.0),
             "harvest_limit": (1.0, 20.0),
+            "agriculture_investment": (0.0, 5.0),
+            "infrastructure_investment": (0.0, 5.0),
+            "healthcare_investment": (0.0, 3.0),
+            "education_investment": (0.0, 3.0),
         }
         lo, hi = limits.get(key, (0.0, 1.0))
         return float(np.clip(val, lo, hi))
