@@ -179,18 +179,21 @@ class BankAgent(Agent):
         self.total_deposits = sum(self.deposits.values())
 
     def _attract_deposits(self):
-        """Workers with surplus wealth deposit at the bank."""
-        if self.defunct:
+        """Workers with surplus wealth deposit at the bank. Samples for performance."""
+        if self.defunct or not self.model.workers:
             return
 
-        for worker in self.model.workers:
+        # Sample a small subset each step instead of scanning everyone
+        n_sample = min(20, len(self.model.workers))
+        candidates = self.model.rng.choice(self.model.workers, size=n_sample, replace=False)
+
+        for worker in candidates:
             if worker.wealth < DEPOSIT_THRESHOLD:
                 continue
             if worker.unique_id in self.deposits:
-                continue  # already a depositor
-            # Probability of depositing scales with wealth and trust
+                continue
             trust = getattr(worker, 'authority_trust', 0.7)
-            deposit_prob = 0.01 * trust * min(worker.wealth / 200, 1.0)
+            deposit_prob = 0.05 * trust * min(worker.wealth / 200, 1.0)
             if self.model.rng.random() < deposit_prob:
                 deposit_amount = (worker.wealth - DEPOSIT_THRESHOLD) * 0.1
                 if deposit_amount > 1.0:
@@ -200,18 +203,21 @@ class BankAgent(Agent):
                     self.total_deposits += deposit_amount
 
     def _make_loans(self):
-        """Lend to workers who need credit."""
-        if self.defunct:
+        """Lend to workers who need credit. Samples for performance."""
+        if self.defunct or not self.model.workers:
             return
 
-        # Available to lend: deposits minus reserves minus existing loans
         available = (self.total_deposits * (1 - RESERVE_REQUIREMENT)
                     + self.capital * MAX_LEVERAGE_RATIO
                     - self.total_loans)
         if available < LOAN_AMOUNT_BASE:
             return
 
-        for worker in self.model.workers:
+        # Sample a small subset instead of scanning everyone
+        n_sample = min(20, len(self.model.workers))
+        candidates = self.model.rng.choice(self.model.workers, size=n_sample, replace=False)
+
+        for worker in candidates:
             if available < LOAN_AMOUNT_BASE:
                 break
             if worker.unique_id in self.loans:
@@ -241,9 +247,24 @@ class BankAgent(Agent):
                 available -= amount
 
     def _check_bank_run(self):
-        """Depositors with low trust withdraw funds."""
+        """Depositors with low trust withdraw funds. Sample for performance."""
+        if not self.deposits:
+            return
+
+        bank_health = self.wealth / max(self.total_deposits, 1)
+
+        # Only check a sample unless bank is stressed
+        deposit_ids = list(self.deposits.keys())
+        if bank_health > 0.1:
+            # Bank is healthy: spot-check 10 depositors
+            n_check = min(10, len(deposit_ids))
+            check_ids = list(self.model.rng.choice(deposit_ids, size=n_check, replace=False))
+        else:
+            # Bank is stressed: check all (bank run cascades)
+            check_ids = deposit_ids
+
         withdrawals = []
-        for wid in list(self.deposits.keys()):
+        for wid in check_ids:
             worker = self.model.get_agent_by_id(wid)
             if worker is None:
                 withdrawals.append(wid)

@@ -347,13 +347,14 @@ class NewsFirm(Agent):
         if not self.model.workers:
             return
 
-        # Build/refresh audience: workers within network reach
+        # Build/refresh audience: sample workers proportional to capital
         self.audience = []
-        for w in self.model.workers:
-            # Audience = workers who are within network proximity
-            # (simplified: random sample proportional to capital)
-            if self.model.rng.random() < min(0.3, self.capital_stock * 0.0005):
-                self.audience.append(w.unique_id)
+        n_sample = min(50, max(10, int(self.capital_stock * 0.01)), len(self.model.workers))
+        if self.model.workers:
+            sampled = self.model.rng.choice(self.model.workers, size=n_sample, replace=False)
+            for w in sampled:
+                if self.model.rng.random() < min(0.5, self.capital_stock * 0.001):
+                    self.audience.append(w.unique_id)
         self.audience_size = len(self.audience)
 
         # Deliver signal to each audience member

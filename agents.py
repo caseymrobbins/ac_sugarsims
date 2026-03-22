@@ -402,38 +402,40 @@ class WorkerAgent(Agent):
     def _invest_in_firms(self):
         """
         Simple stock market: invest surplus wealth in firms.
-        Returns come from firm profits (dividends), not created from nothing.
-        Wealthier agents invest more and in better firms (information advantage).
+        Only runs every 10 steps to avoid performance issues.
         """
-        # Investment budget: fraction of wealth above threshold
+        # Only invest periodically, not every step
+        if self.model.current_step % 10 != 0:
+            # Still collect dividends every step (cheap: just iterate own investments)
+            self._collect_dividends()
+            return
+
         surplus = self.wealth - 100
         if surplus <= 0:
             return
-        invest_amount = surplus * 0.02  # invest 2% of surplus per step
+        invest_amount = surplus * 0.05  # 5% of surplus every 10 steps
 
-        # Pick a firm to invest in (biased toward profitable ones)
+        # Pick a firm to invest in
         active_firms = [f for f in self.model.firms if not f.defunct and f.profit > 0]
         if not active_firms:
             return
 
-        # Wealthier workers pick better firms (information advantage)
         if self.wealth > 500 and len(active_firms) > 1:
-            # Rich: invest in the most profitable firm
             target = max(active_firms, key=lambda f: f.profit)
         else:
-            # Others: random profitable firm
             target = self.model.rng.choice(active_firms)
 
-        # Transfer wealth to firm as capital investment
         self.wealth -= invest_amount
-        target.capital_stock += invest_amount * 0.9  # 10% transaction cost
-        target.wealth += invest_amount * 0.1  # firm keeps a fee
+        target.capital_stock += invest_amount * 0.9
+        target.wealth += invest_amount * 0.1
 
-        # Record investment
         fid = target.unique_id
         self.investments[fid] = self.investments.get(fid, 0) + invest_amount
 
-        # Collect dividends from existing investments
+        self._collect_dividends()
+
+    def _collect_dividends(self):
+        """Collect dividends from existing investments."""
         self.dividend_income = 0.0
         dead_investments = []
         for fid, amount in self.investments.items():
@@ -441,24 +443,19 @@ class WorkerAgent(Agent):
             if firm is None or not isinstance(firm, FirmAgent) or firm.defunct:
                 dead_investments.append(fid)
                 continue
-            if firm.profit > 0:
-                # Dividend: proportional to investment relative to total capital
-                if firm.capital_stock > 0:
-                    ownership_share = amount / firm.capital_stock
-                    dividend = firm.profit * 0.2 * ownership_share  # 20% of profit to investors
-                    dividend = min(dividend, firm.wealth * 0.1)  # cap at 10% of firm wealth
-                    if dividend > 0:
-                        self.wealth += dividend
-                        firm.wealth -= dividend
-                        self.dividend_income += dividend
-                        self.income_last_step += dividend
+            if firm.profit > 0 and firm.capital_stock > 0:
+                ownership_share = amount / firm.capital_stock
+                dividend = firm.profit * 0.2 * ownership_share
+                dividend = min(dividend, firm.wealth * 0.1)
+                if dividend > 0:
+                    self.wealth += dividend
+                    firm.wealth -= dividend
+                    self.dividend_income += dividend
+                    self.income_last_step += dividend
 
-        # Clean up dead investments (partial loss)
         for fid in dead_investments:
             lost = self.investments.pop(fid)
-            # Lose 80% of investment in bankrupt firms
-            recovery = lost * 0.2
-            self.wealth += recovery
+            self.wealth += lost * 0.2
 
     def _migrate(self):
         grid = self.model.grid
