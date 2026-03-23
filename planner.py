@@ -729,78 +729,124 @@ class PlannerAgent(Agent):
 
     def _objective_cross(self) -> float:
         """
-        R = sum(log(wealth_i)) * equity * productivity * epistemic
-        
-        Topology-engineered objective: individual welfare (log wealth)
-        scaled by system health multipliers that mesa optimizers cannot
+        R = sum(log(w_i)) * (1 - all_gini)^2 * alpha_health
+            * productivity * education * epistemic
+
+        Topology-engineered objective. Nash welfare (sum of log wealth)
+        gated by system health multipliers that mesa optimizers cannot
         decouple from their own profitability.
-        
-        equity       = median/mean wealth (0-1, penalizes concentration)
-        productivity = employment_rate * mean_skill (0-1, penalizes extraction)
-        education    = education_quality / max (0-1, penalizes underinvestment)
-        epistemic    = news_diversity * trust_health (0-1, penalizes info capture)
-        
-        The product structure means ALL factors must be high simultaneously.
-        Mesa optimizers profit most when the scaling factors are high,
-        which means profit-maximizing behavior IS welfare-maximizing behavior.
+
+        Key design choices
+        ------------------
+        1. Use ALL-agent Gini (workers + firms + landowners), not
+           worker-only.  Worker Gini stays ~0.15 even at extreme
+           concentration because the gap is between workers and
+           capital owners, not among workers.
+
+        2. (1 - gini)^2 as the concentration gate.  Quadratic is
+           gentle at low Gini (doesn't punish healthy inequality)
+           and crushing at high Gini (0.9 -> 0.01, 0.95 -> 0.0025).
+           The squared term means the planner sees a smooth, strong
+           gradient AWAY from concentration at every level.
+
+        3. alpha_health = min(1, alpha/3).  Power-law alpha below 1
+           means infinite variance (a few agents dominate the entire
+           distribution).  This catches extreme tail concentration
+           that Gini alone might underweight.
+
+        4. All multipliers are applied as a PRODUCT with nash_base.
+           This means the planner cannot escape the penalty by growing
+           the aggregate: a 5x rise in nash_base from concentration
+           is wiped out by the gate closing from 0.25 to 0.0025.
+
+        Gradient property: deconcentrating (lowering Gini) increases
+        the reward at every step from 0.90 to 0.30, even though
+        nash_base drops along with concentration.  The planner is
+        rewarded for redistribution because the gate opens faster
+        than the base shrinks.
         """
         workers = self.model.workers
         if not workers:
             return float(math.log(EPSILON))
-        
+
+        # ── Base: Nash welfare ──────────────────────────────────────
         wealths = np.array([w.wealth for w in workers], dtype=np.float64)
         wealths = wealths[np.isfinite(wealths)]
         if len(wealths) == 0:
             return float(math.log(EPSILON))
-        
-        # Base: Nash welfare (sum of log wealth)
+
         nash_base = float(np.sum(np.log(np.maximum(wealths, EPSILON))))
-        
-        # Equity multiplier: median/mean (1.0 = perfect equality, ~0 = extreme concentration)
-        mean_w = wealths.mean()
-        median_w = float(np.median(wealths))
-        equity = median_w / max(mean_w, EPSILON)
-        equity = max(equity, 0.01)  # floor to prevent zero
-        
-        # Productivity multiplier: employment * skill
+
+        # ── Concentration gate ──────────────────────────────────────
+        # ALL agent wealths: workers + firms + landowners
+        all_w = self.model.get_all_agent_wealths()
+        all_w = all_w[np.isfinite(all_w) & (all_w > 0)]
+
+        if len(all_w) > 1:
+            s = np.sort(all_w)
+            n = len(s)
+            all_gini = float(
+                (2 * np.sum(np.arange(1, n + 1) * s) - (n + 1) * s.sum())
+                / (n * s.sum())
+            )
+        else:
+            all_gini = 0.0
+
+        gini_gate = max(0.001, (1.0 - all_gini) ** 2)
+
+        # Power-law alpha health
+        alpha_health = 1.0
+        if len(all_w) >= 20:
+            threshold = np.percentile(all_w, 90)
+            tail = all_w[all_w >= threshold]
+            if len(tail) >= 5 and threshold > 0:
+                log_sum = np.sum(np.log(tail / threshold))
+                if log_sum > EPSILON:
+                    alpha = len(tail) / log_sum
+                    alpha_health = min(1.0, max(0.1, alpha / 3.0))
+
+        concentration_gate = gini_gate * alpha_health
+
+        # ── Productivity multiplier ─────────────────────────────────
         n_employed = sum(1 for w in workers if w.employed)
         employment_rate = n_employed / max(len(workers), 1)
         skills = np.array([w.skill for w in workers], dtype=np.float64)
         mean_skill = float(np.mean(skills)) if len(skills) > 0 else 0.5
-        productivity = employment_rate * mean_skill
-        productivity = max(productivity, 0.01)
-        
-        # Education multiplier: education quality normalized
+        productivity = max(0.01, employment_rate * mean_skill)
+
+        # ── Education multiplier ────────────────────────────────────
         edu_quality = self.model._education_quality
         education = min(1.0, max(0.01, (edu_quality - 1.0) * 0.5 + 0.5))
-        
-        # Epistemic multiplier: news diversity * trust health
+
+        # ── Epistemic multiplier ────────────────────────────────────
         news_firms = getattr(self.model, 'news_firms', [])
         active_news = [nf for nf in news_firms if not nf.defunct]
-        captured_news = sum(1 for nf in active_news if nf.captured_by_cartel is not None)
+        captured_news = sum(
+            1 for nf in active_news if nf.captured_by_cartel is not None
+        )
         if active_news:
             news_diversity = 1.0 - (captured_news / len(active_news))
         else:
             news_diversity = 0.5
-        
-        # Trust health: mean authority trust, penalized by low-trust fraction
-        trust_vals = np.array([getattr(w, 'authority_trust', 0.7) for w in workers])
+
+        trust_vals = np.array(
+            [getattr(w, 'authority_trust', 0.7) for w in workers]
+        )
         trust_health = float(np.mean(trust_vals))
         low_trust_frac = float(np.mean(trust_vals < 0.3))
-        trust_health *= (1.0 - low_trust_frac * 2)  # heavy penalty for low-trust agents
+        trust_health *= (1.0 - low_trust_frac * 2)
         trust_health = max(trust_health, 0.01)
-        
-        epistemic = news_diversity * trust_health
-        epistemic = max(epistemic, 0.01)
-        
-        # Combined: nash_base scaled by all multipliers
-        # Using log of product = sum of logs for numerical stability
-        system_health = math.log(equity) + math.log(productivity) + math.log(education) + math.log(epistemic)
-        
-        # Scale: nash_base is large (hundreds), system_health is small (negative to ~0)
-        # We want system health to meaningfully affect the reward
-        reward = nash_base + nash_base * 0.5 * (system_health / 4.0)
-        
+
+        epistemic = max(0.01, news_diversity * trust_health)
+
+        # ── Combined reward ─────────────────────────────────────────
+        system_multiplier = (concentration_gate
+                             * productivity
+                             * education
+                             * epistemic)
+
+        reward = nash_base * max(system_multiplier, 1e-10)
+
         return float(reward)
 
     # ------------------------------------------------------------------
