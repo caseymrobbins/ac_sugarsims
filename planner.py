@@ -42,9 +42,11 @@ Policy instruments
 
 Objective functions
 -------------------
-  SUM  : R = sum(wealth_i)              -- utilitarian aggregate
-  NASH : R = sum(log(wealth_i + eps))   -- Nash social welfare
-  JAM  : R = log(min(agency_i))         -- agency floor (AC)
+  SUM   : R = sum(wealth_i)              -- utilitarian aggregate
+  NASH  : R = sum(log(wealth_i + eps))   -- Nash social welfare
+  JAM   : R = log(min(agency_i))         -- agency floor (AC)
+  CROSS : R = sum(log(w_i)) * equity * productivity * education * epistemic
+          -- topology-engineered: mesa optimizers serve the objective
 """
 
 from __future__ import annotations
@@ -692,13 +694,13 @@ class PlannerAgent(Agent):
             return self._objective_nash()
         elif self.objective == "JAM":
             return self._objective_jam()
+        elif self.objective == "CROSS":
         else:
             raise ValueError(f"Unknown objective: {self.objective}")
 
     def _objective_sum(self) -> float:
         """R = sum(wealth_i) -- utilitarian aggregate."""
         wealths = self.model.get_all_agent_wealths()
-        # Filter out NaN/inf to prevent poisoning
         wealths = wealths[np.isfinite(wealths)]
         if len(wealths) == 0:
             return 0.0
@@ -723,6 +725,82 @@ class PlannerAgent(Agent):
             return float(math.log(EPSILON))
         floor = float(np.min(agencies))
         return float(math.log(max(floor, EPSILON)))
+
+    def _objective_cross(self) -> float:
+        """
+        R = sum(log(wealth_i)) * equity * productivity * epistemic
+        
+        Topology-engineered objective: individual welfare (log wealth)
+        scaled by system health multipliers that mesa optimizers cannot
+        decouple from their own profitability.
+        
+        equity       = median/mean wealth (0-1, penalizes concentration)
+        productivity = employment_rate * mean_skill (0-1, penalizes extraction)
+        education    = education_quality / max (0-1, penalizes underinvestment)
+        epistemic    = news_diversity * trust_health (0-1, penalizes info capture)
+        
+        The product structure means ALL factors must be high simultaneously.
+        Mesa optimizers profit most when the scaling factors are high,
+        which means profit-maximizing behavior IS welfare-maximizing behavior.
+        """
+        workers = self.model.workers
+        if not workers:
+            return float(math.log(EPSILON))
+        
+        wealths = np.array([w.wealth for w in workers], dtype=np.float64)
+        wealths = wealths[np.isfinite(wealths)]
+        if len(wealths) == 0:
+            return float(math.log(EPSILON))
+        
+        # Base: Nash welfare (sum of log wealth)
+        nash_base = float(np.sum(np.log(np.maximum(wealths, EPSILON))))
+        
+        # Equity multiplier: median/mean (1.0 = perfect equality, ~0 = extreme concentration)
+        mean_w = wealths.mean()
+        median_w = float(np.median(wealths))
+        equity = median_w / max(mean_w, EPSILON)
+        equity = max(equity, 0.01)  # floor to prevent zero
+        
+        # Productivity multiplier: employment * skill
+        n_employed = sum(1 for w in workers if w.employed)
+        employment_rate = n_employed / max(len(workers), 1)
+        skills = np.array([w.skill for w in workers], dtype=np.float64)
+        mean_skill = float(np.mean(skills)) if len(skills) > 0 else 0.5
+        productivity = employment_rate * mean_skill
+        productivity = max(productivity, 0.01)
+        
+        # Education multiplier: education quality normalized
+        edu_quality = self.model._education_quality
+        education = min(1.0, max(0.01, (edu_quality - 1.0) * 0.5 + 0.5))
+        
+        # Epistemic multiplier: news diversity * trust health
+        news_firms = getattr(self.model, 'news_firms', [])
+        active_news = [nf for nf in news_firms if not nf.defunct]
+        captured_news = sum(1 for nf in active_news if nf.captured_by_cartel is not None)
+        if active_news:
+            news_diversity = 1.0 - (captured_news / len(active_news))
+        else:
+            news_diversity = 0.5
+        
+        # Trust health: mean authority trust, penalized by low-trust fraction
+        trust_vals = np.array([getattr(w, 'authority_trust', 0.7) for w in workers])
+        trust_health = float(np.mean(trust_vals))
+        low_trust_frac = float(np.mean(trust_vals < 0.3))
+        trust_health *= (1.0 - low_trust_frac * 2)  # heavy penalty for low-trust agents
+        trust_health = max(trust_health, 0.01)
+        
+        epistemic = news_diversity * trust_health
+        epistemic = max(epistemic, 0.01)
+        
+        # Combined: nash_base scaled by all multipliers
+        # Using log of product = sum of logs for numerical stability
+        system_health = math.log(equity) + math.log(productivity) + math.log(education) + math.log(epistemic)
+        
+        # Scale: nash_base is large (hundreds), system_health is small (negative to ~0)
+        # We want system health to meaningfully affect the reward
+        reward = nash_base + nash_base * 0.5 * (system_health / 4.0)
+        
+        return float(reward)
 
     # ------------------------------------------------------------------
     # Accessors
