@@ -23,7 +23,7 @@ from __future__ import annotations
 import contextlib
 from enum import Enum, auto
 from typing import TYPE_CHECKING, List, Optional, Dict
-
+from civic_obligation import apply_civic_obligation
 import numpy as np
 from mesa import Agent
 
@@ -214,6 +214,8 @@ class WorkerAgent(Agent):
 
         # Apply tax
         self.model.planner.apply_tax(self)
+        # Civic obligation (structural, bypasses planner)
+        apply_civic_obligation(self, self.model)
 
         # Occasionally discover new trade partners (breaks chicken-and-egg)
         if self.model.rng.random() < 0.02:
@@ -700,6 +702,8 @@ class FirmAgent(Agent):
             return
 
         self.model.planner.apply_tax(self)
+        apply_civic_obligation(self, self.model)
+
 
     def _choose_strategy(self) -> str:
         rng = self.model.rng
@@ -1020,6 +1024,7 @@ class LandownerAgent(Agent):
             self._expand()
         self._adjust_rent()
         self.model.planner.apply_tax(self)
+        apply_civic_obligation(self, self.model)
 
     def compute_rent(self, worker: "WorkerAgent") -> float:
         """Rent based on location quality, not just worker income.
