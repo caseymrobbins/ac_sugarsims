@@ -118,7 +118,7 @@ class BankAgent(Agent):
             self._fail()
 
     def _collect_loan_payments(self):
-        """Collect interest and handle defaults."""
+        """Collect interest and principal payments, handle defaults."""
         dead_loans = []
         for wid, loan in self.loans.items():
             worker = self.model.get_agent_by_id(wid)
@@ -126,21 +126,32 @@ class BankAgent(Agent):
                 dead_loans.append(wid)
                 continue
 
-            # Interest payment
-            payment = loan['outstanding'] * loan['rate']
+            # Payment = interest + small principal repayment
+            interest = loan['outstanding'] * loan['rate']
+            principal_payment = loan['outstanding'] * 0.01  # 1% principal per step
+            total_payment = interest + principal_payment
 
-            if worker.wealth >= payment:
-                worker.wealth -= payment
-                self.interest_income += payment
-                loan['outstanding'] *= (1 + loan['rate'])
+            if worker.wealth >= total_payment:
+                worker.wealth -= total_payment
+                self.interest_income += interest
+                loan['outstanding'] -= principal_payment  # principal goes down
+                self.total_loans -= principal_payment
+                # Loan fully repaid?
+                if loan['outstanding'] <= 1.0:
+                    worker.debt = max(0, worker.debt - loan.get('principal', 0))
+                    dead_loans.append(wid)
+            elif worker.wealth >= interest:
+                # Can pay interest but not principal (interest-only)
+                worker.wealth -= interest
+                self.interest_income += interest
             else:
-                # Default
                 self._handle_default(wid, worker, loan)
                 dead_loans.append(wid)
 
         for wid in dead_loans:
             if wid in self.loans:
-                self.total_loans -= self.loans[wid]['outstanding']
+                remaining = max(0, self.loans[wid]['outstanding'])
+                self.total_loans = max(0, self.total_loans - remaining)
                 del self.loans[wid]
 
     def _handle_default(self, wid: int, worker, loan: Dict):
