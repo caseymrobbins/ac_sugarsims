@@ -695,6 +695,7 @@ class PlannerAgent(Agent):
         elif self.objective == "JAM":
             return self._objective_jam()
         elif self.objective == "CROSS":
+            return self._objective_cross()
         else:
             raise ValueError(f"Unknown objective: {self.objective}")
 
