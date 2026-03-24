@@ -1,100 +1,39 @@
 """
-planner.py
-----------
-RL-based policy authority for the multi-agent economic simulation.
+planner.py - RL policy authority with ideal baseline and inheritance tax.
 
-The PlannerAgent observes the economy state and sets policy instruments.
-It learns online using the configured objective function (SUM / NASH / JAM)
-as its reward signal, ensuring that different objectives produce genuinely
-different learned policies.
-
-Architecture
-------------
-Two-layer learning system:
-
-1. **Evolution Strategy (outer loop)**: Maintains a population of policy
-   parameter vectors. Each evaluation period, the current policy is scored
-   by the objective function. The ES updates the parameter distribution
-   toward higher-reward regions. This handles the coarse search.
-
-2. **State-conditioned linear policy (inner loop)**: A lightweight linear
-   model maps a compressed economy state vector to policy adjustments.
-   This lets the planner adapt to current conditions rather than using
-   a fixed policy. Updated via REINFORCE-style gradient estimates.
-
-The two layers cooperate: the ES sets baseline policy parameters, while
-the linear policy learns state-dependent corrections on top.
-
-Policy instruments
-------------------
-  tax_rate_worker        : fraction of worker income taxed
-  tax_rate_firm          : fraction of firm profit taxed
-  tax_rate_landowner     : fraction of rent income taxed
-  ubi_payment            : unconditional basic income per worker per step
-  min_wage               : minimum wage floor
-  harvest_limit          : max extraction per cell per step
-  agriculture_investment : budget for food regen bonus
-  infrastructure_investment : budget for TFP bonus
-  healthcare_investment  : budget for metabolism reduction
-  education_investment   : budget for skill gain
-  pollution_tax          : per-unit charge on polluting output
-  cleanup_investment     : budget for pollution grid reduction
-
-Objective functions
--------------------
-  SUM   : R = sum(wealth_i)              -- utilitarian aggregate
-  NASH  : R = sum(log(wealth_i + eps))   -- Nash social welfare
-  JAM   : R = log(min(agency_i))         -- agency floor (AC)
-  CROSS : R = sum(log(w_i)) * equity * productivity * education * epistemic
-          -- topology-engineered: mesa optimizers serve the objective
+Changes from original:
+  - INSTRUMENT_SPEC includes inheritance_tax (planner-controlled)
+  - POLICY_DIM = 13 (was 12)
+  - _learning_step uses ideal baseline instead of moving average
+  - _compute_ideal_score provides fixed reference for each objective
+  - All objective functions preserved (SUM, NASH, JAM, CROSS, TOPO, TARGET)
 """
-
 from __future__ import annotations
-
 import math
 from typing import TYPE_CHECKING, Dict, Any, List, Optional, Tuple
-
 import numpy as np
 from mesa import Agent
-
 if TYPE_CHECKING:
     from environment import EconomicModel
     from agents import WorkerAgent, FirmAgent, LandownerAgent
 
-
-# ---------------------------------------------------------------------------
-# Constants
-# ---------------------------------------------------------------------------
-
-POLICY_UPDATE_INTERVAL = 10    # steps between objective evaluations
-WARMUP_STEPS = 5               # steps before first policy update
-EPSILON = 1e-6                 # log-safety
-
-# ES hyperparameters
-ES_POPULATION = 8              # perturbation samples per update
-ES_SIGMA_INIT = 0.05           # initial perturbation std
-ES_SIGMA_DECAY = 0.999         # per-update decay
-ES_SIGMA_MIN = 0.005           # floor
-ES_LR = 0.1                   # learning rate for mean update
-ES_MOMENTUM = 0.9              # momentum for parameter updates
-
-# State-conditioned policy
-STATE_DIM = 12                 # compressed economy state
-POLICY_DIM = 12                # number of policy instruments
-ADAPT_LR = 0.01               # learning rate for linear adaptation layer
-ADAPT_NOISE = 0.02             # exploration noise for adaptation
-
-# Reward shaping
-REWARD_CLIP = 50.0             # clip extreme reward deltas
-REWARD_BASELINE_DECAY = 0.9    # exponential moving average for baseline
-
-
-# ---------------------------------------------------------------------------
-# Policy instrument definitions with bounds
-# ---------------------------------------------------------------------------
+POLICY_UPDATE_INTERVAL = 10
+WARMUP_STEPS = 5
+EPSILON = 1e-6
+ES_POPULATION = 8
+ES_SIGMA_INIT = 0.05
+ES_SIGMA_DECAY = 0.999
+ES_SIGMA_MIN = 0.005
+ES_LR = 0.1
+ES_MOMENTUM = 0.9
+STATE_DIM = 13
+POLICY_DIM = 13
+ADAPT_LR = 0.01
+ADAPT_NOISE = 0.02
+REWARD_CLIP = 50.0
+REWARD_BASELINE_DECAY = 0.9
 
 INSTRUMENT_SPEC: List[Tuple[str, float, float, float]] = [
-    # (name, default, lower_bound, upper_bound)
     ("tax_rate_worker",           0.05,  0.0,   0.80),
     ("tax_rate_firm",             0.10,  0.0,   0.90),
     ("tax_rate_landowner",        0.08,  0.0,   0.95),
@@ -107,1040 +46,352 @@ INSTRUMENT_SPEC: List[Tuple[str, float, float, float]] = [
     ("education_investment",      0.0,   0.0,   3.0),
     ("pollution_tax",             0.0,   0.0,   2.0),
     ("cleanup_investment",        0.0,   0.0,   5.0),
+    ("inheritance_tax",           0.0,   0.0,   0.80),
 ]
 
-INSTRUMENT_NAMES  = [s[0] for s in INSTRUMENT_SPEC]
+INSTRUMENT_NAMES = [s[0] for s in INSTRUMENT_SPEC]
 INSTRUMENT_DEFAULTS = np.array([s[1] for s in INSTRUMENT_SPEC], dtype=np.float64)
-INSTRUMENT_LO     = np.array([s[2] for s in INSTRUMENT_SPEC], dtype=np.float64)
-INSTRUMENT_HI     = np.array([s[3] for s in INSTRUMENT_SPEC], dtype=np.float64)
-INSTRUMENT_RANGE  = INSTRUMENT_HI - INSTRUMENT_LO
-
-
-# ---------------------------------------------------------------------------
-# Evolution Strategy (OpenAI-ES variant, numpy-only)
-# ---------------------------------------------------------------------------
+INSTRUMENT_LO = np.array([s[2] for s in INSTRUMENT_SPEC], dtype=np.float64)
+INSTRUMENT_HI = np.array([s[3] for s in INSTRUMENT_SPEC], dtype=np.float64)
+INSTRUMENT_RANGE = INSTRUMENT_HI - INSTRUMENT_LO
 
 class EvolutionStrategy:
-    """
-    Simplified OpenAI-ES for continuous policy optimization.
-
-    Maintains a Gaussian distribution over the policy parameter vector.
-    Each update samples perturbations, evaluates fitness, and updates
-    the mean using fitness-weighted perturbations.
-    """
-
-    def __init__(self, dim: int, rng: np.random.Generator,
-                 sigma: float = ES_SIGMA_INIT,
-                 lr: float = ES_LR,
-                 pop_size: int = ES_POPULATION):
-        self.dim = dim
-        self.rng = rng
-        self.sigma = sigma
-        self.lr = lr
-        self.pop_size = pop_size
-
-        # Parameters in normalized space [0, 1]
-        self.mean = np.full(dim, 0.5, dtype=np.float64)
-        self.velocity = np.zeros(dim, dtype=np.float64)
-
-    def sample_perturbations(self) -> np.ndarray:
-        """Sample antithetic perturbation pairs. Returns (pop_size, dim)."""
-        half = self.pop_size // 2
-        noise = self.rng.standard_normal((half, self.dim))
-        # Antithetic: pair each perturbation with its negative
+    def __init__(self, dim, rng, sigma=ES_SIGMA_INIT, lr=ES_LR, pop_size=ES_POPULATION):
+        self.dim = dim; self.rng = rng; self.sigma = sigma; self.lr = lr; self.pop_size = pop_size
+        self.mean = np.full(dim, 0.5, dtype=np.float64); self.velocity = np.zeros(dim, dtype=np.float64)
+    def sample_perturbations(self):
+        half = self.pop_size // 2; noise = self.rng.standard_normal((half, self.dim))
         return np.vstack([noise, -noise])
-
-    def update(self, perturbations: np.ndarray, fitnesses: np.ndarray):
-        """
-        Update mean using fitness-weighted perturbations.
-
-        perturbations: (pop_size, dim) from sample_perturbations
-        fitnesses: (pop_size,) scalar fitness for each perturbation
-        """
-        if len(fitnesses) < 2:
-            return
-
-        # Sanitize: drop NaN/inf fitnesses
+    def update(self, perturbations, fitnesses):
+        if len(fitnesses) < 2: return
         valid = np.isfinite(fitnesses)
-        if valid.sum() < 2:
-            return
-        fitnesses = fitnesses[valid]
-        perturbations = perturbations[valid]
-
-        # Fitness ranking (rank transform for robustness)
-        ranks = np.zeros_like(fitnesses)
-        order = np.argsort(fitnesses)
-        for i, idx in enumerate(order):
-            ranks[idx] = i
-        # Normalize ranks to [-0.5, 0.5]
+        if valid.sum() < 2: return
+        fitnesses = fitnesses[valid]; perturbations = perturbations[valid]
+        ranks = np.zeros_like(fitnesses); order = np.argsort(fitnesses)
+        for i, idx in enumerate(order): ranks[idx] = i
         ranks = (ranks / (len(ranks) - 1)) - 0.5
-
-        # Weighted gradient estimate
         grad = (perturbations.T @ ranks) / (self.pop_size * self.sigma)
-
-        # Momentum update
         self.velocity = ES_MOMENTUM * self.velocity + (1 - ES_MOMENTUM) * grad
-        self.mean += self.lr * self.velocity
-
-        # Stay in bounds
-        self.mean = np.clip(self.mean, 0.01, 0.99)
-
-        # Decay sigma
+        self.mean += self.lr * self.velocity; self.mean = np.clip(self.mean, 0.01, 0.99)
         self.sigma = max(ES_SIGMA_MIN, self.sigma * ES_SIGMA_DECAY)
-
-    def get_params(self, perturbation: Optional[np.ndarray] = None) -> np.ndarray:
-        """Get parameter vector (normalized [0,1]). Optionally add perturbation."""
-        if perturbation is not None:
-            return np.clip(self.mean + self.sigma * perturbation, 0.01, 0.99)
+    def get_params(self, perturbation=None):
+        if perturbation is not None: return np.clip(self.mean + self.sigma * perturbation, 0.01, 0.99)
         return self.mean.copy()
 
-
-# ---------------------------------------------------------------------------
-# State-conditioned linear policy (lightweight adaptation layer)
-# ---------------------------------------------------------------------------
-
 class LinearPolicy:
-    """
-    Maps a state vector to policy adjustments via a learned linear transform.
-    Updated online using REINFORCE-style gradient estimates.
-
-    output = W @ state + bias  (then clipped to valid range)
-    """
-
-    def __init__(self, state_dim: int, action_dim: int,
-                 rng: np.random.Generator):
-        self.rng = rng
-        self.state_dim = state_dim
-        self.action_dim = action_dim
-
-        # Xavier initialization
+    def __init__(self, state_dim, action_dim, rng):
+        self.rng = rng; self.state_dim = state_dim; self.action_dim = action_dim
         scale = np.sqrt(2.0 / (state_dim + action_dim))
         self.W = rng.standard_normal((action_dim, state_dim)) * scale * 0.01
         self.bias = np.zeros(action_dim, dtype=np.float64)
-
-        # Running state normalization
         self.state_mean = np.zeros(state_dim, dtype=np.float64)
-        self.state_var = np.ones(state_dim, dtype=np.float64)
-        self.state_count = 0
-
-        # Gradient accumulators (for REINFORCE)
-        self._log_probs: List[np.ndarray] = []
-        self._rewards: List[float] = []
-        self._states: List[np.ndarray] = []
-        self._actions: List[np.ndarray] = []
-
-    def _normalize_state(self, state: np.ndarray) -> np.ndarray:
-        """Online normalization of state vector."""
-        self.state_count += 1
-        alpha = 1.0 / self.state_count
+        self.state_var = np.ones(state_dim, dtype=np.float64); self.state_count = 0
+        self._log_probs = []; self._rewards = []; self._states = []; self._actions = []
+    def _normalize_state(self, state):
+        self.state_count += 1; alpha = 1.0 / self.state_count
         self.state_mean = (1 - alpha) * self.state_mean + alpha * state
         self.state_var = (1 - alpha) * self.state_var + alpha * (state - self.state_mean) ** 2
-        std = np.sqrt(self.state_var + 1e-8)
-        return (state - self.state_mean) / std
-
-    def forward(self, state: np.ndarray, explore: bool = True) -> np.ndarray:
-        """
-        Compute policy adjustment given state.
-        Returns adjustment in normalized [0, 1] space (added to ES base).
-        """
-        # Sanitize state: replace NaN/inf before any computation
+        return (state - self.state_mean) / np.sqrt(self.state_var + 1e-8)
+    def forward(self, state, explore=True):
         state = np.nan_to_num(state, nan=0.0, posinf=50.0, neginf=-50.0)
-
-        norm_state = self._normalize_state(state)
-        mu = self.W @ norm_state + self.bias
-
+        norm_state = self._normalize_state(state); mu = self.W @ norm_state + self.bias
         if explore:
-            noise = self.rng.standard_normal(self.action_dim) * ADAPT_NOISE
-            action = mu + noise
-        else:
-            action = mu
-            noise = np.zeros(self.action_dim)
-
-        if explore:
-            self._states.append(norm_state)
-            self._actions.append(noise)
-
+            noise = self.rng.standard_normal(self.action_dim) * ADAPT_NOISE; action = mu + noise
+            self._states.append(norm_state); self._actions.append(noise)
+        else: action = mu
         return action
-
-    def record_reward(self, reward: float):
-        """Record reward for the most recent action."""
-        self._rewards.append(reward)
-
+    def record_reward(self, reward): self._rewards.append(reward)
     def update(self):
-        """REINFORCE update using accumulated experience."""
-        if len(self._rewards) < 2:
-            self._clear()
-            return
-
+        if len(self._rewards) < 2: self._clear(); return
         rewards = np.array(self._rewards, dtype=np.float64)
-
-        # Baseline: mean reward
-        baseline = rewards.mean()
-        advantages = rewards - baseline
-
-        # Normalize advantages
-        adv_std = advantages.std() + 1e-8
-        advantages = advantages / adv_std
-
-        # Gradient: dW += advantage * noise @ state.T
-        dW = np.zeros_like(self.W)
-        db = np.zeros_like(self.bias)
-
+        advantages = (rewards - rewards.mean()) / (rewards.std() + 1e-8)
+        dW = np.zeros_like(self.W); db = np.zeros_like(self.bias)
         for state, noise, adv in zip(self._states, self._actions, advantages):
             dW += adv * np.outer(noise, state) / (ADAPT_NOISE ** 2 + 1e-8)
             db += adv * noise / (ADAPT_NOISE ** 2 + 1e-8)
-
-        n = len(self._rewards)
-        self.W += ADAPT_LR * dW / n
-        self.bias += ADAPT_LR * db / n
-
-        # Weight decay to prevent divergence
-        self.W *= 0.999
-        self.bias *= 0.999
-
-        self._clear()
-
-    def _clear(self):
-        self._log_probs.clear()
-        self._rewards.clear()
-        self._states.clear()
-        self._actions.clear()
-
-
-# ---------------------------------------------------------------------------
-# PlannerAgent
-# ---------------------------------------------------------------------------
+        n = len(self._rewards); self.W += ADAPT_LR * dW / n; self.bias += ADAPT_LR * db / n
+        self.W *= 0.999; self.bias *= 0.999; self._clear()
+    def _clear(self): self._log_probs.clear(); self._rewards.clear(); self._states.clear(); self._actions.clear()
 
 class PlannerAgent(Agent):
-    """
-    RL-based policy authority.
-
-    Learning loop (every POLICY_UPDATE_INTERVAL steps):
-      1. Observe economy state -> state vector
-      2. ES provides base policy parameters
-      3. Linear policy adds state-conditioned adjustments
-      4. Combined policy is applied for POLICY_UPDATE_INTERVAL steps
-      5. Objective function evaluates outcome -> reward
-      6. ES and linear policy are updated toward higher reward
-    """
-
-    def __init__(self, model: "EconomicModel"):
-        super().__init__(model)
-        self.objective = model.objective
-
-        # CRITICAL: separate RNG for the planner's learning,
-        # so same simulation seed + different objective = different exploration
-        obj_offset = {"SUM": 0, "NASH": 10000, "JAM": 20000, 
-                      "CROSS": 30000, "TOPO": 40000, "TARGET": 50000}.get(self.objective, 0)
+    def __init__(self, model):
+        super().__init__(model); self.objective = model.objective
+        obj_offset = {"SUM":0,"NASH":10000,"JAM":20000,"CROSS":30000,"TOPO":40000,"TARGET":50000}.get(self.objective, 0)
         self._learn_rng = np.random.default_rng(model._seed + 7919 + obj_offset)
-
-        # Evolution strategy (outer loop)
-        self._es = EvolutionStrategy(
-            dim=POLICY_DIM,
-            rng=self._learn_rng,
-            sigma=ES_SIGMA_INIT,
-            lr=ES_LR,
-            pop_size=ES_POPULATION,
-        )
-
-        # State-conditioned policy (inner loop)
-        self._linear = LinearPolicy(
-            state_dim=STATE_DIM,
-            action_dim=POLICY_DIM,
-            rng=self._learn_rng,
-        )
-
-        # Current policy dict (what agents read)
-        self.policy: Dict[str, float] = {
-            name: default for name, default, _, _ in INSTRUMENT_SPEC
-        }
-
-        # Revenue pool
-        self.tax_revenue: float = 0.0
-
-        # Objective tracking
-        self.last_objective_value: float = -math.inf
-        self.objective_history: List[float] = []
-        self._reward_baseline: float = 0.0
-
-        # ES evaluation state
-        self._current_perturbations: Optional[np.ndarray] = None
-        self._perturbation_fitnesses: List[float] = []
-        self._perturbation_idx: int = 0
-        self._eval_phase: bool = False  # True during ES population evaluation
-
-        # Step counter
-        self._steps_since_update: int = 0
-        self._total_updates: int = 0
-
-    # ------------------------------------------------------------------
-    # Mesa step
-    # ------------------------------------------------------------------
+        self._es = EvolutionStrategy(dim=POLICY_DIM, rng=self._learn_rng)
+        self._linear = LinearPolicy(state_dim=STATE_DIM, action_dim=POLICY_DIM, rng=self._learn_rng)
+        self.policy = {name: default for name, default, _, _ in INSTRUMENT_SPEC}
+        self.tax_revenue = 0.0; self.last_objective_value = -math.inf
+        self.objective_history = []; self._reward_baseline = 0.0
+        self._current_perturbations = None; self._perturbation_fitnesses = []
+        self._perturbation_idx = 0; self._eval_phase = False
+        self._steps_since_update = 0; self._total_updates = 0
 
     def step(self):
-        self._steps_since_update += 1
+        self._steps_since_update += 1; self._apply_investments(); self._redistribute()
+        if self._steps_since_update >= POLICY_UPDATE_INTERVAL: self._learning_step(); self._steps_since_update = 0
 
-        # Apply public investments FIRST (before UBI eats the revenue)
-        self._apply_investments()
-
-        # Then redistribute remaining revenue as UBI
-        self._redistribute()
-
-        # Policy update cycle
-        if self._steps_since_update >= POLICY_UPDATE_INTERVAL:
-            self._learning_step()
-            self._steps_since_update = 0
-
-    # ------------------------------------------------------------------
-    # State observation
-    # ------------------------------------------------------------------
-
-    def _observe_state(self) -> np.ndarray:
-        """
-        Compress the economy into a fixed-size state vector.
-
-        ELITE DISTORTION: The planner doesn't see ground truth directly.
-        Its observation is a weighted blend of actual state and elite-reported
-        state. The blend weight depends on wealth concentration (HHI).
-        More concentrated wealth = more distortion = planner makes worse
-        decisions for floor agents because it can't see them accurately.
-        """
-        workers = self.model.workers
-        firms = [f for f in self.model.firms if not f.defunct]
-
-        if not workers:
-            return np.zeros(STATE_DIM, dtype=np.float64)
-
+    def _observe_state(self):
+        workers = self.model.workers; firms = [f for f in self.model.firms if not f.defunct]
+        if not workers: return np.zeros(STATE_DIM, dtype=np.float64)
         worker_w = np.array([w.wealth for w in workers], dtype=np.float64)
         agencies = np.array([w.compute_agency() for w in workers], dtype=np.float64)
-
-        n_employed = sum(1 for w in workers if w.employed)
-        n_workers = len(workers)
-
+        n_employed = sum(1 for w in workers if w.employed); n_workers = len(workers)
         total_debt = sum(w.debt for w in workers)
         total_production = sum(f.production_this_step for f in firms)
-
-        # Compute elite distortion factor based on wealth concentration
-        # HHI of firm market shares: higher = more concentrated = more distortion
         if firms:
-            shares = np.array([f.market_share for f in firms])
-            hhi = float(np.sum(shares ** 2))
-        else:
-            hhi = 0.0
-
-        # Also factor in landowner concentration
+            shares = np.array([f.market_share for f in firms]); hhi = float(np.sum(shares ** 2))
+        else: hhi = 0.0
         if self.model.landowners:
-            lo_wealth = np.array([lo.wealth for lo in self.model.landowners])
-            lo_total = lo_wealth.sum()
-            if lo_total > 0:
-                lo_shares = lo_wealth / lo_total
-                hhi = max(hhi, float(np.sum(lo_shares ** 2)))
-
-        # Distortion: 0 = perfect information, 1 = fully elite-captured
-        # Scales with HHI: at HHI=0.05 (competitive) distortion is ~5%
-        # At HHI=0.5 (near-monopoly) distortion is ~40%
-        elite_distortion = min(0.5, hhi * 0.8)
-
-        # Elite-reported state: systematically optimistic
-        # Elites report higher wages, lower unemployment, lower pollution
-        true_mean_wealth = max(worker_w.mean(), 0.0)
-        true_min_wealth = max(worker_w.min(), 0.0)
-        true_unemployment = 1.0 - n_employed / max(n_workers, 1)
-        true_pollution = float(np.mean(self.model.pollution_grid))
-
-        # Blend: reported = true * (1 - distortion) + optimistic * distortion
-        reported_mean_wealth = true_mean_wealth * (1 + elite_distortion * 0.5)
-        reported_min_wealth = true_min_wealth * (1 + elite_distortion * 2.0)
-        reported_unemployment = true_unemployment * (1 - elite_distortion * 0.6)
-        reported_pollution = true_pollution * (1 - elite_distortion * 0.5)
-
+            lo_w = np.array([lo.wealth for lo in self.model.landowners]); lo_t = lo_w.sum()
+            if lo_t > 0: hhi = max(hhi, float(np.sum((lo_w / lo_t) ** 2)))
+        ed = min(0.5, hhi * 0.8)
+        true_mw = max(worker_w.mean(), 0.0); true_minw = max(worker_w.min(), 0.0)
+        true_unemp = 1.0 - n_employed / max(n_workers, 1)
+        true_poll = float(np.mean(self.model.pollution_grid))
         state = np.array([
-            np.log1p(reported_mean_wealth),               # 0: distorted mean wealth
-            np.log1p(reported_min_wealth),                 # 1: distorted min wealth
-            float(_gini_fast(worker_w)),                   # 2: Gini (hard to fake)
-            np.log1p(max(agencies.min(), 0.0)),            # 3: log agency floor
-            float(np.nanmean(agencies)),                   # 4: mean agency
-            reported_unemployment,                          # 5: distorted unemployment
-            np.log1p(max(total_debt, 0.0)),                # 6: log total debt
-            np.log1p(max(total_production, 0.0)),          # 7: log production
-            np.log1p(max(self.tax_revenue, 0.0)),          # 8: log tax revenue
-            reported_pollution,                             # 9: distorted pollution
-            float(len(firms)) / 20.0,                      # 10: normalized firm count
-            float(self.model.current_step) / 300.0,        # 11: time fraction
+            np.log1p(true_mw * (1 + ed * 0.5)), np.log1p(true_minw * (1 + ed * 2.0)),
+            float(_gini_fast(worker_w)), np.log1p(max(agencies.min(), 0.0)),
+            float(np.nanmean(agencies)), true_unemp * (1 - ed * 0.6),
+            np.log1p(max(total_debt, 0.0)), np.log1p(max(total_production, 0.0)),
+            np.log1p(max(self.tax_revenue, 0.0)), true_poll * (1 - ed * 0.5),
+            float(len(firms)) / 20.0, float(self.model.current_step) / 300.0,
+            self.policy.get("inheritance_tax", 0.0),
         ], dtype=np.float64)
-
-        # Final safety: replace any residual NaN/inf with 0
         np.nan_to_num(state, copy=False, nan=0.0, posinf=50.0, neginf=-50.0)
-
         return state
 
-    # ------------------------------------------------------------------
-    # Learning step
-    # ------------------------------------------------------------------
+    def _compute_ideal_score(self):
+        n = max(len(self.model.workers), 1)
+        if self.objective == "SUM": return 200.0 * n
+        elif self.objective == "NASH": return float(np.sum(np.log(np.full(n, 200.0))))
+        elif self.objective == "TOPO": return float(np.sum(np.log(np.full(n, 200.0)))) * 1.0
+        elif self.objective == "TARGET": return 1.0 * math.log(max(n, 1)) * 100
+        elif self.objective == "CROSS": return float(np.sum(np.log(np.full(n, 200.0)))) * 0.5
+        elif self.objective == "JAM": return math.log(5.0)
+        else: return 0.0
 
     def _learning_step(self):
-        """
-        Core learning loop. Called every POLICY_UPDATE_INTERVAL steps.
-
-        Uses a simplified ES: rather than running full population evaluations
-        (which would require resetting the sim), we use the sequential
-        approach - each evaluation period tries one perturbation, accumulates
-        fitness estimates, and does a batch ES update every ES_POPULATION
-        evaluations.
-        """
-        # Score the current policy
         current_obj = self.compute_objective()
-
-        # NaN firewall: if objective is NaN or inf, use baseline as fallback.
-        # This prevents corrupted rewards from poisoning the ES/linear policy.
         if not np.isfinite(current_obj):
             current_obj = self._reward_baseline if np.isfinite(self._reward_baseline) else 0.0
-
-        self.last_objective_value = current_obj
-        self.objective_history.append(current_obj)
-
-        # Reward shaping: use improvement over baseline
-        reward = current_obj - self._reward_baseline
+        self.last_objective_value = current_obj; self.objective_history.append(current_obj)
+        ideal = self._compute_ideal_score()
+        if abs(ideal) > 1e-6: reward = (current_obj - ideal) / abs(ideal)
+        else: reward = current_obj
         reward = np.clip(reward, -REWARD_CLIP, REWARD_CLIP)
-        self._reward_baseline = (REWARD_BASELINE_DECAY * self._reward_baseline
-                                 + (1 - REWARD_BASELINE_DECAY) * current_obj)
-
-        # Update linear policy with this reward
+        self._reward_baseline = REWARD_BASELINE_DECAY * self._reward_baseline + (1 - REWARD_BASELINE_DECAY) * current_obj
         self._linear.record_reward(reward)
-
-        # ES evaluation: accumulate fitness for current perturbation
         if self._current_perturbations is not None:
-            self._perturbation_fitnesses.append(current_obj)
-            self._perturbation_idx += 1
-
-            # Once we have enough fitness samples, do ES update
+            self._perturbation_fitnesses.append(current_obj); self._perturbation_idx += 1
             if self._perturbation_idx >= ES_POPULATION:
                 fitnesses = np.array(self._perturbation_fitnesses[-ES_POPULATION:])
                 self._es.update(self._current_perturbations, fitnesses)
-                self._current_perturbations = None
-                self._perturbation_idx = 0
-                self._perturbation_fitnesses.clear()
-
-                # Also update linear policy
-                self._linear.update()
-
-        # Start new perturbation cycle if needed
+                self._current_perturbations = None; self._perturbation_idx = 0
+                self._perturbation_fitnesses.clear(); self._linear.update()
         if self._current_perturbations is None:
             self._current_perturbations = self._es.sample_perturbations()
-            self._perturbation_idx = 0
-            self._perturbation_fitnesses.clear()
-
-        # Get next perturbation to try
+            self._perturbation_idx = 0; self._perturbation_fitnesses.clear()
         idx = min(self._perturbation_idx, len(self._current_perturbations) - 1)
         perturbation = self._current_perturbations[idx]
-
-        # Compute new policy: ES base + linear adjustment
-        state = self._observe_state()
-        es_params = self._es.get_params(perturbation)
+        state = self._observe_state(); es_params = self._es.get_params(perturbation)
         linear_adj = self._linear.forward(state, explore=True)
-
-        # Combine: ES provides base in [0,1], linear adds small adjustments
         combined = np.clip(es_params + linear_adj * 0.1, 0.01, 0.99)
-
-        # NaN firewall: if any component is NaN (from corrupted state),
-        # fall back to ES base params only
-        if np.any(np.isnan(combined)):
-            combined = np.clip(es_params, 0.01, 0.99)
-        if np.any(np.isnan(combined)):
-            combined = np.full(POLICY_DIM, 0.5)  # absolute fallback
-
-        # Convert from normalized [0,1] to actual instrument values
+        if np.any(np.isnan(combined)): combined = np.clip(es_params, 0.01, 0.99)
+        if np.any(np.isnan(combined)): combined = np.full(POLICY_DIM, 0.5)
         actual = INSTRUMENT_LO + combined * INSTRUMENT_RANGE
-
-        # Apply to policy dict
-        for i, name in enumerate(INSTRUMENT_NAMES):
-            self.policy[name] = float(actual[i])
-
+        for i, name in enumerate(INSTRUMENT_NAMES): self.policy[name] = float(actual[i])
         self._total_updates += 1
 
-    # ------------------------------------------------------------------
-    # Tax application (called by each agent in its own step)
-    # ------------------------------------------------------------------
-
     def apply_tax(self, agent):
-        """Deduct taxes from agent and add to revenue pool."""
         from agents import WorkerAgent, FirmAgent, LandownerAgent
-
-        def _safe_rate(key, default=0.0):
-            v = self.policy.get(key, default)
-            return v if np.isfinite(v) else default
-
+        def _safe(key, default=0.0):
+            v = self.policy.get(key, default); return v if np.isfinite(v) else default
         if isinstance(agent, WorkerAgent):
-            rate = _safe_rate("tax_rate_worker", 0.05)
-            taxable = max(0.0, agent.income_last_step)
-            tax = taxable * rate
-            # Enforce min wage: top up from tax revenue IF affordable
+            rate = _safe("tax_rate_worker", 0.05); tax = max(0.0, agent.income_last_step) * rate
             if agent.employed:
-                floor = _safe_rate("min_wage", 1.0)
+                floor = _safe("min_wage", 1.0)
                 if agent.wage < floor:
                     shortfall = floor - agent.wage
-                    # Only subsidize if we can afford it
-                    if self.tax_revenue >= shortfall:
-                        agent.wealth += shortfall
-                        self.tax_revenue -= shortfall
-                    elif self.tax_revenue > 0:
-                        # Partial top-up: spend what we have
-                        agent.wealth += self.tax_revenue
-                        self.tax_revenue = 0.0
-
+                    if self.tax_revenue >= shortfall: agent.wealth += shortfall; self.tax_revenue -= shortfall
+                    elif self.tax_revenue > 0: agent.wealth += self.tax_revenue; self.tax_revenue = 0.0
         elif isinstance(agent, FirmAgent):
-            rate = _safe_rate("tax_rate_firm", 0.10)
-            taxable = max(0.0, agent.profit)
-            tax = taxable * rate
-            # Pollution tax
-            pollution_charge = (agent.production_this_step
-                                * agent.pollution_factor
-                                * _safe_rate("pollution_tax", 0.0))
-            tax += pollution_charge
-            # Enforce min wage on firm offer
-            min_w = _safe_rate("min_wage", 1.0)
-            if agent.offered_wage < min_w:
-                agent.offered_wage = min_w
-
+            rate = _safe("tax_rate_firm", 0.10); tax = max(0.0, agent.profit) * rate
+            tax += agent.production_this_step * agent.pollution_factor * _safe("pollution_tax", 0.0)
+            min_w = _safe("min_wage", 1.0)
+            if agent.offered_wage < min_w: agent.offered_wage = min_w
         elif isinstance(agent, LandownerAgent):
-            rate = _safe_rate("tax_rate_landowner", 0.08)
-            taxable = max(0.0, agent.total_rent_collected * 0.01)
-            tax = taxable * rate
-
-        else:
-            return
-
-        if agent.wealth >= tax:
-            agent.wealth -= tax
-            self.tax_revenue += tax
-
-    # ------------------------------------------------------------------
-    # Redistribution & investment
-    # ------------------------------------------------------------------
+            rate = _safe("tax_rate_landowner", 0.08); tax = max(0.0, agent.total_rent_collected * 0.01) * rate
+        else: return
+        if agent.wealth >= tax: agent.wealth -= tax; self.tax_revenue += tax
 
     def _redistribute(self):
-        """Distribute UBI and targeted transfers."""
         workers = self.model.workers
-        if not workers:
-            return
-
+        if not workers: return
         ubi = self.policy["ubi_payment"]
-        if not np.isfinite(ubi):
-            ubi = 0.0
+        if not np.isfinite(ubi): ubi = 0.0
         total_ubi = ubi * len(workers)
-
-        if total_ubi <= 0 or self.tax_revenue <= 0:
-            return
-
+        if total_ubi <= 0 or self.tax_revenue <= 0: return
         if self.tax_revenue >= total_ubi:
-            for w in workers:
-                w.wealth += ubi
+            for w in workers: w.wealth += ubi
             self.tax_revenue -= total_ubi
         else:
-            per_worker = self.tax_revenue / len(workers)
-            for w in workers:
-                w.wealth += per_worker
+            per = self.tax_revenue / len(workers)
+            for w in workers: w.wealth += per
             self.tax_revenue = 0.0
 
     def _apply_investments(self):
-        """
-        Translate investment instrument values into model bonus variables.
-        Investments are funded from tax_revenue.
-        """
         COST_PER_UNIT = 0.5
-
-        # Read policy values with NaN guard: if any instrument is NaN,
-        # fall back to its default value. This prevents int(NaN) crashes
-        # downstream in environment.py's range(max(1, int(agri))).
         def _safe(key, default):
-            v = self.policy.get(key, default)
-            return v if np.isfinite(v) else default
-
-        agri  = _safe("agriculture_investment", 0.5)
-        infra = _safe("infrastructure_investment", 0.5)
-        hlth  = _safe("healthcare_investment", 0.0)
-        edu   = _safe("education_investment", 0.0)
-
+            v = self.policy.get(key, default); return v if np.isfinite(v) else default
+        agri = _safe("agriculture_investment", 0.5); infra = _safe("infrastructure_investment", 0.5)
+        hlth = _safe("healthcare_investment", 0.0); edu = _safe("education_investment", 0.0)
         total_cost = (agri + infra + hlth + edu) * COST_PER_UNIT
         if total_cost > 0 and self.tax_revenue > 0:
             ratio = min(1.0, self.tax_revenue / (total_cost + 1e-9))
             self.tax_revenue = max(0.0, self.tax_revenue - total_cost * ratio)
-        else:
-            ratio = 0.0  # No revenue = no investment effect (not negative!)
-
-        # Map investments to model bonus variables, clamped to valid ranges
-        self.model._agriculture_bonus    = max(1.0, 1.0 + 0.3 * agri * ratio)
+        else: ratio = 0.0
+        self.model._agriculture_bonus = max(1.0, 1.0 + 0.3 * agri * ratio)
         self.model._infrastructure_level = max(0.5, 1.0 + 0.2 * infra * ratio)
-        self.model._healthcare_bonus     = max(0.0, min(0.30, 0.10 * hlth * ratio))
-        self.model._education_quality    = max(1.0, 1.0 + 0.3 * edu * ratio)
-
-        # Pollution cleanup
+        self.model._healthcare_bonus = max(0.0, min(0.30, 0.10 * hlth * ratio))
+        self.model._education_quality = max(1.0, 1.0 + 0.3 * edu * ratio)
         cleanup = _safe("cleanup_investment", 0.0)
         if cleanup > 0 and self.tax_revenue > 0:
-            cleanup_cost = cleanup * 2.0
-            if self.tax_revenue >= cleanup_cost:
-                self.tax_revenue -= cleanup_cost
-                cleanup_rate = min(0.10, cleanup * 0.02)
-                self.model.pollution_grid *= max(0.0, 1.0 - cleanup_rate)
+            cc = cleanup * 2.0
+            if self.tax_revenue >= cc:
+                self.tax_revenue -= cc
+                self.model.pollution_grid *= max(0.0, 1.0 - min(0.10, cleanup * 0.02))
 
-    # ------------------------------------------------------------------
-    # Objective functions
-    # ------------------------------------------------------------------
+    def compute_objective(self):
+        if self.objective == "SUM": return self._objective_sum()
+        elif self.objective == "NASH": return self._objective_nash()
+        elif self.objective == "JAM": return self._objective_jam()
+        elif self.objective == "CROSS": return self._objective_cross()
+        elif self.objective == "TOPO": return self._objective_topo()
+        elif self.objective == "TARGET": return self._objective_target()
+        else: raise ValueError(f"Unknown objective: {self.objective}")
 
-    def compute_objective(self) -> float:
-        """Compute the current objective value (= reward signal)."""
-        if self.objective == "SUM":
-            return self._objective_sum()
-        elif self.objective == "NASH":
-            return self._objective_nash()
-        elif self.objective == "JAM":
-            return self._objective_jam()
-        elif self.objective == "CROSS":
-            return self._objective_cross()
-        elif self.objective == "TOPO":
-           return self._objective_topo()
-        elif self.objective == "TARGET":
-           return self._objective_target()
-        else:
-           raise ValueError(f"Unknown objective: {self.objective}")
+    def _objective_sum(self):
+        w = self.model.get_all_agent_wealths(); w = w[np.isfinite(w)]
+        return float(np.sum(w)) if len(w) > 0 else 0.0
 
+    def _objective_nash(self):
+        w = self.model.get_all_agent_wealths(); w = w[np.isfinite(w)]
+        return float(np.sum(np.log(np.maximum(w, EPSILON)))) if len(w) > 0 else 0.0
 
-    def _objective_sum(self) -> float:
-        """R = sum(wealth_i) -- utilitarian aggregate."""
-        wealths = self.model.get_all_agent_wealths()
-        wealths = wealths[np.isfinite(wealths)]
-        if len(wealths) == 0:
-            return 0.0
-        return float(np.sum(wealths))
-
-    def _objective_nash(self) -> float:
-        """R = sum(log(wealth_i + eps)) -- Nash social welfare."""
-        wealths = self.model.get_all_agent_wealths()
-        wealths = wealths[np.isfinite(wealths)]
-        if len(wealths) == 0:
-            return 0.0
-        return float(np.sum(np.log(np.maximum(wealths, EPSILON))))
-
-    def _objective_jam(self) -> float:
-        """R = log(min(agency_i)) -- maximize the agency floor."""
+    def _objective_jam(self):
         workers = self.model.workers
-        if not workers:
-            return float(math.log(EPSILON))
-        agencies = np.array([w.compute_agency() for w in workers], dtype=np.float64)
-        agencies = agencies[np.isfinite(agencies)]
-        if len(agencies) == 0:
-            return float(math.log(EPSILON))
-        floor = float(np.min(agencies))
-        return float(math.log(max(floor, EPSILON)))
+        if not workers: return float(math.log(EPSILON))
+        a = np.array([w.compute_agency() for w in workers], dtype=np.float64)
+        a = a[np.isfinite(a)]
+        return float(math.log(max(float(np.min(a)), EPSILON))) if len(a) > 0 else float(math.log(EPSILON))
 
-    def _objective_cross(self) -> float:
-        """
-        R = sum(log(w_i)) * (1 - all_gini)^2 * alpha_health
-            * productivity * education * epistemic
-
-        Topology-engineered objective. Nash welfare (sum of log wealth)
-        gated by system health multipliers that mesa optimizers cannot
-        decouple from their own profitability.
-
-        Key design choices
-        ------------------
-        1. Use ALL-agent Gini (workers + firms + landowners), not
-           worker-only.  Worker Gini stays ~0.15 even at extreme
-           concentration because the gap is between workers and
-           capital owners, not among workers.
-
-        2. (1 - gini)^2 as the concentration gate.  Quadratic is
-           gentle at low Gini (doesn't punish healthy inequality)
-           and crushing at high Gini (0.9 -> 0.01, 0.95 -> 0.0025).
-           The squared term means the planner sees a smooth, strong
-           gradient AWAY from concentration at every level.
-
-        3. alpha_health = min(1, alpha/3).  Power-law alpha below 1
-           means infinite variance (a few agents dominate the entire
-           distribution).  This catches extreme tail concentration
-           that Gini alone might underweight.
-
-        4. All multipliers are applied as a PRODUCT with nash_base.
-           This means the planner cannot escape the penalty by growing
-           the aggregate: a 5x rise in nash_base from concentration
-           is wiped out by the gate closing from 0.25 to 0.0025.
-
-        Gradient property: deconcentrating (lowering Gini) increases
-        the reward at every step from 0.90 to 0.30, even though
-        nash_base drops along with concentration.  The planner is
-        rewarded for redistribution because the gate opens faster
-        than the base shrinks.
-        """
+    def _objective_cross(self):
         workers = self.model.workers
-        if not workers:
-            return float(math.log(EPSILON))
-
-        # ── Base: Nash welfare ──────────────────────────────────────
-        wealths = np.array([w.wealth for w in workers], dtype=np.float64)
-        wealths = wealths[np.isfinite(wealths)]
-        if len(wealths) == 0:
-            return float(math.log(EPSILON))
-
+        if not workers: return float(math.log(EPSILON))
+        wealths = np.array([w.wealth for w in workers], dtype=np.float64); wealths = wealths[np.isfinite(wealths)]
+        if len(wealths) == 0: return float(math.log(EPSILON))
         nash_base = float(np.sum(np.log(np.maximum(wealths, EPSILON))))
-
-        # ── Concentration gate ──────────────────────────────────────
-        # ALL agent wealths: workers + firms + landowners
-        all_w = self.model.get_all_agent_wealths()
-        all_w = all_w[np.isfinite(all_w) & (all_w > 0)]
-
+        all_w = self.model.get_all_agent_wealths(); all_w = all_w[np.isfinite(all_w) & (all_w > 0)]
         if len(all_w) > 1:
-            s = np.sort(all_w)
-            n = len(s)
-            all_gini = float(
-                (2 * np.sum(np.arange(1, n + 1) * s) - (n + 1) * s.sum())
-                / (n * s.sum())
-            )
-        else:
-            all_gini = 0.0
-
-        gini_gate = max(0.001, (1.0 - all_gini) ** 2)
-
-        # Power-law alpha health
+            s = np.sort(all_w); n = len(s)
+            all_gini = float((2*np.sum(np.arange(1,n+1)*s)-(n+1)*s.sum())/(n*s.sum()))
+        else: all_gini = 0.0
+        gini_gate = max(0.001, (1.0 - all_gini)**2)
         alpha_health = 1.0
         if len(all_w) >= 20:
-            threshold = np.percentile(all_w, 90)
-            tail = all_w[all_w >= threshold]
-            if len(tail) >= 5 and threshold > 0:
-                log_sum = np.sum(np.log(tail / threshold))
-                if log_sum > EPSILON:
-                    alpha = len(tail) / log_sum
-                    alpha_health = min(1.0, max(0.1, alpha / 3.0))
+            thr = np.percentile(all_w, 90); tail = all_w[all_w >= thr]
+            if len(tail) >= 5 and thr > 0:
+                ls = np.sum(np.log(tail/thr))
+                if ls > EPSILON: alpha_health = min(1.0, max(0.1, (len(tail)/ls)/3.0))
+        n_emp = sum(1 for w in workers if w.employed)
+        productivity = max(0.01, (n_emp/max(len(workers),1)) * float(np.mean([w.skill for w in workers])))
+        edu = min(1.0, max(0.01, (self.model._education_quality - 1.0)*0.5 + 0.5))
+        nf = getattr(self.model, 'news_firms', []); anf = [f for f in nf if not f.defunct]
+        cn = sum(1 for f in anf if f.captured_by_cartel is not None)
+        nd = 1.0 - (cn/len(anf)) if anf else 0.5
+        tv = np.array([getattr(w,'authority_trust',0.7) for w in workers])
+        th = max(0.01, float(np.mean(tv)) * (1.0 - float(np.mean(tv < 0.3))*2))
+        return float(nash_base * max(gini_gate * alpha_health * productivity * edu * max(0.01, nd*th), 1e-10))
 
-        concentration_gate = gini_gate * alpha_health
-
-        # ── Productivity multiplier ─────────────────────────────────
-        n_employed = sum(1 for w in workers if w.employed)
-        employment_rate = n_employed / max(len(workers), 1)
-        skills = np.array([w.skill for w in workers], dtype=np.float64)
-        mean_skill = float(np.mean(skills)) if len(skills) > 0 else 0.5
-        productivity = max(0.01, employment_rate * mean_skill)
-
-        # ── Education multiplier ────────────────────────────────────
-        edu_quality = self.model._education_quality
-        education = min(1.0, max(0.01, (edu_quality - 1.0) * 0.5 + 0.5))
-
-        # ── Epistemic multiplier ────────────────────────────────────
-        news_firms = getattr(self.model, 'news_firms', [])
-        active_news = [nf for nf in news_firms if not nf.defunct]
-        captured_news = sum(
-            1 for nf in active_news if nf.captured_by_cartel is not None
-        )
-        if active_news:
-            news_diversity = 1.0 - (captured_news / len(active_news))
-        else:
-            news_diversity = 0.5
-
-        trust_vals = np.array(
-            [getattr(w, 'authority_trust', 0.7) for w in workers]
-        )
-        trust_health = float(np.mean(trust_vals))
-        low_trust_frac = float(np.mean(trust_vals < 0.3))
-        trust_health *= (1.0 - low_trust_frac * 2)
-        trust_health = max(trust_health, 0.01)
-
-        epistemic = max(0.01, news_diversity * trust_health)
-
-        # ── Combined reward ─────────────────────────────────────────
-        system_multiplier = (concentration_gate
-                             * productivity
-                             * education
-                             * epistemic)
-
-        reward = nash_base * max(system_multiplier, 1e-10)
-
-        return float(reward)
-
-    def _objective_topo(self) -> float:
-        """
-        TOPO: Topology shaping toward healthy society.
-        
-        Don't tell the planner what healthy looks like.
-        Shape the landscape so healthy is where the gradients point.
-        
-        Architecture: nash_base * product(health_factors)
-        
-        Each health factor scores 1.0 when the metric is in the
-        healthy range, and drops smoothly toward 0 outside it.
-        The product structure means ALL factors must be healthy
-        simultaneously. Mesa optimizers profit most when the
-        landscape is healthy, because their revenue comes from
-        the nash_base which is gated by the health factors.
-        
-        Uses gaussian scoring: score = exp(-((x - center) / width)^2)
-        This creates a smooth bowl centered on the healthy range
-        with gradients pointing toward the center from any direction.
-        """
+    def _objective_topo(self):
         workers = self.model.workers
-        if not workers:
-            return float(math.log(EPSILON))
-        
-        # ── Nash base ───────────────────────────────────────────
-        wealths = np.array([w.wealth for w in workers], dtype=np.float64)
-        wealths = wealths[np.isfinite(wealths)]
-        if len(wealths) == 0:
-            return float(math.log(EPSILON))
-        
+        if not workers: return float(math.log(EPSILON))
+        wealths = np.array([w.wealth for w in workers], dtype=np.float64); wealths = wealths[np.isfinite(wealths)]
+        if len(wealths) == 0: return float(math.log(EPSILON))
         nash_base = float(np.sum(np.log(np.maximum(wealths, EPSILON))))
-        
-        # ── Helper: gaussian score (1.0 at center, drops outside) ──
-        def gscore(value, center, width):
-            """Score 1.0 at center, drops to 0.37 at center ± width."""
-            return math.exp(-((value - center) / max(width, 0.01)) ** 2)
-        
-        # ── Health factors ──────────────────────────────────────
-        
-        # 1. Equity: Gini in [0.25, 0.40], center 0.325
-        all_w = self.model.get_all_agent_wealths()
-        all_w = all_w[np.isfinite(all_w) & (all_w > 0)]
+        def gs(v, c, wi): return math.exp(-((v-c)/max(wi,0.01))**2)
+        all_w = self.model.get_all_agent_wealths(); all_w = all_w[np.isfinite(all_w) & (all_w > 0)]
         if len(all_w) > 1:
-            s = np.sort(all_w)
-            n = len(s)
-            all_gini = float(
-                (2 * np.sum(np.arange(1, n + 1) * s) - (n + 1) * s.sum())
-                / (n * s.sum()))
-        else:
-            all_gini = 0.5
-        equity = gscore(all_gini, 0.325, 0.15)
-        
-        # 2. Employment: unemployment in [0.03, 0.15], center 0.08
-        n_employed = sum(1 for w in workers if w.employed)
-        unemployment = 1.0 - n_employed / max(len(workers), 1)
-        employment_health = gscore(unemployment, 0.08, 0.12)
-        
-        # 3. Skills: mean skill > 0.5, center 0.7
-        skills = np.array([w.skill for w in workers], dtype=np.float64)
-        mean_skill = float(np.mean(skills)) if len(skills) > 0 else 0.3
-        skill_health = gscore(mean_skill, 0.7, 0.25)
-        
-        # 4. Epistemic: R0 in [0.5, 2.0], center 1.2
-        # Compute R0 inline (simplified from information.py)
-        mean_connections = float(np.mean([
-            len(w.network_connections) for w in workers
-        ])) if workers else 0
-        trust_vals = np.array([getattr(w, 'authority_trust', 0.7) for w in workers])
-        mean_trust = float(np.mean(trust_vals))
-        contact_rate = mean_connections * 0.05  # PEER_SHARE_RATE
-        transmission_prob = mean_trust * 0.1     # NEWS_ABSORPTION_RATE
-        recovery_rate = 0.02
-        info_r0 = (contact_rate * transmission_prob) / max(recovery_rate, 0.001)
-        epistemic = gscore(info_r0, 1.2, 1.0)
-        
-        # 5. Market competition: HHI < 0.10, center 0.05
+            s = np.sort(all_w); n = len(s)
+            all_gini = float((2*np.sum(np.arange(1,n+1)*s)-(n+1)*s.sum())/(n*s.sum()))
+        else: all_gini = 0.5
+        equity = gs(all_gini, 0.325, 0.15)
+        n_emp = sum(1 for w in workers if w.employed)
+        employment_health = gs(1.0 - n_emp/max(len(workers),1), 0.08, 0.12)
+        skills = np.array([w.skill for w in workers]); skill_health = gs(float(np.mean(skills)) if len(skills)>0 else 0.3, 0.7, 0.25)
+        mc = float(np.mean([len(w.network_connections) for w in workers])) if workers else 0
+        tv = np.array([getattr(w,'authority_trust',0.7) for w in workers])
+        r0 = (mc*0.05*float(np.mean(tv))*0.1)/0.02; epistemic = gs(r0, 1.2, 1.0)
         firms = [f for f in self.model.firms if not f.defunct]
-        if firms:
-            shares = np.array([f.market_share for f in firms])
-            hhi = float(np.sum(shares ** 2))
-        else:
-            hhi = 1.0
-        competition = gscore(hhi, 0.05, 0.08)
-        
-        # 6. Population sustainability: population should be stable/growing
-        # Score based on whether pop is above initial
-        pop_ratio = len(workers) / max(self.model.n_workers_initial, 1)
-        sustainability = min(1.0, pop_ratio)  # 1.0 at or above initial, drops below
-        
-        # ── Combined ────────────────────────────────────────────
-        # Product of all health factors
-        system_health = (equity * employment_health * skill_health 
-                        * epistemic * competition * sustainability)
-        
-        # Gate the nash base with system health
-        # When all factors are 1.0, reward = nash_base (full credit)
-        # When any factor drops, reward drops proportionally
-        reward = nash_base * max(system_health, 1e-10)
-        
-        return float(reward)
+        if firms: hhi = float(np.sum(np.array([f.market_share for f in firms])**2))
+        else: hhi = 1.0
+        competition = gs(hhi, 0.05, 0.08)
+        sustainability = min(1.0, len(workers)/max(self.model.n_workers_initial, 1))
+        system_health = equity * employment_health * skill_health * epistemic * competition * sustainability
+        return float(nash_base * max(system_health, 1e-10))
 
-    def _objective_target(self) -> float:
-        """
-        TARGET: Direct scoring toward healthy society targets.
-        
-        Explicitly tells the planner what healthy looks like.
-        Each metric is scored on how close it is to the target range.
-        In range = 1.0, out of range = decays toward 0.
-        
-        Total score = sum of dimension scores * nash_base_sign
-        
-        This is the prescriptive approach: we define the target and
-        the planner optimizes toward it. Less elegant than TOPO but
-        more direct, and lets us test whether the target itself is
-        achievable.
-        
-        Uses asymmetric scoring: metrics have a healthy range [lo, hi].
-        Inside the range scores 1.0. Outside, score decays with
-        distance from the nearest bound.
-        """
+    def _objective_target(self):
         workers = self.model.workers
-        if not workers:
-            return -100.0
-        
-        # ── Helper: range score ─────────────────────────────────
-        def rscore(value, lo, hi, decay=5.0):
-            """
-            1.0 inside [lo, hi]. Decays outside.
-            decay controls how fast it drops (higher = sharper).
-            """
-            if lo <= value <= hi:
-                return 1.0
-            if value < lo:
-                return math.exp(-decay * (lo - value) / max(hi - lo, 0.01))
-            else:
-                return math.exp(-decay * (value - hi) / max(hi - lo, 0.01))
-        
-        # ── Compute all metrics ─────────────────────────────────
-        
-        # Gini
-        all_w = self.model.get_all_agent_wealths()
-        all_w = all_w[np.isfinite(all_w) & (all_w > 0)]
+        if not workers: return -100.0
+        def rs(v, lo, hi, decay=5.0):
+            if lo <= v <= hi: return 1.0
+            if v < lo: return math.exp(-decay*(lo-v)/max(hi-lo,0.01))
+            return math.exp(-decay*(v-hi)/max(hi-lo,0.01))
+        all_w = self.model.get_all_agent_wealths(); all_w = all_w[np.isfinite(all_w) & (all_w > 0)]
         if len(all_w) > 1:
-            s = np.sort(all_w)
-            n = len(s)
-            all_gini = float(
-                (2 * np.sum(np.arange(1, n + 1) * s) - (n + 1) * s.sum())
-                / (n * s.sum()))
-        else:
-            all_gini = 0.5
-        
-        # Alpha
-        alpha = 5.0  # default healthy
+            s = np.sort(all_w); n = len(s)
+            all_gini = float((2*np.sum(np.arange(1,n+1)*s)-(n+1)*s.sum())/(n*s.sum()))
+        else: all_gini = 0.5
+        alpha = 5.0
         if len(all_w) >= 20:
-            threshold = np.percentile(all_w, 90)
-            tail = all_w[all_w >= threshold]
-            if len(tail) >= 5 and threshold > 0:
-                log_sum = np.sum(np.log(tail / threshold))
-                if log_sum > EPSILON:
-                    alpha = len(tail) / log_sum
-        
-        # Employment
-        n_employed = sum(1 for w in workers if w.employed)
-        unemployment = 1.0 - n_employed / max(len(workers), 1)
-        
-        # Skills
-        skills = np.array([w.skill for w in workers], dtype=np.float64)
-        mean_skill = float(np.mean(skills)) if len(skills) > 0 else 0.3
-        
-        # R0 (inline)
-        mean_connections = float(np.mean([
-            len(w.network_connections) for w in workers
-        ])) if workers else 0
-        trust_vals = np.array([getattr(w, 'authority_trust', 0.7) for w in workers])
-        mean_trust = float(np.mean(trust_vals))
-        contact_rate = mean_connections * 0.05
-        transmission_prob = mean_trust * 0.1
-        info_r0 = (contact_rate * transmission_prob) / 0.02
-        
-        # Epistemic health
-        # Simplified: geometric mean of trust, anti-polarization, R0 health
-        weight_matrix = np.array([
-            [w.decision_weights.get(a, 0.5) for a in 
-             ["harvest","seek_work","trade","migrate","save","invest","found_firm"]]
-            for w in workers[:200]  # sample for speed
-        ])
-        if len(weight_matrix) > 1:
-            mean_weights = weight_matrix.mean(axis=0)
-            deviations = weight_matrix - mean_weights
-            polarization = float(np.mean(np.sqrt(np.sum(deviations ** 2, axis=1))))
-        else:
-            polarization = 0.1
-        
-        # Market structure
+            thr = np.percentile(all_w, 90); tail = all_w[all_w >= thr]
+            if len(tail) >= 5 and thr > 0:
+                ls = np.sum(np.log(tail/thr))
+                if ls > EPSILON: alpha = len(tail)/ls
+        n_emp = sum(1 for w in workers if w.employed); unemp = 1.0 - n_emp/max(len(workers),1)
+        skills = np.array([w.skill for w in workers]); ms = float(np.mean(skills)) if len(skills)>0 else 0.3
+        mc = float(np.mean([len(w.network_connections) for w in workers])) if workers else 0
+        tv = np.array([getattr(w,'authority_trust',0.7) for w in workers])
+        r0 = (mc*0.05*float(np.mean(tv))*0.1)/0.02
+        wm = np.array([[w.decision_weights.get(a,0.5) for a in ["harvest","seek_work","trade","migrate","save","invest","found_firm"]] for w in workers[:200]])
+        pol = float(np.mean(np.sqrt(np.sum((wm - wm.mean(axis=0))**2, axis=1)))) if len(wm)>1 else 0.1
         firms = [f for f in self.model.firms if not f.defunct]
         if firms:
-            shares = np.array([f.market_share for f in firms])
-            hhi = float(np.sum(shares ** 2))
-            n_cartels = sum(1 for cid, members in self.model.active_cartels.items() 
-                          if len(members) >= 2)
-            cartel_pct = n_cartels / max(len(firms), 1)
-        else:
-            hhi = 1.0
-            cartel_pct = 0.0
-        
-        # Debt
-        debt_frac = float(np.mean([w.debt > 0 for w in workers])) if workers else 0
-        
-        # Worker floor
-        worker_w = np.array([w.wealth for w in workers], dtype=np.float64)
-        worker_min = float(np.min(worker_w)) if len(worker_w) > 0 else 0
-        
-        # Population
-        pop_ratio = len(workers) / max(self.model.n_workers_initial, 1)
-        
-        # ── Score each dimension ────────────────────────────────
-        scores = {
-            'gini':        rscore(all_gini, 0.25, 0.40),
-            'alpha':       min(1.0, alpha / 3.0),          # 1.0 when alpha >= 3
-            'top10':       rscore(all_w[all_w >= np.percentile(all_w, 90)].sum() / max(all_w.sum(), 1) 
-                           if len(all_w) > 10 else 0.3, 0.15, 0.35),
-            'unemployment': rscore(unemployment, 0.03, 0.15),
-            'skill':       rscore(mean_skill, 0.50, 1.00),
-            'info_r0':     rscore(info_r0, 0.50, 2.00),
-            'trust':       rscore(mean_trust, 0.50, 0.80),
-            'polarization': rscore(polarization, 0.05, 0.20),
-            'hhi':         rscore(hhi, 0.0, 0.10),
-            'cartels':     rscore(cartel_pct, 0.0, 0.05),
-            'debt':        rscore(debt_frac, 0.0, 0.20),
-            'floor':       min(1.0, worker_min / 40.0),    # 1.0 when min >= 40
-            'population':  min(1.0, pop_ratio),             # 1.0 when pop >= initial
-        }
-        
-        # ── Weighted sum ────────────────────────────────────────
-        # All dimensions matter, but some matter more
-        weights = {
-            'gini': 2.0,          # high priority: distribution
-            'alpha': 1.0,
-            'top10': 1.5,
-            'unemployment': 2.0,  # high priority: people need work
-            'skill': 1.0,
-            'info_r0': 1.5,       # epistemic health matters a lot
-            'trust': 1.0,
-            'polarization': 0.5,
-            'hhi': 1.0,
-            'cartels': 0.5,
-            'debt': 0.5,
-            'floor': 2.0,         # high priority: nobody starving
-            'population': 2.0,    # high priority: don't collapse
-        }
-        
-        total_score = sum(scores[k] * weights[k] for k in scores)
-        max_score = sum(weights.values())
-        normalized_score = total_score / max_score  # 0 to 1
-        
-        # Scale by population (bigger healthy societies are better than
-        # smaller healthy societies, prevents "shrink to win")
-        pop_bonus = math.log(max(len(workers), 1))
-        
-        reward = normalized_score * pop_bonus * 100  # scale for RL
-        
-        return float(reward)
+            hhi = float(np.sum(np.array([f.market_share for f in firms])**2))
+            cpct = sum(1 for cid, m in self.model.active_cartels.items() if len(m)>=2)/max(len(firms),1)
+        else: hhi = 1.0; cpct = 0.0
+        df = float(np.mean([w.debt > 0 for w in workers])) if workers else 0
+        ww = np.array([w.wealth for w in workers]); wmin = float(np.min(ww)) if len(ww)>0 else 0
+        pr = len(workers)/max(self.model.n_workers_initial, 1)
+        sc = {'gini':rs(all_gini,0.25,0.40),'alpha':min(1.0,alpha/3.0),
+              'top10':rs(all_w[all_w>=np.percentile(all_w,90)].sum()/max(all_w.sum(),1) if len(all_w)>10 else 0.3,0.15,0.35),
+              'unemployment':rs(unemp,0.03,0.15),'skill':rs(ms,0.50,1.00),'info_r0':rs(r0,0.50,2.00),
+              'trust':rs(float(np.mean(tv)),0.50,0.80),'polarization':rs(pol,0.05,0.20),
+              'hhi':rs(hhi,0.0,0.10),'cartels':rs(cpct,0.0,0.05),'debt':rs(df,0.0,0.20),
+              'floor':min(1.0,wmin/40.0),'population':min(1.0,pr)}
+        wts = {'gini':2.0,'alpha':1.0,'top10':1.5,'unemployment':2.0,'skill':1.0,'info_r0':1.5,
+               'trust':1.0,'polarization':0.5,'hhi':1.0,'cartels':0.5,'debt':0.5,'floor':2.0,'population':2.0}
+        total = sum(sc[k]*wts[k] for k in sc); mx = sum(wts.values())
+        return float((total/mx) * math.log(max(len(workers),1)) * 100)
 
-    # ------------------------------------------------------------------
-    # Accessors
-    # ------------------------------------------------------------------
+    def get_policy_snapshot(self):
+        snap = dict(self.policy); snap["objective_value"] = self.last_objective_value
+        snap["tax_revenue_pool"] = self.tax_revenue; snap["es_sigma"] = self._es.sigma
+        snap["total_updates"] = self._total_updates; return snap
 
-    def get_policy_snapshot(self) -> Dict[str, Any]:
-        snap = dict(self.policy)
-        snap["objective_value"] = self.last_objective_value
-        snap["tax_revenue_pool"] = self.tax_revenue
-        snap["es_sigma"] = self._es.sigma
-        snap["total_updates"] = self._total_updates
-        return snap
-
-
-# ---------------------------------------------------------------------------
-# Utility (avoid importing metrics.py to prevent circular imports)
-# ---------------------------------------------------------------------------
-
-def _gini_fast(w: np.ndarray) -> float:
-    """Fast Gini coefficient."""
+def _gini_fast(w):
     w = np.sort(w[w > 0])
-    if len(w) == 0:
-        return 0.0
+    if len(w) == 0: return 0.0
     n = len(w)
-    cumsum = np.cumsum(w)
-    return float((2 * np.sum((np.arange(1, n + 1)) * w) - (n + 1) * w.sum())
-                 / (n * w.sum()))
+    return float((2*np.sum(np.arange(1,n+1)*w)-(n+1)*w.sum())/(n*w.sum()))
