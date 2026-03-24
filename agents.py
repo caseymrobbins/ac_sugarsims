@@ -16,6 +16,8 @@ Changes from original:
   - Workers can found firms (entrepreneurship)
   - Lower reproduction threshold with population floor via immigration
   - Firms have survival mechanics (cost cutting, downsizing)
+  - Sustainable Capitalism: firms optimize min(S,E,V,C) not raw profit
+  - Civic obligation: wealth carries structural public goods funding
 """
 
 from __future__ import annotations
@@ -24,6 +26,11 @@ import contextlib
 from enum import Enum, auto
 from typing import TYPE_CHECKING, List, Optional, Dict
 from civic_obligation import apply_civic_obligation
+from sustainable_capitalism import (
+    sustainable_learn_from_outcome,
+    sustainable_choose_strategy,
+    compute_stakeholder_scores
+)
 import numpy as np
 from mesa import Agent
 
@@ -193,7 +200,7 @@ class WorkerAgent(Agent):
         # Pay rent for occupied cell
         self._pay_rent()
 
-        # Possibly reproduce — harder when population is high (carrying capacity)
+        # Possibly reproduce -- harder when population is high (carrying capacity)
         if self.wealth >= REPRODUCTION_THRESHOLD:
             # Base prob scaled down by population pressure
             pop_ratio = len(self.model.workers) / self.model.n_workers_initial
@@ -228,7 +235,7 @@ class WorkerAgent(Agent):
         return (int(self.pos[0]), int(self.pos[1]))
 
     def _choose_action(self) -> str:
-        """Decision matrix: score actions using weights × situational context."""
+        """Decision matrix: score actions using weights x situational context."""
         from information import choose_action_from_weights, compute_action_context, update_weights_from_experience
 
         # Learn from last step's outcome before choosing new action
@@ -283,8 +290,6 @@ class WorkerAgent(Agent):
                 np.clip(current + adjustment, 0.01, 0.99))
 
         # Update authority trust based on whether signal matches experience
-        # If signal says "seek_work" but agent just failed to find work,
-        # trust decreases. Simplified: compare signal direction to last outcome.
         signal_avg = np.mean(list(signal.weight_deltas.values()))
         experience_direction = np.sign(self._last_action_outcome)
         signal_direction = np.sign(signal_avg)
@@ -305,10 +310,9 @@ class WorkerAgent(Agent):
         raw_val       = float(self.model.raw_grid[x, y])
         water_val     = float(self.model.water_grid[x, y])
         pollution_val = float(self.model.pollution_grid[x, y])
-        # Infrastructure TFP and water availability boost harvest; pollution degrades it
         tfp = self.model.infrastructure_bonus
         water_bonus      = 1.0 + 0.1 * min(water_val / max(self.model.water_grid.max(), 1.0), 1.0)
-        pollution_penalty = max(0.5, 1.0 - pollution_val * 0.01)   # up to -50% at cap
+        pollution_penalty = max(0.5, 1.0 - pollution_val * 0.01)
         amount = min(food_val + raw_val * 0.5,
                      self.skill * 5.0 * tfp * water_bonus * pollution_penalty
                      * (1 + self.model.rng.exponential(0.1)))
@@ -345,8 +349,6 @@ class WorkerAgent(Agent):
             best.hire_worker(self)
 
     def _trade(self):
-        """Trade with a known partner or discover a new one nearby."""
-        # Try existing connections first
         if self.network_connections:
             partner_id = self.model.rng.choice(self.network_connections)
             partner = self.model.get_agent_by_id(partner_id)
@@ -355,12 +357,9 @@ class WorkerAgent(Agent):
             else:
                 self.model.economy.bilateral_trade(self, partner)
                 return
-
-        # No connections or failed: find a nearby worker to trade with
         self._discover_and_trade()
 
     def _discover_neighbor(self):
-        """Find a nearby worker and add them as a trade connection."""
         pos = self._tpos()
         if pos is None:
             return
@@ -379,7 +378,6 @@ class WorkerAgent(Agent):
                 partner.network_connections.append(self.unique_id)
 
     def _discover_and_trade(self):
-        """Find a nearby worker, form a connection, and trade."""
         pos = self._tpos()
         if pos is None:
             return
@@ -393,51 +391,35 @@ class WorkerAgent(Agent):
         if not nearby_workers:
             return
         partner = self.model.rng.choice(nearby_workers)
-        # Form connection
         if partner.unique_id not in self.network_connections:
             self.network_connections.append(partner.unique_id)
         if self.unique_id not in partner.network_connections:
             partner.network_connections.append(self.unique_id)
-        # Trade
         self.model.economy.bilateral_trade(self, partner)
 
     def _invest_in_firms(self):
-        """
-        Simple stock market: invest surplus wealth in firms.
-        Only runs every 10 steps to avoid performance issues.
-        """
-        # Only invest periodically, not every step
         if self.model.current_step % 10 != 0:
-            # Still collect dividends every step (cheap: just iterate own investments)
             self._collect_dividends()
             return
-
         surplus = self.wealth - 100
         if surplus <= 0:
             return
-        invest_amount = surplus * 0.05  # 5% of surplus every 10 steps
-
-        # Pick a firm to invest in
+        invest_amount = surplus * 0.05
         active_firms = [f for f in self.model.firms if not f.defunct and f.profit > 0]
         if not active_firms:
             return
-
         if self.wealth > 500 and len(active_firms) > 1:
             target = max(active_firms, key=lambda f: f.profit)
         else:
             target = self.model.rng.choice(active_firms)
-
         self.wealth -= invest_amount
         target.capital_stock += invest_amount * 0.9
         target.wealth += invest_amount * 0.1
-
         fid = target.unique_id
         self.investments[fid] = self.investments.get(fid, 0) + invest_amount
-
         self._collect_dividends()
 
     def _collect_dividends(self):
-        """Collect dividends from existing investments."""
         self.dividend_income = 0.0
         dead_investments = []
         for fid, amount in self.investments.items():
@@ -454,7 +436,6 @@ class WorkerAgent(Agent):
                     firm.wealth -= dividend
                     self.dividend_income += dividend
                     self.income_last_step += dividend
-
         for fid in dead_investments:
             lost = self.investments.pop(fid)
             self.wealth += lost * 0.2
@@ -491,26 +472,17 @@ class WorkerAgent(Agent):
         if self.wealth < REPRODUCTION_THRESHOLD:
             return
         self.wealth -= REPRODUCTION_COST
-
-        # Tiered education: elite vs public
-        # Elite education: workers employed by wealthy firms or renting from
-        # landowners get a private education bonus regardless of public funding.
-        # Public education: everyone else gets the planner's education quality.
         is_elite = False
         if self.employed and self.employer_id is not None:
             firm = self.model.get_agent_by_id(self.employer_id)
             if firm and hasattr(firm, 'wealth') and firm.wealth > 500:
                 is_elite = True
         if not is_elite and self.wealth > 300:
-            is_elite = True  # wealthy enough for private education
-
+            is_elite = True
         if is_elite:
-            # Private education: high quality, independent of public investment
-            edu_boost = 0.08  # fixed high bonus
+            edu_boost = 0.08
         else:
-            # Public education: depends on planner investment
             edu_boost = (self.model._education_quality - 1.0) * 0.05
-
         child_skill = float(np.clip(
             self.skill + edu_boost + self.model.rng.normal(0, 0.05), 0.05, 1.0))
         child = WorkerAgent(
@@ -532,7 +504,6 @@ class WorkerAgent(Agent):
             self.model.grid.place_agent(child, place_pos)
             self.model.workers.append(child)
             self.model._id_cache[child.unique_id] = child
-            # Cultural transmission: child inherits parent's decision weights with noise
             for action, w in self.decision_weights.items():
                 child.decision_weights[action] = float(np.clip(
                     w + self.model.rng.normal(0, 0.05), 0.01, 0.99))
@@ -540,34 +511,29 @@ class WorkerAgent(Agent):
                 self.authority_trust + self.model.rng.normal(0, 0.05), 0.05, 0.95))
 
     def _found_firm(self):
-        """Wealthy unemployed worker founds a new firm."""
         capital = self.wealth * 0.4
         self.wealth -= capital
         firm = FirmAgent(model=self.model, capital=capital)
         pos = self._tpos()
         if pos is None:
             return
-        # Place firm near the founder
         neighbourhood = self.model.grid.get_neighborhood(
             pos, moore=True, include_center=True, radius=2)
         empty_cells = [c for c in neighbourhood if self.model.grid.is_cell_empty(c)]
         if empty_cells:
             place_pos = self.model.rng.choice(empty_cells)
         else:
-            place_pos = pos  # MultiGrid allows stacking
+            place_pos = pos
         self.model.grid.place_agent(firm, place_pos)
         self.model.firms.append(firm)
         self.model._id_cache[firm.unique_id] = firm
-        # Founder becomes first employee
         firm.hire_worker(self)
 
     def _die(self):
-        # Inheritance: distribute wealth to network connections
         if self.wealth > 5.0 and self.network_connections:
-            inheritance = self.wealth * 0.8  # 80% transferred, 20% lost (estate costs)
-            # Split among connections (prioritizes stronger connections)
+            inheritance = self.wealth * 0.8
             recipients = []
-            for cid in self.network_connections[:5]:  # max 5 heirs
+            for cid in self.network_connections[:5]:
                 heir = self.model.get_agent_by_id(cid)
                 if heir and isinstance(heir, WorkerAgent):
                     recipients.append(heir)
@@ -575,7 +541,6 @@ class WorkerAgent(Agent):
                 share = inheritance / len(recipients)
                 for heir in recipients:
                     heir.wealth += share
-
         if self.employed and self.employer_id:
             firm = self.model.get_agent_by_id(self.employer_id)
             if firm and isinstance(firm, FirmAgent):
@@ -584,10 +549,9 @@ class WorkerAgent(Agent):
             self.model.grid.remove_agent(self)
         if self in self.model.workers:
             self.model.workers.remove(self)
-        self.remove()  # Mesa 3.x deregistration
+        self.remove()
 
     def remove(self):
-        """Override to clean up from workers list."""
         if self in self.model.workers:
             self.model.workers.remove(self)
         super().remove()
@@ -597,7 +561,6 @@ class WorkerAgent(Agent):
     # ------------------------------------------------------------------
 
     def compute_agency(self) -> float:
-        """Agency proxy = geometric mean(resources, options, levers, impact) * EH filter."""
         resources = max(self.wealth, 1e-9)
         if self.pos is not None:
             p = (int(self.pos[0]), int(self.pos[1]))
@@ -610,13 +573,8 @@ class WorkerAgent(Agent):
         levers = 1.0 + float(self.employed) + float(self.debt < 100) + float(len(self.network_connections) > 0)
         delta_income = abs(self.income_last_step - self.income_prev_step) + 1e-9
         impact = max(delta_income, 1e-9)
-
         raw_agency = (resources * options * levers * impact) ** 0.25
-
-        # Epistemic health filter: agents with degraded information
-        # environment have reduced effective agency
-        eh_filter = 0.5 + 0.5 * self.authority_trust  # ranges 0.525 to 0.975
-
+        eh_filter = 0.5 + 0.5 * self.authority_trust
         return float(raw_agency * eh_filter)
 
 
@@ -629,11 +587,11 @@ class FirmAgent(Agent):
     Firms hire workers, produce goods, set wages, invest, and accumulate profit.
     Firms can naturally form cartels.
 
-    Changes from original:
-      - Firms downsize (fire workers) when unprofitable instead of bleeding to death
-      - Bankruptcy threshold raised (less fragile)
-      - Wage setting is more responsive to profitability
-      - Capital stock depreciates but can be reinvested
+    SUSTAINABLE CAPITALISM: Firms learn from min(S,E,V,C) stakeholder
+    scores rather than raw profit. Strategy selection is bottleneck-aware:
+    the firm identifies its worst stakeholder dimension and prioritizes
+    strategies that raise it. This converts firm self-interest from
+    extraction to generation without requiring altruism or regulation.
     """
 
     agent_type = AgentType.FIRM
@@ -686,14 +644,17 @@ class FirmAgent(Agent):
 
         self._produce()
 
-        # Strategic decision via learned weights
-        strategy = self._choose_strategy()
+        # Strategic decision: SUSTAINABLE CAPITALISM
+        # Firm selects strategy based on which stakeholder dimension
+        # is currently the floor, not just profit-seeking
+        strategy = sustainable_choose_strategy(self)
         self._execute_strategy(strategy)
         self._last_strategy = strategy
 
-        # Learn from outcome
+        # Learn from outcome: SUSTAINABLE CAPITALISM
+        # Learning signal is min(S,E,V,C) change, not profit change
         profit_change = self.profit - self.prev_profit
-        self._learn_from_outcome(strategy, profit_change)
+        sustainable_learn_from_outcome(self, strategy, profit_change)
 
         self.capital_stock *= 0.998
 
@@ -703,28 +664,6 @@ class FirmAgent(Agent):
 
         self.model.planner.apply_tax(self)
         apply_civic_obligation(self, self.model)
-
-
-    def _choose_strategy(self) -> str:
-        rng = self.model.rng
-        n_workers = len(self.workers)
-        profitable = self.profit > 0
-        context = {
-            "invest_capital":  (1.0 if profitable else 0.2) * min(self.wealth / 200, 1),
-            "raise_wages":     (0.3 if n_workers < 3 else 0.1) * (1.0 if profitable else 0.3),
-            "cut_wages":       (0.8 if not profitable else 0.1) * (1.0 if n_workers > 0 else 0.0),
-            "hire":            (0.5 if n_workers < 10 else 0.1) * (1.0 if profitable else 0.2),
-            "downsize":        (0.8 if self._consecutive_losses > 2 else 0.1),
-            "acquire":         min(self.wealth / 500, 1) * self.market_share * 5,
-            "form_cartel":     0.3 if self.cartel_id is None else 0.0,
-            "capture_media":   min(self.wealth / 1000, 1) * (0.5 if self.cartel_id else 0.1),
-            "pollute_more":    0.3 if not profitable else 0.1,
-            "clean_up":        self.model.planner.policy.get("pollution_tax", 0) * 0.5,
-        }
-        scores = {}
-        for action, weight in self.strategy_weights.items():
-            scores[action] = weight * context.get(action, 0.5) + float(rng.normal(0, 0.03))
-        return max(scores, key=scores.get)
 
     def _execute_strategy(self, strategy: str):
         if strategy == "invest_capital":
@@ -752,16 +691,6 @@ class FirmAgent(Agent):
         elif strategy == "clean_up":
             self.pollution_factor = max(0.02, self.pollution_factor * 0.90)
         self._maintain_wages()
-
-    def _learn_from_outcome(self, strategy: str, profit_change: float):
-        if strategy in self.strategy_weights:
-            adj = 0.02 * np.tanh(profit_change / max(abs(self.profit) + 1, 1))
-            cur = self.strategy_weights[strategy]
-            self.strategy_weights[strategy] = float(np.clip(cur + adj, 0.01, 0.99))
-        if self.profit < 0:
-            self._consecutive_losses += 1
-        else:
-            self._consecutive_losses = 0
 
     def _maintain_wages(self):
         n = max(len(self.workers), 1)
@@ -793,8 +722,7 @@ class FirmAgent(Agent):
         if n_workers == 0:
             return
         alpha = 0.35
-        # Economies of scale: larger firms get a productivity bonus
-        scale_bonus = 1.0 + 0.1 * np.log1p(n_workers)  # ~1.0 at 1, ~1.3 at 20
+        scale_bonus = 1.0 + 0.1 * np.log1p(n_workers)
         A = 3.0 * self.model.infrastructure_bonus * scale_bonus
         K = max(self.capital_stock, 1.0)
         L = max(sum(w.skill for w in self.workers.values()), 0.01)
@@ -806,14 +734,10 @@ class FirmAgent(Agent):
         self.profit = self.revenue - wage_bill
         self.wealth += self.profit
         self.total_profit_accumulated += max(self.profit, 0)
-
-        # Track losses for workforce management
         if self.profit < 0:
             self._consecutive_losses += 1
         else:
             self._consecutive_losses = 0
-
-        # Emit pollution at this firm's cell (proportional to output)
         if self.pos is not None:
             fx, fy = int(self.pos[0]), int(self.pos[1])
             emission = output * self.pollution_factor
@@ -824,33 +748,22 @@ class FirmAgent(Agent):
             self.total_pollution_emitted += emission
 
     def _manage_workforce(self):
-        """Downsize if consistently unprofitable instead of bleeding to bankruptcy."""
         if self._consecutive_losses >= 3 and len(self.workers) > 1:
-            # Fire the least skilled worker to cut costs
             if self.workers:
                 worst_id = min(self.workers.keys(),
                                key=lambda wid: self.workers[wid].skill)
                 self.fire_worker(worst_id)
-                self._consecutive_losses = 0  # Reset after action
-
-        # If no workers and wealth is positive, keep firm alive to rehire
-        # (do nothing, firm persists as an empty shell)
+                self._consecutive_losses = 0
 
     def _consider_cartel(self):
-        # Existing cartel: check for dissolution
         if self.cartel_id is not None:
-            # Defection: profitable firms leave cartels (cartel suppresses wages,
-            # but if firm is profitable enough it doesn't need the cartel)
             if self.profit > 20 and self.model.rng.random() < 0.05:
                 self._leave_cartel()
                 return
-            # Random antitrust breakup
             if self.model.rng.random() < 0.01:
                 self._leave_cartel()
                 return
             return
-
-        # Formation: lower probability, requires multiple nearby firms
         if self.model.rng.random() > 0.01:
             return
         if self.pos is None:
@@ -873,15 +786,12 @@ class FirmAgent(Agent):
             self.cartel_partners = [candidate.unique_id]
             candidate.cartel_partners = [self.unique_id]
             self.model.active_cartels[cartel_id] = {self.unique_id, candidate.unique_id}
-            # Cartel coordination reduces regulatory compliance: both firms pollute more
             self.pollution_factor = min(0.60, self.pollution_factor * 1.4)
             candidate.pollution_factor = min(0.60, candidate.pollution_factor * 1.4)
 
     def _leave_cartel(self):
-        """Exit current cartel."""
         if self.cartel_id is not None and self.cartel_id in self.model.active_cartels:
             self.model.active_cartels[self.cartel_id].discard(self.unique_id)
-            # If only one member left, dissolve the cartel
             remaining = self.model.active_cartels.get(self.cartel_id, set())
             if len(remaining) < 2:
                 for member_id in list(remaining):
@@ -893,18 +803,15 @@ class FirmAgent(Agent):
                     del self.model.active_cartels[self.cartel_id]
         self.cartel_id = None
         self.cartel_partners = []
-        # Pollution factor slowly recovers when leaving cartel
         self.pollution_factor = max(0.05, self.pollution_factor * 0.85)
 
     def _consider_acquisition(self):
-        """Large firms attempt to acquire smaller nearby competitors (M&A)."""
         if self.wealth < 500 or self.market_share < 0.05:
             return
         if self.model.rng.random() > 0.01:
             return
         if self.pos is None:
             return
-
         pos_t = (int(self.pos[0]), int(self.pos[1]))
         neighbours = self.model.grid.get_neighborhood(
             pos_t, moore=True, include_center=False, radius=15)
@@ -916,41 +823,29 @@ class FirmAgent(Agent):
         ]
         if not nearby_firms:
             return
-
         target = min(nearby_firms, key=lambda f: f.wealth)
         acquisition_cost = max(target.wealth * 0.5, 50)
-
         if self.wealth < acquisition_cost:
             return
-
-        # Execute acquisition
         self.wealth -= acquisition_cost
         self.capital_stock += target.capital_stock
-
-        # Absorb target's workers
         for wid, worker in list(target.workers.items()):
             target.fire_worker(wid)
             self.hire_worker(worker)
-
-        # Absorb cartel position
         if target.cartel_id is not None and self.cartel_id is None:
             self.cartel_id = target.cartel_id
             if target.cartel_id in self.model.active_cartels:
                 self.model.active_cartels[target.cartel_id].discard(target.unique_id)
                 self.model.active_cartels[target.cartel_id].add(self.unique_id)
-
         target._go_bankrupt()
 
     def hire_worker(self, worker: "WorkerAgent"):
-        """Hire worker only if the marginal product justifies the wage."""
         if worker.unique_id in self.workers:
             return
-        # Check marginal product: would adding this worker produce enough?
         n_current = len(self.workers)
-        max_workers = max(5, int(self.capital_stock ** 0.6))  # steeper scaling with capital
+        max_workers = max(5, int(self.capital_stock ** 0.6))
         if n_current >= max_workers:
-            return  # at capacity
-        # Estimate marginal product (Cobb-Douglas derivative w.r.t. L)
+            return
         alpha = 0.35
         A = 1.5 * self.model.infrastructure_bonus
         K = max(self.capital_stock, 1.0)
@@ -958,8 +853,7 @@ class FirmAgent(Agent):
         marginal_product = A * (1 - alpha) * (K ** alpha) * (L ** (-alpha))
         price = self.model.economy.prices.get("goods", 1.0)
         if marginal_product * price < self.offered_wage * 0.5:
-            return  # not worth hiring
-
+            return
         self.workers[worker.unique_id] = worker
         worker.employed = True
         worker.employer_id = self.unique_id
@@ -1027,23 +921,18 @@ class LandownerAgent(Agent):
         apply_civic_obligation(self, self.model)
 
     def compute_rent(self, worker: "WorkerAgent") -> float:
-        """Rent based on location quality, not just worker income.
-        Good locations (near resources and firms) cost more."""
         base_rent = self.rent_rate * max(worker.income_last_step, 0.5)
-
-        # Location premium: cells near resources and firms are worth more
         pos = worker._tpos()
         if pos is not None:
             x, y = pos
             local_value = (float(self.model.food_grid[x, y])
                           + float(self.model.raw_grid[x, y])
                           + float(self.model.capital_grid[x, y]))
-            # Check for nearby firms (proximity to jobs increases rent)
             nearby_firms = 0
             try:
                 neighbours = self.model.grid.get_neighborhood(
                     pos, moore=True, include_center=False, radius=3)
-                for cell in neighbours[:12]:  # sample for speed
+                for cell in neighbours[:12]:
                     for a in self.model.grid.get_cell_list_contents([cell]):
                         if isinstance(a, FirmAgent) and not a.defunct:
                             nearby_firms += 1
@@ -1051,7 +940,6 @@ class LandownerAgent(Agent):
                 pass
             location_premium = 1.0 + 0.02 * local_value + 0.05 * nearby_firms
             return base_rent * location_premium
-
         return base_rent
 
     def _expand(self):
