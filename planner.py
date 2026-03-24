@@ -696,12 +696,12 @@ class PlannerAgent(Agent):
         elif self.objective == "JAM":
             return self._objective_jam()
         elif self.objective == "CROSS":
-           return self._objective_cross()
-       elif self.objective == "TOPO":
+            return self._objective_cross()
+        elif self.objective == "TOPO":
            return self._objective_topo()
-       elif self.objective == "TARGET":
+        elif self.objective == "TARGET":
            return self._objective_target()
-       else:
+        else:
            raise ValueError(f"Unknown objective: {self.objective}")
 
 
