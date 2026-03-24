@@ -330,7 +330,8 @@ class PlannerAgent(Agent):
 
         # CRITICAL: separate RNG for the planner's learning,
         # so same simulation seed + different objective = different exploration
-        obj_offset = {"SUM": 0, "NASH": 10000, "JAM": 20000}.get(self.objective, 0)
+        obj_offset = {"SUM": 0, "NASH": 10000, "JAM": 20000, 
+                      "CROSS": 30000, "TOPO": 40000, "TARGET": 50000}.get(self.objective, 0)
         self._learn_rng = np.random.default_rng(model._seed + 7919 + obj_offset)
 
         # Evolution strategy (outer loop)
@@ -695,9 +696,14 @@ class PlannerAgent(Agent):
         elif self.objective == "JAM":
             return self._objective_jam()
         elif self.objective == "CROSS":
-            return self._objective_cross()
-        else:
-            raise ValueError(f"Unknown objective: {self.objective}")
+           return self._objective_cross()
+       elif self.objective == "TOPO":
+           return self._objective_topo()
+       elif self.objective == "TARGET":
+           return self._objective_target()
+       else:
+           raise ValueError(f"Unknown objective: {self.objective}")
+
 
     def _objective_sum(self) -> float:
         """R = sum(wealth_i) -- utilitarian aggregate."""
