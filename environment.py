@@ -273,19 +273,25 @@ class EconomicModel(Model):
             if f.unique_id not in self._id_cache:
                 self._id_cache[f.unique_id] = f
 
+        # Technology diffusion: spatial spillovers and depreciation
+        from innovation import diffuse_technology, compute_innovation_metrics
+        diffuse_technology(self)
+
         # Update trust scores for all agents (after actions, before metrics)
         from trust import update_trust_scores, compute_trust_metrics
         update_trust_scores(self)
 
-        # Collect metrics (including information, banking, and trust)
+        # Collect metrics (including information, banking, trust, and innovation)
         from metrics import collect_step_metrics
         step_metrics = collect_step_metrics(self)
         info_metrics = compute_information_metrics(self)
         bank_metrics = compute_banking_metrics(self)
         trust_metrics = compute_trust_metrics(self)
+        innovation_metrics = compute_innovation_metrics(self)
         step_metrics.update(info_metrics)
         step_metrics.update(bank_metrics)
         step_metrics.update(trust_metrics)
+        step_metrics.update(innovation_metrics)
         self.metrics_history.append(step_metrics)
 
         # Collect animation frame
