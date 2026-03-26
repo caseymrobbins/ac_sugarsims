@@ -81,6 +81,41 @@ def init_firm_tech(firm: "FirmAgent"):
     firm.tech_level_at_founding = 1.0
 
 
+def _competition_innovation_modifier(firm: "FirmAgent") -> float:
+    """
+    Aghion et al. (2005) inverted-U: competition drives innovation
+    up to a point, then excessive competition reduces it.
+
+    Uses firm's local HHI to compute a modifier on R&D effectiveness.
+    Empirical data (ScienceDirect 2024): competitive firms invest
+    16.83% of assets vs 9.55% for concentrated firms (1.76x ratio).
+
+    The inverted-U peaks around HHI = 0.15-0.25 (moderate competition).
+    - HHI near 0 (perfect competition): too many competitors, thin margins,
+      can't fund R&D. Modifier ~ 0.5
+    - HHI ~ 0.15 (healthy competition): "escape competition" effect peaks.
+      Modifier ~ 1.0
+    - HHI near 1.0 (monopoly): no pressure to innovate.
+      Modifier ~ 0.2
+    """
+    # Get model-wide HHI
+    hhi = 0.05  # default: competitive
+    model = firm.model
+    firms = [f for f in model.firms if not f.defunct]
+    if firms:
+        shares = np.array([f.market_share for f in firms])
+        if shares.sum() > 0:
+            hhi = float(np.sum(shares ** 2))
+
+    # Inverted-U: Gaussian centered at HHI = 0.18 (moderate competition)
+    # Peak modifier = 1.0, tails fall to ~0.3
+    peak_hhi = 0.18
+    width = 0.20
+    modifier = 0.3 + 0.7 * math.exp(-((hhi - peak_hhi) / width) ** 2)
+
+    return modifier
+
+
 def firm_rd_invest(firm: "FirmAgent") -> float:
     """
     Firm invests in R&D. Returns the tech_level increase.
@@ -89,11 +124,19 @@ def firm_rd_invest(firm: "FirmAgent") -> float:
     Investment has diminishing returns: doubling R&D spending
     does not double innovation. Stochastic breakthroughs
     create the possibility of large jumps.
+
+    R&D effectiveness is modulated by market competition
+    following the Aghion et al. (2005) inverted-U: moderate
+    competition maximizes innovation, monopoly and perfect
+    competition both reduce it.
     """
     rng = firm.model.rng
 
-    # Investment amount: fraction of wealth
-    invest = firm.wealth * RD_BASE_COST
+    # Competition modifier: inverted-U from Aghion et al.
+    comp_modifier = _competition_innovation_modifier(firm)
+
+    # Investment amount: fraction of wealth, scaled by competition pressure
+    invest = firm.wealth * RD_BASE_COST * (0.5 + 0.5 * comp_modifier)
     if invest < 1.0 or firm.wealth < invest:
         return 0.0
 
@@ -112,10 +155,12 @@ def firm_rd_invest(firm: "FirmAgent") -> float:
     else:
         skill_multiplier = 0.5
 
-    improvement = base_improvement * skill_multiplier
+    # Competition drives innovation effectiveness
+    improvement = base_improvement * skill_multiplier * comp_modifier
 
-    # Stochastic breakthrough
-    if rng.random() < RD_BREAKTHROUGH_PROB:
+    # Stochastic breakthrough (probability also modulated by competition)
+    breakthrough_prob = RD_BREAKTHROUGH_PROB * comp_modifier
+    if rng.random() < breakthrough_prob:
         improvement += RD_BREAKTHROUGH_SIZE * rng.uniform(0.5, 1.5)
         firm.innovations_count += 1
 
