@@ -42,30 +42,18 @@ if TYPE_CHECKING:
 SHORT_LOOKBACK = 12
 LONG_LOOKBACK = 60
 
-# ── Pair weights (sum to 1.0) ───────────────────────────────────
-PAIR_WEIGHTS = {
-    "gini": 0.20,
-    "unemployment": 0.25,
-    "wealth": 0.20,
-    "revenue": 0.15,
-    "population": 0.10,
-    "agency": 0.10,
-}
-
 # ── Sigmoid calibration ────────────────────────────────────────
 # Trends are normalized by (scale * lookback), producing values
 # in the range ~1e-4 to ~1e-2 for typical economic dynamics.
 # The sigmoid multiplier maps that range onto [0, 1] with the
 # inflection point at zero (no change = 0.5).
 #
-# At SIGMOID_K = 200:
-#   trend =  0.005  ->  score ~ 0.73  (moderate improvement)
-#   trend =  0.010  ->  score ~ 0.88  (strong improvement)
-#   trend = -0.005  ->  score ~ 0.27  (moderate decline)
+# Paper specifies β ≈ 400:
+#   trend =  0.005  ->  score ~ 0.88  (moderate improvement)
+#   trend =  0.010  ->  score ~ 0.98  (strong improvement)
+#   trend = -0.005  ->  score ~ 0.12  (moderate decline)
 #   trend =  0.000  ->  score = 0.50  (flat)
-#
-# Adjust if your simulation produces trends outside this range.
-SIGMOID_K = 200
+SIGMOID_K = 400
 
 
 # ── Trend computation ──────────────────────────────────────────
@@ -147,25 +135,31 @@ def _metric_score(history, key, lower_is_better=False):
 
 def _pair_sustainability(metric, foundation):
     """
-    Sustainability rule for a metric-foundation pair.
+    Sustainability score for an outcome-foundation pair.
 
-    The core diagnostic question: is this trajectory self-defeating?
+    Uses the harmonic mean:
 
-    - metric * (0.4 + 0.6 * foundation) means:
-      - Metric improvement gets ZERO credit at foundation = 0
-        (pure sugar rush is worthless)
-      - Metric improvement gets PARTIAL credit with weak foundations
-        (improvement is real but fragile)
-      - Metric improvement gets FULL credit with strong foundations
-        (sustainable trajectory)
-      - No metric improvement = no score regardless of foundations
-        (this index measures trajectory, not static health)
+        H_i(t) = 2 * O_i(t) * F_i(t) / (O_i(t) + F_i(t))
 
-    This avoids the flaw of awarding a floor score for foundation
-    strength alone: the index answers "is the current direction
-    sustainable?" not "are foundations healthy?"
+    The harmonic mean is the natural bottleneck-sensitive aggregation:
+    it is dominated by the weaker input, penalizes mismatches between
+    outcome trajectory and foundational support, and requires no free
+    parameters. This is structurally consistent with the floor
+    optimization architecture (log(min())) used throughout AC.
+
+    Key behaviors:
+      - O=1, F=1: 1.0 (sustainable improvement)
+      - O=1, F=0: 0.0 (sugar rush, zero credit)
+      - O=0.5, F=1: 0.667 (patient capital, above neutral)
+      - O=0.5, F=0.5: 0.5 (neutral trajectory)
+      - O=0, F=1: 0.0 (declining is unsustainable regardless of foundations)
+      - O=0.8, F=0.8: 0.8 (strong sustainable trajectory)
+      - O=0.7, F=0.4: 0.509 (moderate gains, weak support, warning)
     """
-    return metric * (0.4 + 0.6 * foundation)
+    total = metric + foundation
+    if total < 1e-9:
+        return 0.0
+    return 2.0 * metric * foundation / total
 
 
 # ── Main computation ───────────────────────────────────────────
@@ -173,6 +167,15 @@ def _pair_sustainability(metric, foundation):
 def compute_horizon_index(model: "EconomicModel") -> float:
     """
     Compute the Horizon Index: are current improvements sustainable?
+
+    The final aggregation uses min() over all dimension scores, not
+    a weighted sum. This is structurally consistent with AC's floor
+    optimization: the system's sustainability is bottlenecked by its
+    weakest dimension, just as JAM is bottlenecked by the lowest
+    agency floor. A weighted sum would permit a high score in one
+    dimension to mask a collapsing floor in another, which is exactly
+    the compensation permission that AC identifies as the root cause
+    of alignment failure.
 
     Returns 0.5 (neutral) until enough history accumulates for the
     long lookback window. After that, returns 0.0 to 1.0.
@@ -182,7 +185,7 @@ def compute_horizon_index(model: "EconomicModel") -> float:
     if len(history) < LONG_LOOKBACK + 1:
         return 0.5  # not enough data, assume neutral
 
-    scores = []
+    pair_scores = []
 
     # 1. Gini (lower is better) depends on employment, wealth, population
     m = _metric_score(history, "all_gini", lower_is_better=True)
@@ -191,7 +194,7 @@ def compute_horizon_index(model: "EconomicModel") -> float:
         ["unemployment_rate", "worker_mean", "n_workers"],
         lower_is_better={"unemployment_rate"},
     )
-    scores.append(PAIR_WEIGHTS["gini"] * _pair_sustainability(m, f))
+    pair_scores.append(_pair_sustainability(m, f))
 
     # 2. Unemployment (lower is better) depends on firms, profitability
     m = _metric_score(history, "unemployment_rate", lower_is_better=True)
@@ -199,7 +202,7 @@ def compute_horizon_index(model: "EconomicModel") -> float:
         history,
         ["n_firms", "mean_firm_profit"],
     )
-    scores.append(PAIR_WEIGHTS["unemployment"] * _pair_sustainability(m, f))
+    pair_scores.append(_pair_sustainability(m, f))
 
     # 3. Mean wealth (higher is better) depends on production, skills, employment
     m = _metric_score(history, "worker_mean")
@@ -208,7 +211,7 @@ def compute_horizon_index(model: "EconomicModel") -> float:
         ["total_production", "mean_skill", "unemployment_rate"],
         lower_is_better={"unemployment_rate"},
     )
-    scores.append(PAIR_WEIGHTS["wealth"] * _pair_sustainability(m, f))
+    pair_scores.append(_pair_sustainability(m, f))
 
     # 4. Tax revenue (higher is better) depends on broad tax base
     m = _metric_score(history, "planner_tax_revenue")
@@ -216,7 +219,7 @@ def compute_horizon_index(model: "EconomicModel") -> float:
         history,
         ["n_workers", "n_firms", "mean_wage"],
     )
-    scores.append(PAIR_WEIGHTS["revenue"] * _pair_sustainability(m, f))
+    pair_scores.append(_pair_sustainability(m, f))
 
     # 5. Population (higher is better) depends on wealth floor, employment
     m = _metric_score(history, "n_workers")
@@ -225,7 +228,7 @@ def compute_horizon_index(model: "EconomicModel") -> float:
         ["worker_min", "unemployment_rate"],
         lower_is_better={"unemployment_rate"},
     )
-    scores.append(PAIR_WEIGHTS["population"] * _pair_sustainability(m, f))
+    pair_scores.append(_pair_sustainability(m, f))
 
     # 6. Agency floor (higher is better) depends on wealth floor, skills, employment
     m = _metric_score(history, "agency_floor")
@@ -234,9 +237,9 @@ def compute_horizon_index(model: "EconomicModel") -> float:
         ["worker_min", "mean_skill", "unemployment_rate"],
         lower_is_better={"unemployment_rate"},
     )
-    scores.append(PAIR_WEIGHTS["agency"] * _pair_sustainability(m, f))
+    pair_scores.append(_pair_sustainability(m, f))
 
-    hi = float(np.sum(scores))
+    hi = float(np.min(pair_scores))
     return float(np.clip(hi, 0.0, 1.0))
 
 
