@@ -37,6 +37,7 @@ import numpy as np
 import pandas as pd
 
 os.chdir("@@CWD@@")
+sys.path.insert(0, "@@CWD@@")
 
 from environment import EconomicModel
 
@@ -169,10 +170,12 @@ print("Saved: " + outpath)
 '''
 
 
+_SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+
 def make_script(name, objective, use_sevc, use_innovation, use_trust, trust_noise, use_hi, seed, n_steps):
     """Generate a self-contained run script with config injected."""
     s = SCRIPT_TEMPLATE
-    s = s.replace("@@CWD@@", os.getcwd())
+    s = s.replace("@@CWD@@", _SCRIPT_DIR)
     s = s.replace("@@NAME@@", name)
     s = s.replace("@@OBJECTIVE@@", objective)
     s = s.replace("@@USE_SEVC@@", str(use_sevc))
