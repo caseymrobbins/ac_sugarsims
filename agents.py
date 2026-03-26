@@ -1,12 +1,15 @@
 """
-agents.py - Sustainable Capitalism + Inheritance Tax + Ideal Baseline
-No civic obligation. Planner controls all policy including inheritance tax.
+agents.py - Sustainable Capitalism + Inheritance Tax + Trust + Innovation
+Trust scores affect employment, investment, news absorption, and lending.
+Innovation: firms can invest in R&D, tech_level multiplies production.
 """
 from __future__ import annotations
 import contextlib
 from enum import Enum, auto
 from typing import TYPE_CHECKING, List, Optional, Dict
 from sustainable_capitalism import sustainable_learn_from_outcome, sustainable_choose_strategy, compute_stakeholder_scores
+from innovation import (init_firm_tech, firm_rd_invest, apply_tech_to_production,
+                         apply_tech_skill_effects, transfer_tech_on_hire)
 import numpy as np
 from mesa import Agent
 if TYPE_CHECKING:
@@ -56,6 +59,8 @@ class WorkerAgent(Agent):
         self.lifetime_harvested = 0.0
         self.lifetime_wages = 0.0
         self.harvested_this_step = 0.0
+        self.trust_score = 0.5
+        self._prev_employer_id = None  # for tech transfer tracking
 
     def step(self):
         self.age += 1
@@ -76,8 +81,12 @@ class WorkerAgent(Agent):
             else:
                 self.model.economy.handle_default(self)
         if self.wealth > 100 and self.model.firms: self._invest_in_firms()
-        if not self.employed: self.skill = max(0.05, self.skill * 0.998)
-        else: self.skill = min(1.0, self.skill * 1.001)
+        # Skill update: base + tech learning bonus
+        if not self.employed:
+            self.skill = max(0.05, self.skill * 0.998)
+        else:
+            self.skill = min(1.0, self.skill * 1.001)
+            apply_tech_skill_effects(self)
         if self.employed and self.employer_id is not None:
             expected_wage = self.skill * 5.0
             if self.wage < expected_wage * 0.5 and self.model.rng.random() < 0.05:
@@ -130,7 +139,10 @@ class WorkerAgent(Agent):
 
     def receive_information(self, signal):
         from information import NEWS_ABSORPTION_RATE, ACTIONS
-        effective_trust = self.authority_trust * signal.trust
+        # Trust gate: blend authority_trust with source's trust_score
+        source = self.model.get_agent_by_id(signal.source_id)
+        source_trust = getattr(source, 'trust_score', 0.5) if source else 0.5
+        effective_trust = self.authority_trust * signal.trust * (0.5 + 0.5 * source_trust)
         if effective_trust < 0.01: return
         for action in ACTIONS:
             delta = signal.weight_deltas.get(action, 0.0); current = self.decision_weights.get(action, 0.5)
@@ -163,8 +175,15 @@ class WorkerAgent(Agent):
         neighbours = self.model.grid.get_neighborhood(pos, moore=True, include_center=False, radius=5)
         firms_nearby = [a for cell in neighbours for a in self.model.grid.get_cell_list_contents([cell]) if isinstance(a, FirmAgent) and not a.defunct]
         if not firms_nearby: return
-        best = max(firms_nearby, key=lambda f: f.offered_wage, default=None)
-        if best and best.offered_wage > self.wage:
+        # Trust filter: skip firms with very low trust
+        trusted_firms = [f for f in firms_nearby if getattr(f, 'trust_score', 0.5) >= 0.15]
+        if not trusted_firms:
+            trusted_firms = firms_nearby  # fallback if all firms are low-trust
+        # Score by wage * trust: workers prefer trustworthy employers
+        def firm_attractiveness(f):
+            return f.offered_wage * (0.5 + 0.5 * getattr(f, 'trust_score', 0.5))
+        best = max(trusted_firms, key=firm_attractiveness, default=None)
+        if best and firm_attractiveness(best) > self.wage * (0.5 + 0.5 * getattr(self.model.get_agent_by_id(self.employer_id), 'trust_score', 0.5) if self.employer_id else 0.5):
             if self.employer_id is not None:
                 old_firm = self.model.get_agent_by_id(self.employer_id)
                 if old_firm and isinstance(old_firm, FirmAgent): old_firm.fire_worker(self.unique_id)
@@ -206,7 +225,13 @@ class WorkerAgent(Agent):
         invest_amount = surplus * 0.05
         active_firms = [f for f in self.model.firms if not f.defunct and f.profit > 0]
         if not active_firms: return
-        target = max(active_firms, key=lambda f: f.profit) if self.wealth > 500 and len(active_firms) > 1 else self.model.rng.choice(active_firms)
+        # Trust-weighted investment: prefer trustworthy, profitable firms
+        if self.wealth > 500 and len(active_firms) > 1:
+            def invest_score(f):
+                return f.profit * (0.3 + 0.7 * getattr(f, 'trust_score', 0.5))
+            target = max(active_firms, key=invest_score)
+        else:
+            target = self.model.rng.choice(active_firms)
         self.wealth -= invest_amount; target.capital_stock += invest_amount * 0.9; target.wealth += invest_amount * 0.1
         self.investments[target.unique_id] = self.investments.get(target.unique_id, 0) + invest_amount
         self._collect_dividends()
@@ -235,6 +260,10 @@ class WorkerAgent(Agent):
         lo = self.model.get_landowner_at(self._tpos())
         if lo is not None:
             rent = lo.compute_rent(self)
+            # Trust discount: low-trust landowners get less compliance
+            lo_trust = getattr(lo, 'trust_score', 0.5)
+            if lo_trust < 0.3 and self.model.rng.random() < 0.1:
+                return  # refuse to pay exploitative landlord occasionally
             if self.wealth >= rent: self.wealth -= rent; lo.wealth += rent; lo.total_rent_collected += rent
 
     def _reproduce(self):
@@ -313,7 +342,7 @@ class WorkerAgent(Agent):
 
 
 class FirmAgent(Agent):
-    """Sustainable Capitalism: firms optimize min(S,E,V,C) not raw profit."""
+    """Sustainable Capitalism + Innovation: firms optimize min(S,E,V,C) and can invest in R&D."""
     agent_type = AgentType.FIRM
     def __init__(self, model, capital=None):
         super().__init__(model); rng = model.rng
@@ -325,11 +354,15 @@ class FirmAgent(Agent):
         self.market_share = 0.0; self.total_wages_paid = 0.0; self.total_profit_accumulated = 0.0
         self.pollution_factor = float(rng.uniform(0.05, 0.30)); self.total_pollution_emitted = 0.0
         self._consecutive_losses = 0; self.total_dividends_paid = 0.0
+        self.trust_score = 0.5
         self.strategy_weights = {"invest_capital": float(rng.beta(3,2)), "raise_wages": float(rng.beta(2,3)),
             "cut_wages": float(rng.beta(2,4)), "hire": float(rng.beta(3,2)), "downsize": float(rng.beta(1.5,4)),
             "acquire": float(rng.beta(1,5)), "form_cartel": float(rng.beta(1.5,4)),
-            "capture_media": float(rng.beta(1,6)), "pollute_more": float(rng.beta(2,3)), "clean_up": float(rng.beta(1.5,4))}
+            "capture_media": float(rng.beta(1,6)), "pollute_more": float(rng.beta(2,3)),
+            "clean_up": float(rng.beta(1.5,4)), "innovate": float(rng.beta(2,3))}
         self._last_strategy = "invest_capital"
+        # Innovation
+        init_firm_tech(self)
 
     def step(self):
         if self.defunct: return
@@ -357,6 +390,7 @@ class FirmAgent(Agent):
         elif strategy == "capture_media": self._attempt_media_capture()
         elif strategy == "pollute_more": self.pollution_factor = min(0.60, self.pollution_factor * 1.05)
         elif strategy == "clean_up": self.pollution_factor = max(0.02, self.pollution_factor * 0.90)
+        elif strategy == "innovate": firm_rd_invest(self)
         self._maintain_wages()
 
     def _maintain_wages(self):
@@ -379,7 +413,10 @@ class FirmAgent(Agent):
         scale_bonus = 1.0 + 0.1 * np.log1p(n_workers)
         A = 3.0 * self.model.infrastructure_bonus * scale_bonus
         K = max(self.capital_stock, 1.0); L = max(sum(w.skill for w in self.workers.values()), 0.01)
-        output = A * (K ** 0.35) * (L ** 0.65); price = self.model.economy.prices.get("goods", 1.0)
+        output = A * (K ** 0.35) * (L ** 0.65)
+        # Apply technology multiplier
+        output = apply_tech_to_production(self, output)
+        price = self.model.economy.prices.get("goods", 1.0)
         self.revenue = output * price; self.production_this_step = output
         self.profit = self.revenue - self.offered_wage * n_workers; self.wealth += self.profit
         self.total_profit_accumulated += max(self.profit, 0)
@@ -434,6 +471,9 @@ class FirmAgent(Agent):
         target = min(nearby, key=lambda f: f.wealth); cost = max(target.wealth * 0.5, 50)
         if self.wealth < cost: return
         self.wealth -= cost; self.capital_stock += target.capital_stock
+        # Acquire target's technology (take the max)
+        if hasattr(target, 'tech_level') and hasattr(self, 'tech_level'):
+            self.tech_level = max(self.tech_level, target.tech_level)
         for wid, worker in list(target.workers.items()): target.fire_worker(wid); self.hire_worker(worker)
         if target.cartel_id is not None and self.cartel_id is None:
             self.cartel_id = target.cartel_id
@@ -448,7 +488,11 @@ class FirmAgent(Agent):
         L = max(sum(w.skill for w in self.workers.values()) + worker.skill, 0.01)
         mp = A * 0.65 * (K ** 0.35) * (L ** -0.35) * self.model.economy.prices.get("goods", 1.0)
         if mp < self.offered_wage * 0.5: return
+        # Record previous employer for tech transfer
+        worker._prev_employer_id = worker.employer_id
         self.workers[worker.unique_id] = worker; worker.employed = True; worker.employer_id = self.unique_id; worker.wage = self.offered_wage
+        # Technology transfer: worker carries knowledge from old firm
+        transfer_tech_on_hire(worker, self)
 
     def fire_worker(self, worker_id):
         if worker_id in self.workers:
@@ -479,6 +523,7 @@ class LandownerAgent(Agent):
         self.wealth = wealth if wealth is not None else float(rng.lognormal(mean=6.0, sigma=1.0))
         self.controlled_cells = []; self.rent_rate = float(rng.uniform(0.05, 0.25))
         self.total_rent_collected = 0.0; self.age = 0
+        self.trust_score = 0.5
 
     def step(self):
         self.age += 1

@@ -135,7 +135,8 @@ def _get_horizon_index(model: "EconomicModel") -> float:
 class PlannerAgent(Agent):
     def __init__(self, model):
         super().__init__(model); self.objective = model.objective
-        obj_offset = {"SUM":0,"NASH":10000,"JAM":20000,"CROSS":30000,"TOPO":40000,"TARGET":50000}.get(self.objective, 0)
+        obj_offset = {"SUM":0,"NASH":10000,"JAM":20000,"CROSS":30000,"TOPO":40000,"TARGET":50000,
+                      "TOPO_X":60000,"TOPO_MIN":70000,"NASH_MIN":80000,"SUM_RAW":90000}.get(self.objective, 0)
         self._learn_rng = np.random.default_rng(model._seed + 7919 + obj_offset)
         self._es = EvolutionStrategy(dim=POLICY_DIM, rng=self._learn_rng)
         self._linear = LinearPolicy(state_dim=STATE_DIM, action_dim=POLICY_DIM, rng=self._learn_rng)
@@ -183,8 +184,12 @@ class PlannerAgent(Agent):
     def _compute_ideal_score(self):
         n = max(len(self.model.workers), 1)
         if self.objective == "SUM": return 200.0 * n
+        elif self.objective == "SUM_RAW": return 200.0 * n
         elif self.objective == "NASH": return float(np.sum(np.log(np.full(n, 200.0))))
+        elif self.objective == "NASH_MIN": return float(np.sum(np.log(np.full(n, 200.0))))
         elif self.objective == "TOPO": return float(np.sum(np.log(np.full(n, 200.0)))) * 1.0
+        elif self.objective == "TOPO_X": return float(np.sum(np.log(np.full(n, 200.0)))) * 1.0
+        elif self.objective == "TOPO_MIN": return float(np.sum(np.log(np.full(n, 200.0)))) * 1.0
         elif self.objective == "TARGET": return 1.0 * math.log(max(n, 1)) * 100
         elif self.objective == "CROSS": return float(np.sum(np.log(np.full(n, 200.0)))) * 0.5
         elif self.objective == "JAM": return math.log(5.0)
@@ -292,12 +297,21 @@ class PlannerAgent(Agent):
 
     def compute_objective(self):
         if self.objective == "SUM": return self._objective_sum()
+        elif self.objective == "SUM_RAW": return self._objective_sum_raw()
         elif self.objective == "NASH": return self._objective_nash()
+        elif self.objective == "NASH_MIN": return self._objective_nash_min()
         elif self.objective == "JAM": return self._objective_jam()
         elif self.objective == "CROSS": return self._objective_cross()
         elif self.objective == "TOPO": return self._objective_topo()
+        elif self.objective == "TOPO_X": return self._objective_topo_x()
+        elif self.objective == "TOPO_MIN": return self._objective_topo_min()
         elif self.objective == "TARGET": return self._objective_target()
         else: raise ValueError(f"Unknown objective: {self.objective}")
+
+    def _objective_sum_raw(self):
+        """SUM without horizon index. Pure aggregate baseline."""
+        w = self.model.get_all_agent_wealths(); w = w[np.isfinite(w)]
+        return float(np.sum(w)) if len(w) > 0 else 0.0
 
     def _objective_sum(self):
         w = self.model.get_all_agent_wealths(); w = w[np.isfinite(w)]
@@ -308,6 +322,24 @@ class PlannerAgent(Agent):
         w = self.model.get_all_agent_wealths(); w = w[np.isfinite(w)]
         base = float(np.sum(np.log(np.maximum(w, EPSILON)))) if len(w) > 0 else 0.0
         return base * _get_horizon_index(self.model)
+
+    def _objective_nash_min(self):
+        """
+        NASH with min(base, HI) instead of base * HI.
+        Emergency brake: when trajectory is unsustainable, the horizon
+        index IS the reward regardless of how good the base looks.
+        When trajectory is healthy, base reward flows through normally.
+        Normalized to handle scale mismatch between NASH (~hundreds) and HI ([0,1]).
+        """
+        w = self.model.get_all_agent_wealths(); w = w[np.isfinite(w)]
+        base = float(np.sum(np.log(np.maximum(w, EPSILON)))) if len(w) > 0 else 0.0
+        hi = _get_horizon_index(self.model)
+        ideal = self._compute_ideal_score()
+        if abs(ideal) < 1e-6:
+            return base * hi  # fallback to multiplier if no ideal
+        norm_base = base / abs(ideal)  # map to roughly [0, 1]
+        gated = min(norm_base, hi)     # HI dominates when trajectory is bad
+        return gated * abs(ideal)      # scale back to reward space
 
     def _objective_jam(self):
         workers = self.model.workers
@@ -373,6 +405,70 @@ class PlannerAgent(Agent):
         system_health = equity * employment_health * skill_health * epistemic * competition * sustainability
         base = float(nash_base * max(system_health, 1e-10))
         return base * _get_horizon_index(self.model)
+
+    def _objective_topo_base(self):
+        """
+        Shared TOPO computation. Returns (base_reward, system_health_components).
+        Both TOPO_X and TOPO_MIN use the same landscape shaping,
+        they differ only in how they gate with the horizon index.
+        """
+        workers = self.model.workers
+        if not workers: return float(math.log(EPSILON)), {}
+        wealths = np.array([w.wealth for w in workers], dtype=np.float64); wealths = wealths[np.isfinite(wealths)]
+        if len(wealths) == 0: return float(math.log(EPSILON)), {}
+        nash_base = float(np.sum(np.log(np.maximum(wealths, EPSILON))))
+        def gs(v, c, wi): return math.exp(-((v-c)/max(wi,0.01))**2)
+        all_w = self.model.get_all_agent_wealths(); all_w = all_w[np.isfinite(all_w) & (all_w > 0)]
+        if len(all_w) > 1:
+            s = np.sort(all_w); n = len(s)
+            all_gini = float((2*np.sum(np.arange(1,n+1)*s)-(n+1)*s.sum())/(n*s.sum()))
+        else: all_gini = 0.5
+        equity = gs(all_gini, 0.325, 0.15)
+        n_emp = sum(1 for w in workers if w.employed)
+        employment_health = gs(1.0 - n_emp/max(len(workers),1), 0.08, 0.12)
+        skills = np.array([w.skill for w in workers]); skill_health = gs(float(np.mean(skills)) if len(skills)>0 else 0.3, 0.7, 0.25)
+        mc = float(np.mean([len(w.network_connections) for w in workers])) if workers else 0
+        tv = np.array([getattr(w,'authority_trust',0.7) for w in workers])
+        r0 = (mc*0.05*float(np.mean(tv))*0.1)/0.02; epistemic = gs(r0, 1.2, 1.0)
+        firms = [f for f in self.model.firms if not f.defunct]
+        if firms: hhi = float(np.sum(np.array([f.market_share for f in firms])**2))
+        else: hhi = 1.0
+        competition = gs(hhi, 0.05, 0.08)
+        sustainability = min(1.0, len(workers)/max(self.model.n_workers_initial, 1))
+        system_health = equity * employment_health * skill_health * epistemic * competition * sustainability
+        base = float(nash_base * max(system_health, 1e-10))
+        return base, {"equity": equity, "employment": employment_health, "skill": skill_health,
+                      "epistemic": epistemic, "competition": competition, "sustainability": sustainability}
+
+    def _objective_topo_x(self):
+        """
+        TOPO_X: Topology shaping with HI multiplier.
+        Same as TOPO. Unsustainable trajectories get reward proportionally reduced.
+        """
+        base, _ = self._objective_topo_base()
+        return base * _get_horizon_index(self.model)
+
+    def _objective_topo_min(self):
+        """
+        TOPO_MIN: Topology shaping with HI emergency brake.
+
+        min(normalized_base, HI) means:
+        - When trajectory is sustainable (HI > normalized_base): base reward flows through.
+          The planner optimizes the landscape normally.
+        - When trajectory is unsustainable (HI < normalized_base): HI IS the reward.
+          Nothing the planner does matters until the trajectory is fixed.
+
+        This is "plan for the future unless there is an emergency."
+        The emergency brake forces the planner to fix sustainability FIRST.
+        """
+        base, _ = self._objective_topo_base()
+        hi = _get_horizon_index(self.model)
+        ideal = self._compute_ideal_score()
+        if abs(ideal) < 1e-6:
+            return base * hi
+        norm_base = base / abs(ideal)
+        gated = min(norm_base, hi)
+        return gated * abs(ideal)
 
     def _objective_target(self):
         workers = self.model.workers
