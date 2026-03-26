@@ -340,12 +340,11 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--parallel", type=int, default=1,
                         help="Number of parallel workers (default: 1 = sequential)")
-    parser.add_argument("--steps", type=int, default=N_STEPS,
+    parser.add_argument("--steps", type=int, default=None,
                         help=f"Steps per run (default: {N_STEPS})")
     args = parser.parse_args()
 
-    global N_STEPS
-    N_STEPS = args.steps
+    n_steps = args.steps if args.steps is not None else N_STEPS
 
     os.makedirs(OUTPUT_DIR, exist_ok=True)
     os.makedirs(f"{OUTPUT_DIR}/raw_data", exist_ok=True)
@@ -361,7 +360,7 @@ def main():
     print("  ARCHITECTURE EXPERIMENT")
     print(f"  Conditions: {len(CONDITIONS)}")
     print(f"  Seeds: {SEEDS}")
-    print(f"  Steps: {N_STEPS}")
+    print(f"  Steps: {n_steps}")
     print(f"  Total runs: {len(queue)}")
     print(f"  Parallel workers: {args.parallel}")
     print("=" * 70)
