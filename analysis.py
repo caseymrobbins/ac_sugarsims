@@ -4,12 +4,16 @@ analysis.py
 Statistical analysis of simulation results.
 
 Produces:
-  - Mean outcomes per condition (SUM / NASH / JAM)
+  - Mean outcomes per condition (SUM / NASH / JAM / CROSS / TOPO / TARGET)
   - 95% confidence intervals
   - Mann-Whitney U tests between conditions
   - Effect sizes (rank-biserial correlation)
   - Summary tables (CSV + Parquet)
   - Power-law fitting reports
+
+Changes:
+  - COMPARISON_METRICS expanded with horizon_index, firm floors, agency
+  - Objectives list includes all six conditions
 """
 
 from __future__ import annotations
@@ -89,6 +93,7 @@ COMPARISON_METRICS = [
     "worker_top10_share",
     "agency_floor",
     "agency_mean",
+    "agency_gini",
     "unemployment_rate",
     "hhi",
     "top_firm_share",
@@ -102,6 +107,19 @@ COMPARISON_METRICS = [
     "terminal_worker_min",
     "terminal_agency_floor",
     "terminal_all_gini",
+    "horizon_index",
+    "terminal_horizon_index",
+    "mean_firm_floor",
+    "min_firm_floor",
+    "epistemic_health",
+    "mean_skill",
+    "total_production",
+    "mean_pollution",
+    "trust_planner",
+    "trust_institutional",
+    "trust_firm_mean",
+    "trust_worker_mean",
+    "trust_news_capture_gap",
 ]
 
 
@@ -112,9 +130,10 @@ def condition_summary_table(results_df: pd.DataFrame) -> pd.DataFrame:
 
     Returns a wide DataFrame with rows = metrics, cols = conditions.
     """
-    objectives = ["SUM", "NASH", "JAM"]
-    rows = []
+    # Dynamically detect which objectives are present
+    objectives = sorted(results_df["objective"].unique().tolist())
 
+    rows = []
     for metric in COMPARISON_METRICS:
         if metric not in results_df.columns:
             continue
@@ -140,8 +159,8 @@ def pairwise_tests_table(results_df: pd.DataFrame) -> pd.DataFrame:
     Compute Mann-Whitney tests for all pairs of conditions.
     Returns DataFrame with columns: metric, pair, U, p_value, effect_size, significant
     """
-    objectives = ["SUM", "NASH", "JAM"]
-    pairs = [("SUM", "NASH"), ("SUM", "JAM"), ("NASH", "JAM")]
+    objectives = sorted(results_df["objective"].unique().tolist())
+    pairs = [(a, b) for i, a in enumerate(objectives) for b in objectives[i+1:]]
     rows = []
 
     for metric in COMPARISON_METRICS:
@@ -229,13 +248,17 @@ def run_analysis(results_df: pd.DataFrame, output_dir: str = "results") -> Dict[
 
     # 3. Per-condition mean trajectories (if timestep data available)
     if "step" in results_df.columns:
-        traj = (results_df
-                .groupby(["objective", "step"])[COMPARISON_METRICS]
-                .mean()
-                .reset_index())
-        traj.to_csv(f"{output_dir}/processed_data/condition_trajectories.csv", index=False)
-        traj.to_parquet(f"{output_dir}/processed_data/condition_trajectories.parquet", index=False)
-        outputs["trajectories"] = traj
+        # Only include metrics that exist in the data
+        available_metrics = [m for m in COMPARISON_METRICS if m in results_df.columns]
+        if available_metrics:
+            os.makedirs(f"{output_dir}/processed_data", exist_ok=True)
+            traj = (results_df
+                    .groupby(["objective", "step"])[available_metrics]
+                    .mean()
+                    .reset_index())
+            traj.to_csv(f"{output_dir}/processed_data/condition_trajectories.csv", index=False)
+            traj.to_parquet(f"{output_dir}/processed_data/condition_trajectories.parquet", index=False)
+            outputs["trajectories"] = traj
 
     # 4. Print summary to console
     _print_summary(summary, pairwise)
@@ -251,14 +274,21 @@ def _print_summary(summary: pd.DataFrame, pairwise: pd.DataFrame):
     key_metrics = [
         "all_gini", "worker_min", "agency_floor",
         "frac_monopoly", "frac_poverty_trap", "unemployment_rate",
+        "horizon_index", "mean_firm_floor", "epistemic_health",
+        "trust_planner", "trust_institutional",
     ]
+
+    # Detect which objectives are present
+    obj_cols = [c.replace("_mean", "") for c in summary.columns if c.endswith("_mean")]
+
     for _, row in summary.iterrows():
         if row["metric"] not in key_metrics:
             continue
         print(f"\n{row['metric']}:")
-        for obj in ["SUM", "NASH", "JAM"]:
-            print(f"  {obj}: {row[f'{obj}_mean']:.4f} "
-                  f"[{row[f'{obj}_ci_lo']:.4f}, {row[f'{obj}_ci_hi']:.4f}]")
+        for obj in obj_cols:
+            if f"{obj}_mean" in row:
+                print(f"  {obj}: {row[f'{obj}_mean']:.4f} "
+                      f"[{row[f'{obj}_ci_lo']:.4f}, {row[f'{obj}_ci_hi']:.4f}]")
 
     print("\n" + "=" * 70)
     print("SIGNIFICANT PAIRWISE DIFFERENCES (p < 0.05)")

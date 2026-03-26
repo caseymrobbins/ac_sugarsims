@@ -3,14 +3,23 @@ metrics.py
 ----------
 Metric collection, computation, and emergence detection.
 
-Includes economic, information, and banking metrics.
-Fixed poverty trap detection (structural trap, not near-death).
+Includes economic, information, banking, horizon index,
+and sustainable capitalism metrics.
+
+Changes:
+  - Integrated horizon_index (compute_horizon_index)
+  - Added missing metrics: mean_firm_floor, min_firm_floor,
+    total_production, median_agency, agency_gini,
+    mean_worker_age, population_growth_rate, price snapshots,
+    trade_volume, loan metrics, resource levels
+  - Added collect_animation_frame for step-by-step visualization
+  - Fixed poverty trap detection (structural trap, not near-death)
 """
 
 from __future__ import annotations
 
 import math
-from typing import TYPE_CHECKING, Dict, List, Any, Optional
+from typing import TYPE_CHECKING, Dict, List, Any, Optional, Tuple
 
 import numpy as np
 from scipy import stats
@@ -62,15 +71,23 @@ def collect_step_metrics(model: "EconomicModel") -> Dict[str, Any]:
     m["trade_edges"] = net_stats["edges"]
     m["trade_density"] = net_stats["density"]
     m["trade_max_centrality"] = net_stats["max_centrality"]
+    m["trade_volume"] = model.economy.trade_volume_this_step
 
+    # Agency metrics
     if model.workers:
         agencies = [w.compute_agency() for w in model.workers]
-        m["agency_floor"] = float(min(agencies))
-        m["agency_mean"] = float(np.mean(agencies))
+        agencies_arr = np.array(agencies, dtype=np.float64)
+        m["agency_floor"] = float(np.min(agencies_arr))
+        m["agency_mean"] = float(np.mean(agencies_arr))
+        m["agency_median"] = float(np.median(agencies_arr))
+        m["agency_gini"] = _gini(agencies_arr)
     else:
         m["agency_floor"] = 0.0
         m["agency_mean"] = 0.0
+        m["agency_median"] = 0.0
+        m["agency_gini"] = 0.0
 
+    # Planner policy snapshot
     m["planner_objective_value"] = model.planner.last_objective_value
     m["planner_tax_revenue"] = model.planner.tax_revenue
     m["planner_ubi"] = model.planner.policy["ubi_payment"]
@@ -81,20 +98,28 @@ def collect_step_metrics(model: "EconomicModel") -> Dict[str, Any]:
     m["planner_infrastructure_inv"] = model.planner.policy["infrastructure_investment"]
     m["planner_healthcare_inv"] = model.planner.policy["healthcare_investment"]
     m["planner_education_inv"] = model.planner.policy["education_investment"]
+    m["planner_inheritance_tax"] = model.planner.policy.get("inheritance_tax", 0.0)
 
     m["infrastructure_level"] = model._infrastructure_level
     m["healthcare_bonus"] = model._healthcare_bonus
     m["education_quality"] = model._education_quality
     m["agriculture_bonus"] = model._agriculture_bonus
 
+    # Resource levels
+    m["mean_food"] = float(np.mean(model.food_grid))
+    m["mean_raw"] = float(np.mean(model.raw_grid))
     m["mean_water"] = float(np.mean(model.water_grid))
     m["min_water"] = float(np.min(model.water_grid))
+    m["mean_capital"] = float(np.mean(model.capital_grid))
 
+    # Pollution
     m["mean_pollution"] = float(np.mean(model.pollution_grid))
     m["max_pollution"] = float(np.max(model.pollution_grid))
     m["total_pollution"] = float(np.sum(model.pollution_grid))
     m["n_polluted_cells"] = int(np.sum(model.pollution_grid > 1.0))
-    m["total_firm_emissions"] = float(sum(f.total_pollution_emitted for f in model.firms if not f.defunct))
+    m["total_firm_emissions"] = float(sum(
+        f.total_pollution_emitted for f in model.firms if not f.defunct
+    ))
     health_burden = 0.0
     for w in model.workers:
         if w.pos is not None:
@@ -106,6 +131,7 @@ def collect_step_metrics(model: "EconomicModel") -> Dict[str, Any]:
 
     m["wealth_power_law_alpha"] = _pareto_alpha(all_w)
 
+    # Emergence detection
     m["monopoly_detected"] = _detect_monopoly(model)
     m["cartel_detected"] = m["n_active_cartels"] > 0
     m["poverty_trap_detected"] = _detect_poverty_trap(worker_w)
@@ -115,6 +141,9 @@ def collect_step_metrics(model: "EconomicModel") -> Dict[str, Any]:
         skills = np.array([w.skill for w in model.workers])
         m["mean_skill"] = float(np.mean(skills))
         m["skill_gini"] = _gini(skills)
+    else:
+        m["mean_skill"] = 0.0
+        m["skill_gini"] = 0.0
 
     # Investment metrics
     if model.workers:
@@ -125,8 +154,157 @@ def collect_step_metrics(model: "EconomicModel") -> Dict[str, Any]:
         m["total_investment"] = total_invested
         m["n_investors"] = n_investors
         m["investment_concentration"] = n_investors / max(len(model.workers), 1)
+    else:
+        m["total_investment"] = 0.0
+        m["n_investors"] = 0
+        m["investment_concentration"] = 0.0
+
+    # Sustainable capitalism: firm stakeholder floors
+    try:
+        from sustainable_capitalism import compute_stakeholder_scores
+        firm_floors = []
+        firm_S, firm_E, firm_V, firm_C = [], [], [], []
+        for f in model.firms:
+            if not f.defunct:
+                scores = compute_stakeholder_scores(f)
+                firm_floors.append(scores['floor'])
+                firm_S.append(scores['S'])
+                firm_E.append(scores['E'])
+                firm_V.append(scores['V'])
+                firm_C.append(scores['C'])
+        if firm_floors:
+            m["mean_firm_floor"] = float(np.mean(firm_floors))
+            m["min_firm_floor"] = float(np.min(firm_floors))
+            m["mean_firm_S"] = float(np.mean(firm_S))
+            m["mean_firm_E"] = float(np.mean(firm_E))
+            m["mean_firm_V"] = float(np.mean(firm_V))
+            m["mean_firm_C"] = float(np.mean(firm_C))
+        else:
+            m["mean_firm_floor"] = 0.0
+            m["min_firm_floor"] = 0.0
+            m["mean_firm_S"] = 0.0
+            m["mean_firm_E"] = 0.0
+            m["mean_firm_V"] = 0.0
+            m["mean_firm_C"] = 0.0
+    except ImportError:
+        pass
+
+    # Horizon Index
+    try:
+        from horizon_index import compute_horizon_index
+        m["horizon_index"] = compute_horizon_index(model)
+    except ImportError:
+        pass
+
+    # Price levels
+    for good, price in model.economy.prices.items():
+        m[f"price_{good}"] = float(price)
+
+    # Loan book stats
+    m["n_active_loans"] = len(model.economy.loans)
+    m["mean_loan_rate"] = float(np.mean(
+        [l.interest_rate for l in model.economy.loans]
+    )) if model.economy.loans else 0.0
+
+    # Demographics
+    if model.workers:
+        ages = np.array([w.age for w in model.workers], dtype=np.float64)
+        m["mean_worker_age"] = float(np.mean(ages))
+        m["max_worker_age"] = float(np.max(ages))
+    else:
+        m["mean_worker_age"] = 0.0
+        m["max_worker_age"] = 0.0
+
+    # Population growth rate (requires history)
+    if len(model.metrics_history) >= 1:
+        prev_pop = model.metrics_history[-1].get("n_workers", len(model.workers))
+        if prev_pop > 0:
+            m["population_growth_rate"] = (len(model.workers) - prev_pop) / prev_pop
+        else:
+            m["population_growth_rate"] = 0.0
+    else:
+        m["population_growth_rate"] = 0.0
 
     return m
+
+
+# ---------------------------------------------------------------------------
+# Animation frame collection
+# ---------------------------------------------------------------------------
+
+def collect_animation_frame(model: "EconomicModel") -> Dict[str, Any]:
+    """
+    Collect a lightweight snapshot of the simulation state for animation.
+
+    Returns positions, wealth, employment status, firm locations,
+    resource grids (downsampled), and pollution for each step.
+    Designed to be stored in a list and replayed as an animation.
+    """
+    frame: Dict[str, Any] = {"step": model.current_step}
+
+    # Worker data: position, wealth, employed, skill, agency
+    workers_data = []
+    for w in model.workers:
+        if w.pos is not None:
+            workers_data.append({
+                "x": int(w.pos[0]),
+                "y": int(w.pos[1]),
+                "wealth": float(w.wealth),
+                "employed": w.employed,
+                "skill": float(w.skill),
+                "in_debt": w.debt > 0,
+            })
+    frame["workers"] = workers_data
+
+    # Firm data: position, wealth, n_workers, defunct, cartel
+    firms_data = []
+    for f in model.firms:
+        if not f.defunct and f.pos is not None:
+            firms_data.append({
+                "x": int(f.pos[0]),
+                "y": int(f.pos[1]),
+                "wealth": float(f.wealth),
+                "n_workers": len(f.workers),
+                "production": float(f.production_this_step),
+                "in_cartel": f.cartel_id is not None,
+                "pollution_factor": float(f.pollution_factor),
+            })
+    frame["firms"] = firms_data
+
+    # Landowner territories (only collect occasionally, they change slowly)
+    if model.current_step % 50 == 1 or model.current_step == 1:
+        lo_data = []
+        for lo in model.landowners:
+            lo_data.append({
+                "cells": [(int(c[0]), int(c[1])) for c in lo.controlled_cells],
+                "rent_rate": float(lo.rent_rate),
+                "wealth": float(lo.wealth),
+            })
+        frame["landowners"] = lo_data
+
+    # Resource grids: downsample to 20x20 for animation performance
+    ds = 4  # downsample factor (80/4 = 20)
+    frame["food_grid"] = model.food_grid[::ds, ::ds].tolist()
+    frame["pollution_grid"] = model.pollution_grid[::ds, ::ds].tolist()
+    frame["water_grid"] = model.water_grid[::ds, ::ds].tolist()
+
+    # Key aggregate metrics for overlay display
+    if model.metrics_history:
+        latest = model.metrics_history[-1]
+        frame["overlay"] = {
+            "gini": latest.get("all_gini", 0),
+            "unemployment": latest.get("unemployment_rate", 0),
+            "agency_floor": latest.get("agency_floor", 0),
+            "horizon_index": latest.get("horizon_index", 0.5),
+            "mean_firm_floor": latest.get("mean_firm_floor", 0),
+            "n_workers": latest.get("n_workers", 0),
+            "n_firms": latest.get("n_firms", 0),
+            "n_cartels": latest.get("n_active_cartels", 0),
+            "trust_planner": latest.get("trust_planner", 0.5),
+            "trust_institutional": latest.get("trust_institutional", 0.5),
+        }
+
+    return frame
 
 
 # ---------------------------------------------------------------------------
@@ -188,6 +366,8 @@ def _firm_stats(model: "EconomicModel") -> Dict[str, float]:
         return {
             "n_firms": 0, "hhi": 0.0, "top_firm_share": 0.0,
             "mean_firm_profit": 0.0, "total_production": 0.0,
+            "mean_firm_wage": 0.0, "total_wages_paid": 0.0,
+            "mean_pollution_factor": 0.0,
         }
 
     shares = np.array([f.market_share for f in active_firms])
@@ -195,6 +375,9 @@ def _firm_stats(model: "EconomicModel") -> Dict[str, float]:
     top_share = float(shares.max()) if len(shares) else 0.0
     profits = np.array([f.profit for f in active_firms])
     total_prod = sum(f.production_this_step for f in active_firms)
+    wages = np.array([f.offered_wage for f in active_firms])
+    total_wages = sum(f.total_wages_paid for f in active_firms)
+    poll_factors = np.array([f.pollution_factor for f in active_firms])
 
     return {
         "n_firms": len(active_firms),
@@ -202,6 +385,9 @@ def _firm_stats(model: "EconomicModel") -> Dict[str, float]:
         "top_firm_share": top_share,
         "mean_firm_profit": float(profits.mean()),
         "total_production": float(total_prod),
+        "mean_firm_wage": float(wages.mean()),
+        "total_wages_paid": float(total_wages),
+        "mean_pollution_factor": float(poll_factors.mean()),
     }
 
 
@@ -292,21 +478,33 @@ def episode_summary(metrics_history: List[Dict]) -> Dict[str, Any]:
         "unemployment_rate", "mean_wage",
         "total_rent_collected", "total_debt",
         "fraction_in_debt", "debt_gini",
-        "agency_floor", "agency_mean",
-        "trade_density", "trade_max_centrality",
+        "agency_floor", "agency_mean", "agency_median", "agency_gini",
+        "trade_density", "trade_max_centrality", "trade_volume",
         "planner_ubi", "planner_min_wage",
         "planner_tax_worker", "planner_tax_firm",
         "planner_agriculture_inv", "planner_infrastructure_inv",
         "planner_healthcare_inv", "planner_education_inv",
+        "planner_inheritance_tax",
         "infrastructure_level", "healthcare_bonus",
         "education_quality", "agriculture_bonus",
-        "mean_water", "min_water",
+        "mean_food", "mean_raw", "mean_water", "min_water", "mean_capital",
         "mean_pollution", "max_pollution", "total_pollution",
         "n_polluted_cells", "pollution_health_burden",
         "planner_pollution_tax", "planner_cleanup_investment",
         "monopoly_detected", "cartel_detected", "poverty_trap_detected",
         "mean_skill", "skill_gini",
         "total_investment", "n_investors", "investment_concentration",
+        "total_production", "mean_firm_wage", "total_wages_paid",
+        "mean_pollution_factor",
+        "mean_firm_floor", "min_firm_floor",
+        "mean_firm_S", "mean_firm_E", "mean_firm_V", "mean_firm_C",
+        "horizon_index",
+        "mean_worker_age", "population_growth_rate",
+        "n_active_loans", "mean_loan_rate",
+        "trust_worker_mean", "trust_worker_min", "trust_worker_std",
+        "trust_firm_mean", "trust_firm_min",
+        "trust_bank_mean", "trust_news_mean", "trust_news_capture_gap",
+        "trust_landowner_mean", "trust_planner", "trust_institutional",
     ]
     for key in scalar_keys:
         summary[key] = avg(key)
@@ -321,6 +519,10 @@ def episode_summary(metrics_history: List[Dict]) -> Dict[str, Any]:
     summary["terminal_all_gini"] = last("all_gini")
     summary["terminal_worker_min"] = last("worker_min")
     summary["terminal_agency_floor"] = last("agency_floor")
+    summary["terminal_horizon_index"] = last("horizon_index")
+    summary["terminal_mean_firm_floor"] = last("mean_firm_floor")
+    summary["terminal_trust_planner"] = last("trust_planner")
+    summary["terminal_trust_institutional"] = last("trust_institutional")
 
     # Information layer metrics
     info_keys = [
@@ -347,5 +549,13 @@ def episode_summary(metrics_history: List[Dict]) -> Dict[str, Any]:
     ]
     for key in banking_keys:
         summary[key] = avg(key)
+
+    # Horizon index trajectory stats
+    hi_vals = [m.get("horizon_index", float("nan")) for m in metrics_history
+               if "horizon_index" in m and np.isfinite(m.get("horizon_index", float("nan")))]
+    if hi_vals:
+        summary["horizon_index_min"] = float(np.min(hi_vals))
+        summary["horizon_index_max"] = float(np.max(hi_vals))
+        summary["horizon_index_final_20pct"] = float(np.mean(hi_vals[max(0, int(len(hi_vals)*0.8)):]))
 
     return summary

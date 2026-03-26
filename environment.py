@@ -6,6 +6,7 @@ Changes from original:
   - Immigration: periodic new worker spawning as population floor
   - Initial network connections seeded for workers (breaks trade deadlock)
   - Periodic firm spawning if firm count drops too low
+  - Animation frame collection (collect_animation_frame)
 """
 
 from __future__ import annotations
@@ -107,6 +108,10 @@ class EconomicModel(Model):
 
         # Metrics history
         self.metrics_history: List[Dict] = []
+
+        # Animation frame history (lightweight snapshots for visualization)
+        self.animation_frames: List[Dict] = []
+        self._collect_animation = True  # set False for batch/headless runs
 
     # ── Resource initialisation ───────────────────────────────────────────────
 
@@ -268,14 +273,25 @@ class EconomicModel(Model):
             if f.unique_id not in self._id_cache:
                 self._id_cache[f.unique_id] = f
 
-        # Collect metrics (including information/epistemic health and banking)
+        # Update trust scores for all agents (after actions, before metrics)
+        from trust import update_trust_scores, compute_trust_metrics
+        update_trust_scores(self)
+
+        # Collect metrics (including information, banking, and trust)
         from metrics import collect_step_metrics
         step_metrics = collect_step_metrics(self)
         info_metrics = compute_information_metrics(self)
         bank_metrics = compute_banking_metrics(self)
+        trust_metrics = compute_trust_metrics(self)
         step_metrics.update(info_metrics)
         step_metrics.update(bank_metrics)
+        step_metrics.update(trust_metrics)
         self.metrics_history.append(step_metrics)
+
+        # Collect animation frame
+        if self._collect_animation:
+            from metrics import collect_animation_frame
+            self.animation_frames.append(collect_animation_frame(self))
 
     # ── Population management ─────────────────────────────────────────────────
 

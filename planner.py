@@ -1,11 +1,13 @@
 """
-planner.py - RL policy authority with ideal baseline and inheritance tax.
+planner.py - RL policy authority with ideal baseline, inheritance tax,
+             and horizon index sustainability multiplier.
 
 Changes from original:
   - INSTRUMENT_SPEC includes inheritance_tax (planner-controlled)
   - POLICY_DIM = 13 (was 12)
   - _learning_step uses ideal baseline instead of moving average
   - _compute_ideal_score provides fixed reference for each objective
+  - All objective functions multiplied by horizon_index
   - All objective functions preserved (SUM, NASH, JAM, CROSS, TOPO, TARGET)
 """
 from __future__ import annotations
@@ -112,6 +114,23 @@ class LinearPolicy:
         n = len(self._rewards); self.W += ADAPT_LR * dW / n; self.bias += ADAPT_LR * db / n
         self.W *= 0.999; self.bias *= 0.999; self._clear()
     def _clear(self): self._log_probs.clear(); self._rewards.clear(); self._states.clear(); self._actions.clear()
+
+
+# ---------------------------------------------------------------------------
+# Horizon Index helper
+# ---------------------------------------------------------------------------
+
+def _get_horizon_index(model: "EconomicModel") -> float:
+    """
+    Get the current horizon index. Returns 1.0 (no effect) if not
+    enough history has accumulated or if the module is unavailable.
+    """
+    try:
+        from horizon_index import compute_horizon_index
+        return compute_horizon_index(model)
+    except ImportError:
+        return 1.0
+
 
 class PlannerAgent(Agent):
     def __init__(self, model):
@@ -262,6 +281,15 @@ class PlannerAgent(Agent):
                 self.tax_revenue -= cc
                 self.model.pollution_grid *= max(0.0, 1.0 - min(0.10, cleanup * 0.02))
 
+    # ------------------------------------------------------------------
+    # Objective functions
+    # ------------------------------------------------------------------
+    # Every objective is multiplied by the horizon index.
+    # Unsustainable policies (sugar rushes) get their reward crushed
+    # proportionally. A policy with hi=0.15 keeps only 15% of its
+    # base reward. A sustainable path with hi=0.85 keeps 85%.
+    # ------------------------------------------------------------------
+
     def compute_objective(self):
         if self.objective == "SUM": return self._objective_sum()
         elif self.objective == "NASH": return self._objective_nash()
@@ -273,18 +301,21 @@ class PlannerAgent(Agent):
 
     def _objective_sum(self):
         w = self.model.get_all_agent_wealths(); w = w[np.isfinite(w)]
-        return float(np.sum(w)) if len(w) > 0 else 0.0
+        base = float(np.sum(w)) if len(w) > 0 else 0.0
+        return base * _get_horizon_index(self.model)
 
     def _objective_nash(self):
         w = self.model.get_all_agent_wealths(); w = w[np.isfinite(w)]
-        return float(np.sum(np.log(np.maximum(w, EPSILON)))) if len(w) > 0 else 0.0
+        base = float(np.sum(np.log(np.maximum(w, EPSILON)))) if len(w) > 0 else 0.0
+        return base * _get_horizon_index(self.model)
 
     def _objective_jam(self):
         workers = self.model.workers
         if not workers: return float(math.log(EPSILON))
         a = np.array([w.compute_agency() for w in workers], dtype=np.float64)
         a = a[np.isfinite(a)]
-        return float(math.log(max(float(np.min(a)), EPSILON))) if len(a) > 0 else float(math.log(EPSILON))
+        base = float(math.log(max(float(np.min(a)), EPSILON))) if len(a) > 0 else float(math.log(EPSILON))
+        return base * _get_horizon_index(self.model)
 
     def _objective_cross(self):
         workers = self.model.workers
@@ -312,7 +343,8 @@ class PlannerAgent(Agent):
         nd = 1.0 - (cn/len(anf)) if anf else 0.5
         tv = np.array([getattr(w,'authority_trust',0.7) for w in workers])
         th = max(0.01, float(np.mean(tv)) * (1.0 - float(np.mean(tv < 0.3))*2))
-        return float(nash_base * max(gini_gate * alpha_health * productivity * edu * max(0.01, nd*th), 1e-10))
+        base = float(nash_base * max(gini_gate * alpha_health * productivity * edu * max(0.01, nd*th), 1e-10))
+        return base * _get_horizon_index(self.model)
 
     def _objective_topo(self):
         workers = self.model.workers
@@ -339,7 +371,8 @@ class PlannerAgent(Agent):
         competition = gs(hhi, 0.05, 0.08)
         sustainability = min(1.0, len(workers)/max(self.model.n_workers_initial, 1))
         system_health = equity * employment_health * skill_health * epistemic * competition * sustainability
-        return float(nash_base * max(system_health, 1e-10))
+        base = float(nash_base * max(system_health, 1e-10))
+        return base * _get_horizon_index(self.model)
 
     def _objective_target(self):
         workers = self.model.workers
@@ -383,7 +416,8 @@ class PlannerAgent(Agent):
         wts = {'gini':2.0,'alpha':1.0,'top10':1.5,'unemployment':2.0,'skill':1.0,'info_r0':1.5,
                'trust':1.0,'polarization':0.5,'hhi':1.0,'cartels':0.5,'debt':0.5,'floor':2.0,'population':2.0}
         total = sum(sc[k]*wts[k] for k in sc); mx = sum(wts.values())
-        return float((total/mx) * math.log(max(len(workers),1)) * 100)
+        base = float((total/mx) * math.log(max(len(workers),1)) * 100)
+        return base * _get_horizon_index(self.model)
 
     def get_policy_snapshot(self):
         snap = dict(self.policy); snap["objective_value"] = self.last_objective_value
