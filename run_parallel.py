@@ -17,8 +17,8 @@ import time
 import argparse
 from concurrent.futures import ProcessPoolExecutor, as_completed
 
-SEEDS = [12345]
-N_STEPS = 5000
+SEEDS = [56, 663, 666, 1233, 5664, 223]
+N_STEPS = 2000
 
 # (name, objective, use_sevc, use_innovation, use_trust, trust_noise, use_hi)
 CONDITIONS = [
