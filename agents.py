@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, List, Optional, Dict
 from sustainable_capitalism import sustainable_learn_from_outcome, sustainable_choose_strategy, compute_stakeholder_scores
 from innovation import (init_firm_tech, firm_rd_invest, apply_tech_to_production,
                          apply_tech_skill_effects, transfer_tech_on_hire)
+from trust import observed_trust
 import numpy as np
 from mesa import Agent
 if TYPE_CHECKING:
@@ -141,7 +142,7 @@ class WorkerAgent(Agent):
         from information import NEWS_ABSORPTION_RATE, ACTIONS
         # Trust gate: blend authority_trust with source's trust_score
         source = self.model.get_agent_by_id(signal.source_id)
-        source_trust = getattr(source, 'trust_score', 0.5) if source else 0.5
+        source_trust = observed_trust(source, self.model) if source else 0.5
         effective_trust = self.authority_trust * signal.trust * (0.5 + 0.5 * source_trust)
         if effective_trust < 0.01: return
         for action in ACTIONS:
@@ -176,14 +177,16 @@ class WorkerAgent(Agent):
         firms_nearby = [a for cell in neighbours for a in self.model.grid.get_cell_list_contents([cell]) if isinstance(a, FirmAgent) and not a.defunct]
         if not firms_nearby: return
         # Trust filter: skip firms with very low trust
-        trusted_firms = [f for f in firms_nearby if getattr(f, 'trust_score', 0.5) >= 0.15]
+        trusted_firms = [f for f in firms_nearby if observed_trust(f, self.model) >= 0.15]
         if not trusted_firms:
             trusted_firms = firms_nearby  # fallback if all firms are low-trust
         # Score by wage * trust: workers prefer trustworthy employers
         def firm_attractiveness(f):
-            return f.offered_wage * (0.5 + 0.5 * getattr(f, 'trust_score', 0.5))
+            return f.offered_wage * (0.5 + 0.5 * observed_trust(f, self.model))
         best = max(trusted_firms, key=firm_attractiveness, default=None)
-        if best and firm_attractiveness(best) > self.wage * (0.5 + 0.5 * getattr(self.model.get_agent_by_id(self.employer_id), 'trust_score', 0.5) if self.employer_id else 0.5):
+        current_employer = self.model.get_agent_by_id(self.employer_id) if self.employer_id else None
+        current_employer_trust = observed_trust(current_employer, self.model) if current_employer else 0.5
+        if best and firm_attractiveness(best) > self.wage * (0.5 + 0.5 * current_employer_trust):
             if self.employer_id is not None:
                 old_firm = self.model.get_agent_by_id(self.employer_id)
                 if old_firm and isinstance(old_firm, FirmAgent): old_firm.fire_worker(self.unique_id)
@@ -228,7 +231,7 @@ class WorkerAgent(Agent):
         # Trust-weighted investment: prefer trustworthy, profitable firms
         if self.wealth > 500 and len(active_firms) > 1:
             def invest_score(f):
-                return f.profit * (0.3 + 0.7 * getattr(f, 'trust_score', 0.5))
+                return f.profit * (0.3 + 0.7 * observed_trust(f, self.model))
             target = max(active_firms, key=invest_score)
         else:
             target = self.model.rng.choice(active_firms)
@@ -261,7 +264,7 @@ class WorkerAgent(Agent):
         if lo is not None:
             rent = lo.compute_rent(self)
             # Trust discount: low-trust landowners get less compliance
-            lo_trust = getattr(lo, 'trust_score', 0.5)
+            lo_trust = observed_trust(lo, self.model)
             if lo_trust < 0.3 and self.model.rng.random() < 0.1:
                 return  # refuse to pay exploitative landlord occasionally
             if self.wealth >= rent: self.wealth -= rent; lo.wealth += rent; lo.total_rent_collected += rent

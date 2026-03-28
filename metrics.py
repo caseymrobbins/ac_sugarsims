@@ -42,6 +42,7 @@ def collect_step_metrics(model: "EconomicModel") -> Dict[str, Any]:
     m.update(_wealth_stats(all_w, prefix="all"))
     m.update(_wealth_stats(worker_w, prefix="worker"))
     m.update(_firm_stats(model))
+    m.update(_trust_stats(model))
 
     m["n_active_cartels"] = sum(
         1 for members in model.active_cartels.values() if len(members) >= 2
@@ -389,6 +390,87 @@ def _firm_stats(model: "EconomicModel") -> Dict[str, float]:
         "total_wages_paid": float(total_wages),
         "mean_pollution_factor": float(poll_factors.mean()),
     }
+
+
+
+def _trust_stats(model: "EconomicModel") -> Dict[str, float]:
+    """Collect trust, reputation, and information-health metrics."""
+
+    def scores(items):
+        vals = [float(getattr(a, "trust_score", 0.5)) for a in items if hasattr(a, "trust_score")]
+        return np.array(vals, dtype=np.float64) if vals else np.array([], dtype=np.float64)
+
+    worker_scores = scores(getattr(model, "workers", []))
+    firm_scores = scores([f for f in getattr(model, "firms", []) if not getattr(f, "defunct", False)])
+    landowner_scores = scores(getattr(model, "landowners", []))
+    news_firm_scores = scores(getattr(model, "news_firms", []))
+    planner = getattr(model, "planner", None)
+    planner_score = float(getattr(planner, "trust_score", 0.5)) if planner is not None else 0.5
+
+    all_scores = np.concatenate(
+        [arr for arr in [worker_scores, firm_scores, landowner_scores, news_firm_scores, np.array([planner_score])] if len(arr) > 0]
+    ) if any(len(arr) > 0 for arr in [worker_scores, firm_scores, landowner_scores, news_firm_scores]) else np.array([planner_score], dtype=np.float64)
+
+    out = {
+        "trust_worker_mean": float(np.mean(worker_scores)) if len(worker_scores) else 0.5,
+        "trust_worker_min": float(np.min(worker_scores)) if len(worker_scores) else 0.5,
+        "trust_worker_std": float(np.std(worker_scores)) if len(worker_scores) else 0.0,
+        "trust_firm_mean": float(np.mean(firm_scores)) if len(firm_scores) else 0.5,
+        "trust_firm_min": float(np.min(firm_scores)) if len(firm_scores) else 0.5,
+        "trust_landowner_mean": float(np.mean(landowner_scores)) if len(landowner_scores) else 0.5,
+        "trust_news_mean": float(np.mean(news_firm_scores)) if len(news_firm_scores) else 0.5,
+        "trust_planner": planner_score,
+        "trust_gini": _gini(all_scores) if len(all_scores) else 0.0,
+        "pct_low_trust": float(np.mean(all_scores < 0.35)) if len(all_scores) else 0.0,
+        "trust_institutional": float(np.mean(
+            [x for x in [
+                float(np.mean(firm_scores)) if len(firm_scores) else np.nan,
+                float(np.mean(landowner_scores)) if len(landowner_scores) else np.nan,
+                float(np.mean(news_firm_scores)) if len(news_firm_scores) else np.nan,
+                planner_score,
+            ] if np.isfinite(x)]
+        )) if True else 0.5,
+        "mean_authority_trust": float(np.mean([float(getattr(w, "authority_trust", 0.5)) for w in getattr(model, "workers", [])])) if getattr(model, "workers", []) else 0.5,
+        "min_authority_trust": float(np.min([float(getattr(w, "authority_trust", 0.5)) for w in getattr(model, "workers", [])])) if getattr(model, "workers", []) else 0.5,
+        "n_news_firms": len(getattr(model, "news_firms", []) or []),
+        "n_captured_news": int(sum(1 for nf in (getattr(model, "news_firms", []) or []) if getattr(nf, "captured_by_cartel", None) is not None)),
+    }
+
+    # Information health proxies
+    worker_weights = []
+    for w in getattr(model, "workers", []) or []:
+        dw = getattr(w, "decision_weights", None)
+        if isinstance(dw, dict) and dw:
+            worker_weights.append(np.array([float(dw.get(k, 0.5)) for k in sorted(dw.keys())], dtype=np.float64))
+
+    if worker_weights:
+        W = np.vstack(worker_weights)
+        mean_vec = np.mean(W, axis=0)
+        out["weight_polarization"] = float(np.mean(np.std(W, axis=0)))
+        dist = np.linalg.norm(W - mean_vec, axis=1)
+        out["epistemic_health"] = float(np.clip(1.0 - np.mean(dist) / max(np.sqrt(W.shape[1]), 1e-9), 0.0, 1.0))
+    else:
+        out["weight_polarization"] = 0.0
+        out["epistemic_health"] = 0.5
+
+    # Simple transmission proxy: average audience reach normalized by population.
+    news_firms = getattr(model, "news_firms", []) or []
+    if news_firms:
+        reach = np.mean([len(getattr(nf, "audience", []) or []) for nf in news_firms])
+        out["info_r0"] = float(reach / max(len(getattr(model, "workers", []) or []), 1))
+        captured = [float(getattr(nf, "trust_score", 0.5)) for nf in news_firms if getattr(nf, "captured_by_cartel", None) is not None]
+        free = [float(getattr(nf, "trust_score", 0.5)) for nf in news_firms if getattr(nf, "captured_by_cartel", None) is None]
+        if captured and free:
+            out["trust_news_capture_gap"] = float(np.mean(free) - np.mean(captured))
+        else:
+            out["trust_news_capture_gap"] = 0.0
+    else:
+        out["info_r0"] = 0.0
+        out["trust_news_capture_gap"] = 0.0
+
+    # Pack institutional trust into a single bounded value.
+    out["trust_institutional"] = float(np.clip(out["trust_institutional"], 0.0, 1.0)) if np.isfinite(out["trust_institutional"]) else 0.5
+    return out
 
 
 # ---------------------------------------------------------------------------

@@ -245,6 +245,8 @@ class NewsFirm(Agent):
 
         # Last broadcast signal (for metrics)
         self.last_signal: Optional[InfoSignal] = None
+        # Latent source credibility used by trust metrics and workers' source filtering
+        self.trust_score: float = float(np.clip(self.accuracy, 0.05, 0.95))
 
     def step(self):
         if self.defunct:
@@ -270,6 +272,14 @@ class NewsFirm(Agent):
         signal = self._produce_signal()
         self.last_signal = signal
         self._broadcast(signal)
+
+        # Update reputation: accurate, uncaptured outlets become more trusted
+        capture_penalty = 0.0
+        if self.captured_by_cartel is not None:
+            capture_penalty += 0.18
+        audience_pressure = min(0.15, 0.01 * self.audience_size)
+        credibility_target = float(np.clip(self.accuracy - capture_penalty - audience_pressure, 0.05, 0.95))
+        self.trust_score = float(np.clip(0.92 * self.trust_score + 0.08 * credibility_target, 0.0, 1.0))
 
         # Bankruptcy
         if self.wealth < -50:

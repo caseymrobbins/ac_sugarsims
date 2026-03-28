@@ -93,6 +93,8 @@ def configure_model(model, condition: Condition):
     model.use_trust = condition.use_trust
     model.trust_noise = condition.trust_noise
     model.use_horizon_index = condition.use_horizon_index
+    model.trust_noise = condition.trust_noise
+    model._trust_frozen = not condition.use_trust
 
     # If SEVC is disabled, reset firms to vanilla behavior
     if not condition.use_sevc:
@@ -111,7 +113,6 @@ def configure_model(model, condition: Condition):
     # If trust is disabled, set all trust scores to neutral 0.5
     # and mark them as frozen so update_trust_scores skips them
     if not condition.use_trust:
-        model._trust_frozen = True
         for agent in model.schedule.agents if hasattr(model, 'schedule') else []:
             if hasattr(agent, 'trust_score'):
                 agent.trust_score = 0.5
@@ -137,47 +138,12 @@ def apply_patches():
         return
     _patches_applied = True
 
-    # ── Patch 1: Trust score reads add noise when trust_noise > 0 ──
-    #
-    # We monkey-patch getattr calls on trust_score by wrapping the
-    # trust module's update function to add noise to the score
-    # AFTER computing the true value. Agents read the noisy value.
-    #
-    # This is cleaner than patching every getattr call in agents.py.
-
+    # ── Patch 1: Trust engine available ──
     try:
         import trust as trust_module
-        _original_update_trust = trust_module.update_trust_scores
-
-        def patched_update_trust(model):
-            # If trust is frozen (disabled), skip entirely
-            if getattr(model, '_trust_frozen', False):
-                return
-
-            # Run normal trust update
-            _original_update_trust(model)
-
-            # If noise > 0, add noise to all trust scores
-            # Store true score separately so noise compounds don't drift
-            noise = getattr(model, 'trust_noise', 0.0)
-            if noise > 0:
-                rng = model.rng if hasattr(model, 'rng') else np.random.default_rng()
-                for agent in model.schedule.agents if hasattr(model, 'schedule') else []:
-                    if hasattr(agent, 'trust_score'):
-                        # Store the true score if not already stored
-                        if not hasattr(agent, '_true_trust_score'):
-                            agent._true_trust_score = agent.trust_score
-                        else:
-                            agent._true_trust_score = agent.trust_score
-
-                        # Noisy read: other agents see this
-                        noisy = agent._true_trust_score + rng.normal(0, noise)
-                        agent.trust_score = float(np.clip(noisy, 0.0, 1.0))
-
-        trust_module.update_trust_scores = patched_update_trust
-        print("  [patch] Trust noise injection: OK")
+        print("  [patch] Trust engine: OK")
     except ImportError:
-        print("  [patch] Trust module not found, skipping trust patches")
+        print("  [patch] Trust engine not found, using fallback trust defaults")
 
     # ── Patch 2: Sustainable capitalism disable ──
     #
@@ -285,8 +251,12 @@ def run_single(condition: Condition, seed: int) -> Dict[str, Any]:
     # Inject feature flags
     configure_model(model, condition)
 
+    from trust import update_trust_scores
+
     for step in range(N_STEPS):
         model.step()
+        if condition.use_trust:
+            update_trust_scores(model)
         if (step + 1) % 500 == 0:
             print(f"{step+1}", end=" ", flush=True)
 
@@ -345,6 +315,8 @@ def main():
     args = parser.parse_args()
 
     n_steps = args.steps if args.steps is not None else N_STEPS
+    global N_STEPS
+    N_STEPS = n_steps
 
     os.makedirs(OUTPUT_DIR, exist_ok=True)
     os.makedirs(f"{OUTPUT_DIR}/raw_data", exist_ok=True)

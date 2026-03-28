@@ -142,6 +142,7 @@ class PlannerAgent(Agent):
         self._linear = LinearPolicy(state_dim=STATE_DIM, action_dim=POLICY_DIM, rng=self._learn_rng)
         self.policy = {name: default for name, default, _, _ in INSTRUMENT_SPEC}
         self.tax_revenue = 0.0; self.last_objective_value = -math.inf
+        self.trust_score = 0.5
         self.objective_history = []; self._reward_baseline = 0.0
         self._current_perturbations = None; self._perturbation_fitnesses = []
         self._perturbation_idx = 0; self._eval_phase = False
