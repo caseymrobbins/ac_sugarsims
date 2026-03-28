@@ -187,6 +187,16 @@ class WorkerAgent(Agent):
         if self.pos is None: return None
         return (int(self.pos[0]), int(self.pos[1]))
 
+    def _safe_pos(self, pos=None):
+        """Ensure Mesa always receives tuple positions."""
+        if pos is None:
+            pos = self.pos
+        if pos is None:
+            return None
+        if isinstance(pos, tuple):
+            return pos
+        return (int(pos[0]), int(pos[1]))
+
     def _choose_action(self):
         from information import choose_action_from_weights, compute_action_context, update_weights_from_experience
         if self._last_action:
@@ -228,7 +238,7 @@ class WorkerAgent(Agent):
         self._last_action_outcome = self.income_last_step - self.income_prev_step
 
     def _harvest(self):
-        pos = self._tpos()
+        pos = self._safe_pos()
         if pos is None: return
         x, y = pos
         food_val = float(self.model.food_grid[x, y]); raw_val = float(self.model.raw_grid[x, y])
@@ -243,7 +253,7 @@ class WorkerAgent(Agent):
         self.wealth += value; self.income_last_step += value; self.harvested_this_step = value; self.lifetime_harvested += value
 
     def _seek_employment(self):
-        pos = self._tpos()
+        pos = self._safe_pos()
         if pos is None:
             return
         neighbours = self.model.grid.get_neighborhood(pos, moore=True, include_center=False, radius=4)
@@ -282,7 +292,7 @@ class WorkerAgent(Agent):
         self._discover_and_trade()
 
     def _discover_neighbor(self):
-        pos = self._tpos()
+        pos = self._safe_pos()
         if pos is None: return
         neighbours = self.model.grid.get_neighborhood(pos, moore=True, include_center=False, radius=3)
         nearby = [a for cell in neighbours for a in self.model.grid.get_cell_list_contents([cell]) if isinstance(a, WorkerAgent) and a.unique_id != self.unique_id]
@@ -292,7 +302,7 @@ class WorkerAgent(Agent):
             if self.unique_id not in p.network_connections: p.network_connections.append(self.unique_id)
 
     def _discover_and_trade(self):
-        pos = self._tpos()
+        pos = self._safe_pos()
         if pos is None: return
         neighbours = self.model.grid.get_neighborhood(pos, moore=True, include_center=False, radius=3)
         nearby = [a for cell in neighbours for a in self.model.grid.get_cell_list_contents([cell]) if isinstance(a, WorkerAgent) and a.unique_id != self.unique_id]
@@ -339,7 +349,7 @@ class WorkerAgent(Agent):
         for fid in dead: self.wealth += self.investments.pop(fid) * 0.2
 
     def _migrate(self):
-        pos = self._tpos()
+        pos = self._safe_pos()
         if pos is None:
             return
         neighbourhood = self.model.grid.get_neighborhood(pos, moore=True, include_center=False, radius=3)
@@ -392,7 +402,7 @@ class WorkerAgent(Agent):
         parent_b = self.model.get_agent_by_id(self.employer_id) if self.employer_id is not None else None
         child.identity = _mix_identity(self.identity, getattr(parent_b, "identity", self.identity), self.model.rng)
 
-        pos = self._tpos()
+        pos = self._safe_pos()
         if pos is None:
             return
         neighbourhood = self.model.grid.get_neighborhood(pos, moore=True, include_center=False, radius=2)
@@ -408,7 +418,7 @@ class WorkerAgent(Agent):
     def _found_firm(self):
         capital = self.wealth * 0.4; self.wealth -= capital
         firm = FirmAgent(model=self.model, capital=capital)
-        pos = self._tpos()
+        pos = self._safe_pos()
         if pos is None: return
         neighbourhood = self.model.grid.get_neighborhood(pos, moore=True, include_center=True, radius=2)
         empty = [c for c in neighbourhood if self.model.grid.is_cell_empty(c)]
