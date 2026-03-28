@@ -28,7 +28,7 @@ ES_SIGMA_DECAY = 0.999
 ES_SIGMA_MIN = 0.005
 ES_LR = 0.1
 ES_MOMENTUM = 0.9
-STATE_DIM = 13
+STATE_DIM = 14
 POLICY_DIM = 13
 ADAPT_LR = 0.01
 ADAPT_NOISE = 0.02
@@ -170,6 +170,7 @@ class PlannerAgent(Agent):
         true_mw = max(worker_w.mean(), 0.0); true_minw = max(worker_w.min(), 0.0)
         true_unemp = 1.0 - n_employed / max(n_workers, 1)
         true_poll = float(np.mean(self.model.pollution_grid))
+        hi = _get_horizon_index(self.model)
         state = np.array([
             np.log1p(true_mw * (1 + ed * 0.5)), np.log1p(true_minw * (1 + ed * 2.0)),
             float(_gini_fast(worker_w)), np.log1p(max(agencies.min(), 0.0)),
@@ -178,6 +179,7 @@ class PlannerAgent(Agent):
             np.log1p(max(self.tax_revenue, 0.0)), true_poll * (1 - ed * 0.5),
             float(len(firms)) / 20.0, float(self.model.current_step) / 300.0,
             self.policy.get("inheritance_tax", 0.0),
+            hi,
         ], dtype=np.float64)
         np.nan_to_num(state, copy=False, nan=0.0, posinf=50.0, neginf=-50.0)
         return state
