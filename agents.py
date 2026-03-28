@@ -415,18 +415,33 @@ class WorkerAgent(Agent):
                 child.decision_weights[a] = float(np.clip(w + self.model.rng.normal(0, 0.05), 0.01, 0.99))
             child.authority_trust = float(np.clip(self.authority_trust + self.model.rng.normal(0, 0.05), 0.05, 0.95))
 
+    def _choose_governance(self):
+        """Choose firm governance type based on observable performance."""
+        # If worker has a current or previous employer, strongly weight that experience
+        prev_employer = self.model.get_agent_by_id(self.employer_id) if self.employer_id else None
+        if prev_employer is None and hasattr(self, '_prev_employer_id'):
+            prev_employer = self.model.get_agent_by_id(self._prev_employer_id)
+        if prev_employer and hasattr(prev_employer, 'is_sevc'):
+            if prev_employer.profit > 0:
+                return prev_employer.is_sevc
+        # Otherwise: observe market and compare SEVC vs vanilla performance
+        active_firms = [f for f in self.model.firms if not f.defunct]
+        if not active_firms:
+            return True
+        sevc_profits = [f.profit for f in active_firms if getattr(f, 'is_sevc', True)]
+        vanilla_profits = [f.profit for f in active_firms if not getattr(f, 'is_sevc', True)]
+        sevc_mean = float(np.mean(sevc_profits)) if sevc_profits else 0.0
+        vanilla_mean = float(np.mean(vanilla_profits)) if vanilla_profits else 0.0
+        sevc_prob = (max(sevc_mean, 0) + 1.0) / (max(sevc_mean, 0) + max(vanilla_mean, 0) + 2.0)
+        return bool(self.model.rng.random() < sevc_prob)
+
     def _found_firm(self):
         capital = self.wealth * 0.4; self.wealth -= capital
         firm = FirmAgent(model=self.model, capital=capital)
-        # Inherit is_sevc from previous employer (Task 4)
-        if self.employer_id is not None:
-            old_firm = self.model.get_agent_by_id(self.employer_id)
-            if old_firm and isinstance(old_firm, FirmAgent):
-                firm.is_sevc = old_firm.is_sevc
-            else:
-                firm.is_sevc = False
-        else:
-            firm.is_sevc = False
+        firm.is_sevc = self._choose_governance()
+        if not firm.is_sevc:
+            for k in firm.strategy_weights:
+                firm.strategy_weights[k] = 0.2
         pos = self._safe_pos()
         if pos is None: return
         neighbourhood = self.model.grid.get_neighborhood(pos, moore=True, include_center=True, radius=2)
