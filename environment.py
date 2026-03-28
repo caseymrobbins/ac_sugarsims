@@ -336,6 +336,17 @@ class EconomicModel(Model):
             self.grid.place_agent(f, pos)
             self.firms.append(f)
             self._id_cache[f.unique_id] = f
+            # Choose governance based on market performance
+            if active_firms:
+                sevc_profits = [af.profit for af in active_firms if getattr(af, 'is_sevc', True)]
+                vanilla_profits = [af.profit for af in active_firms if not getattr(af, 'is_sevc', True)]
+                sevc_mean = float(np.mean(sevc_profits)) if sevc_profits else 0.0
+                vanilla_mean = float(np.mean(vanilla_profits)) if vanilla_profits else 0.0
+                sevc_prob = (max(sevc_mean, 0) + 1.0) / (max(sevc_mean, 0) + max(vanilla_mean, 0) + 2.0)
+                f.is_sevc = bool(self.rng.random() < sevc_prob)
+            if not f.is_sevc:
+                for k in f.strategy_weights:
+                    f.strategy_weights[k] = 0.2
 
     # ── Helpers ───────────────────────────────────────────────────────────────
 
