@@ -408,7 +408,7 @@ class WorkerAgent(Agent):
         neighbourhood = self.model.grid.get_neighborhood(pos, moore=True, include_center=False, radius=2)
         empty = [c for c in neighbourhood if self.model.grid.is_cell_empty(c)]
         if empty:
-            self.model.grid.place_agent(child, self.model.rng.choice(empty))
+            self.model.grid.place_agent(child, tuple(self.model.rng.choice(empty)))
             self.model.workers.append(child)
             self.model._id_cache[child.unique_id] = child
             for a, w in self.decision_weights.items():
@@ -422,7 +422,7 @@ class WorkerAgent(Agent):
         if pos is None: return
         neighbourhood = self.model.grid.get_neighborhood(pos, moore=True, include_center=True, radius=2)
         empty = [c for c in neighbourhood if self.model.grid.is_cell_empty(c)]
-        place = self.model.rng.choice(empty) if empty else pos
+        place = tuple(self.model.rng.choice(empty)) if empty else pos
         self.model.grid.place_agent(firm, place); self.model.firms.append(firm); self.model._id_cache[firm.unique_id] = firm
         firm.hire_worker(self)
 
