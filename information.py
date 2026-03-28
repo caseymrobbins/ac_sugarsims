@@ -357,13 +357,23 @@ class NewsFirm(Agent):
         if not self.model.workers:
             return
 
-        # Build/refresh audience: sample workers proportional to capital
-        self.audience = []
+        # Retain existing subscribers (drop those who left the model)
+        self.audience = [wid for wid in self.audience
+                         if self.model.get_agent_by_id(wid) is not None]
+
+        # Churn: some subscribers leave each step
+        if self.audience:
+            churn_rate = max(0.02, 0.10 - self.trust_score * 0.08)
+            self.audience = [wid for wid in self.audience
+                             if self.model.rng.random() > churn_rate]
+
+        # Recruit new subscribers proportional to capital
+        existing = set(self.audience)
         n_sample = min(50, max(10, int(self.capital_stock * 0.01)), len(self.model.workers))
         if self.model.workers:
             sampled = self.model.rng.choice(self.model.workers, size=n_sample, replace=False)
             for w in sampled:
-                if self.model.rng.random() < min(0.5, self.capital_stock * 0.001):
+                if w.unique_id not in existing and self.model.rng.random() < min(0.5, self.capital_stock * 0.001 + self.trust_score * 0.05):
                     self.audience.append(w.unique_id)
         self.audience_size = len(self.audience)
 

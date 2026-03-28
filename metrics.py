@@ -199,6 +199,8 @@ def collect_step_metrics(model: "EconomicModel") -> Dict[str, Any]:
     m["pollution_health_burden"] = health_burden
     m["planner_pollution_tax"] = model.planner.policy["pollution_tax"]
     m["planner_cleanup_investment"] = model.planner.policy["cleanup_investment"]
+    m["planner_media_funding"] = model.planner.policy.get("media_funding", 0.0)
+    m["planner_antitrust_enforcement"] = model.planner.policy.get("antitrust_enforcement", 0.0)
 
     m["wealth_power_law_alpha"] = _pareto_alpha(all_w)
 
