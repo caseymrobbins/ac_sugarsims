@@ -46,7 +46,7 @@ class EconomicModel(Model):
                  objective: str = "SUM",
                  accel_config: AccelConfig = None):
 
-        super().__init__(rng=seed)
+        super().__init__(seed=seed)
 
         self.grid_width  = grid_width
         self.grid_height = grid_height
@@ -202,6 +202,12 @@ class EconomicModel(Model):
             self.grid.place_agent(nf, pos)
             self.news_firms.append(nf)
             self._id_cache[nf.unique_id] = nf
+            # Seed initial audience from nearby workers
+            if self.workers:
+                n_seed = min(int(self.rng.integers(8, 13)), len(self.workers))
+                initial_subs = self.rng.choice(self.workers, size=n_seed, replace=False)
+                nf.audience = [w.unique_id for w in initial_subs]
+                nf.audience_size = len(nf.audience)
 
     def _create_banks(self, n):
         """Create initial banks."""

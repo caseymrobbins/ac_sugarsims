@@ -236,6 +236,7 @@ def collect_step_metrics(model: "EconomicModel") -> Dict[str, Any]:
     try:
         from sustainable_capitalism import compute_stakeholder_scores
         firm_floors = []
+        firm_floors_raw = []
         firm_S, firm_E, firm_V, firm_C = [], [], [], []
         for f in model.firms:
             if not f.defunct:
@@ -245,9 +246,17 @@ def collect_step_metrics(model: "EconomicModel") -> Dict[str, Any]:
                 firm_E.append(scores['E'])
                 firm_V.append(scores['V'])
                 firm_C.append(scores['C'])
+                # Raw floor from unnormalized scores
+                raw_floor = min(scores.get('S_raw', scores['S']),
+                                scores.get('E_raw', scores['E']),
+                                scores.get('V_raw', scores['V']),
+                                scores.get('C_raw', scores['C']))
+                firm_floors_raw.append(raw_floor)
         if firm_floors:
             m["mean_firm_floor"] = float(np.mean(firm_floors))
             m["min_firm_floor"] = float(np.min(firm_floors))
+            m["mean_firm_floor_norm"] = float(np.mean(firm_floors))
+            m["mean_firm_floor_raw"] = float(np.mean(firm_floors_raw))
             m["mean_firm_S"] = float(np.mean(firm_S))
             m["mean_firm_E"] = float(np.mean(firm_E))
             m["mean_firm_V"] = float(np.mean(firm_V))
@@ -255,12 +264,45 @@ def collect_step_metrics(model: "EconomicModel") -> Dict[str, Any]:
         else:
             m["mean_firm_floor"] = 0.0
             m["min_firm_floor"] = 0.0
+            m["mean_firm_floor_norm"] = 0.0
+            m["mean_firm_floor_raw"] = 0.0
             m["mean_firm_S"] = 0.0
             m["mean_firm_E"] = 0.0
             m["mean_firm_V"] = 0.0
             m["mean_firm_C"] = 0.0
     except ImportError:
         pass
+
+    # Green R&D and pollution metrics (Task 2)
+    active_firms_list = [f for f in model.firms if not f.defunct]
+    if active_firms_list:
+        m["mean_green_rd_priority"] = float(np.mean([
+            getattr(f, 'green_rd_priority', 0.5) for f in active_firms_list
+        ]))
+        m["mean_pollution_factor"] = float(np.mean([
+            f.pollution_factor for f in active_firms_list
+        ]))
+    else:
+        m["mean_green_rd_priority"] = 0.0
+        m["mean_pollution_factor"] = 0.0
+
+    # Per-firm SEVC adoption metrics (Task 4)
+    if active_firms_list:
+        sevc_firms = [f for f in active_firms_list if getattr(f, 'is_sevc', True)]
+        vanilla_firms = [f for f in active_firms_list if not getattr(f, 'is_sevc', True)]
+        m["sevc_adoption_rate"] = len(sevc_firms) / len(active_firms_list)
+        m["sevc_market_share"] = float(sum(f.market_share for f in sevc_firms))
+        m["sevc_mean_profit"] = float(np.mean([f.profit for f in sevc_firms])) if sevc_firms else 0.0
+        m["vanilla_mean_profit"] = float(np.mean([f.profit for f in vanilla_firms])) if vanilla_firms else 0.0
+        m["sevc_mean_workers"] = float(np.mean([len(f.workers) for f in sevc_firms])) if sevc_firms else 0.0
+        m["vanilla_mean_workers"] = float(np.mean([len(f.workers) for f in vanilla_firms])) if vanilla_firms else 0.0
+    else:
+        m["sevc_adoption_rate"] = 0.0
+        m["sevc_market_share"] = 0.0
+        m["sevc_mean_profit"] = 0.0
+        m["vanilla_mean_profit"] = 0.0
+        m["sevc_mean_workers"] = 0.0
+        m["vanilla_mean_workers"] = 0.0
 
     # Horizon Index
     try:
@@ -575,7 +617,12 @@ def episode_summary(metrics_history: List[Dict]) -> Dict[str, Any]:
         "total_production", "mean_firm_wage", "total_wages_paid",
         "mean_pollution_factor",
         "mean_firm_floor", "min_firm_floor",
+        "mean_firm_floor_norm", "mean_firm_floor_raw",
         "mean_firm_S", "mean_firm_E", "mean_firm_V", "mean_firm_C",
+        "mean_green_rd_priority", "mean_pollution_factor",
+        "sevc_adoption_rate", "sevc_market_share",
+        "sevc_mean_profit", "vanilla_mean_profit",
+        "sevc_mean_workers", "vanilla_mean_workers",
         "horizon_index",
         "mean_worker_age", "population_growth_rate",
         "n_active_loans", "mean_loan_rate",
@@ -607,6 +654,7 @@ def episode_summary(metrics_history: List[Dict]) -> Dict[str, Any]:
         "mean_authority_trust", "min_authority_trust",
         "weight_polarization", "info_r0",
         "n_news_firms", "n_captured_news",
+        "n_accurate_news", "n_captured_accurate",
         "epistemic_health", "trust_gini", "pct_low_trust",
     ]
     for key in info_keys:

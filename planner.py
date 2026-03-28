@@ -300,6 +300,7 @@ class PlannerAgent(Agent):
                 per_firm = budget / len(active_nf)
                 for nf in active_nf:
                     nf.wealth += per_firm
+                    nf._received_public_funding = True
                 self.tax_revenue -= budget
 
         # Antitrust enforcement: probabilistic cartel breakup + fines

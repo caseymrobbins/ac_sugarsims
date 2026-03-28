@@ -160,11 +160,28 @@ def firm_rd_invest(firm: "FirmAgent") -> float:
 
     # Stochastic breakthrough (probability also modulated by competition)
     breakthrough_prob = RD_BREAKTHROUGH_PROB * comp_modifier
-    if rng.random() < breakthrough_prob:
+    is_breakthrough = rng.random() < breakthrough_prob
+    if is_breakthrough:
         improvement += RD_BREAKTHROUGH_SIZE * rng.uniform(0.5, 1.5)
         firm.innovations_count += 1
 
-    firm.tech_level += improvement
+    # Split improvement between productivity and green based on green_rd_priority
+    green_priority = getattr(firm, 'green_rd_priority', 0.5)
+    if is_breakthrough:
+        # Breakthroughs have some randomness in the split
+        actual_priority = float(np.clip(green_priority + rng.uniform(-0.2, 0.2), 0.0, 1.0))
+    else:
+        actual_priority = green_priority
+
+    # Productivity gain
+    prod_gain = improvement * (1.0 - actual_priority)
+    firm.tech_level += prod_gain
+
+    # Green gain: reduces pollution_factor
+    green_gain = improvement * actual_priority
+    if green_gain > 0:
+        firm.pollution_factor = max(0.01, firm.pollution_factor * (1.0 - green_gain * 0.5))
+
     return improvement
 
 
@@ -247,6 +264,13 @@ def diffuse_technology(model: "EconomicModel"):
                     gap = max_nearby_tech - firm.tech_level
                     spillover = gap * TECH_SPILLOVER_RATE
                     firm.tech_level += spillover
+
+                # Green tech spillover: lower pollution_factor = better
+                best_nearby_pf = min(f.pollution_factor for f in nearby_firms)
+                if best_nearby_pf < firm.pollution_factor:
+                    green_gap = firm.pollution_factor - best_nearby_pf
+                    green_spillover = green_gap * TECH_SPILLOVER_RATE
+                    firm.pollution_factor = max(0.01, firm.pollution_factor - green_spillover)
         except Exception:
             pass
 
