@@ -252,3 +252,31 @@ def trust_population_values(model) -> np.ndarray:
     if planner is not None and hasattr(planner, "trust_score"):
         values.append(float(planner.trust_score))
     return np.array(values, dtype=np.float64)
+
+def compute_trust_metrics(model):
+    """
+    Compute system-level trust metrics.
+    """
+
+    agents = []
+
+    if hasattr(model, "schedule"):
+        agents = model.schedule.agents
+    elif hasattr(model, "agents"):
+        agents = model.agents
+
+    trust_scores = [
+        getattr(a, "trust_score", None)
+        for a in agents
+        if hasattr(a, "trust_score")
+    ]
+
+    if not trust_scores:
+        return {
+            "mean_trust": 0.0,
+            "min_trust": 0.0,
+            "max_trust": 0.0,
+            "trust_gini": 0.0
+        }
+
+    trust_scores = np.array(trust_scores)
