@@ -4,10 +4,16 @@ run_parallel.py
 Launches architecture experiment runs as parallel subprocesses.
 Each run is a separate Python process for genuine multi-core usage.
 
+This version runs the four requested tests:
+  - SUM
+  - SEVC
+  - HI
+  - TOPO
+
 Usage:
     python run_parallel.py              # auto-detect cores
     python run_parallel.py --workers 6  # explicit
-    python run_parallel.py --only C1_vanilla_sum  # single condition
+    python run_parallel.py --only C1_sum  # single condition
 """
 
 import subprocess
@@ -17,17 +23,15 @@ import time
 import argparse
 from concurrent.futures import ProcessPoolExecutor, as_completed
 
-SEEDS = [56, 663, 666, 1233, 5664, 223]
+SEEDS = [101, 202, 303, 404, 505, 606]
 N_STEPS = 2000
 
 # (name, objective, use_sevc, use_innovation, use_trust, trust_noise, use_hi)
 CONDITIONS = [
-    ("C1_vanilla_sum",      "SUM_RAW", False, True,  False, 0.0,  False),
-    ("C2_sevc_sum",         "SUM_RAW", True,  True,  False, 0.0,  False),
-    ("C3_sevc_hi_sum",      "SUM_RAW", True,  True,  False, 0.0,  True),
-    ("C4_sevc_trust_sum",   "SUM_RAW", True,  True,  True,  0.1,  False),
-    ("C5_sevc_trust_hi_sum","SUM_RAW", True,  True,  True,  0.1,  True),
-    ("C6_full_topo",        "TOPO_X",  True,  True,  True,  0.1,  True),
+    ("C1_sum",           "SUM_RAW", False, True,  False, 0.0,  False),
+    ("C2_sevc_sum",      "SUM_RAW", True,  True,  False, 0.0,  False),
+    ("C3_sevc_hi_sum",   "SUM_RAW", True,  True,  False, 0.0,  True),
+    ("C4_full_topo",     "TOPO_X",  True,  True,  True,  0.1,  True),
 ]
 
 
