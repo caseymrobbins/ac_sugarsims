@@ -253,30 +253,59 @@ def trust_population_values(model) -> np.ndarray:
         values.append(float(planner.trust_score))
     return np.array(values, dtype=np.float64)
 
+
 def compute_trust_metrics(model):
     """
-    Compute system-level trust metrics.
+    Compute trust statistics across agents.
+    Always returns a dictionary.
     """
 
-    agents = []
+    try:
+        agents = []
 
-    if hasattr(model, "schedule"):
-        agents = model.schedule.agents
-    elif hasattr(model, "agents"):
-        agents = model.agents
+        if hasattr(model, "schedule"):
+            agents = model.schedule.agents
+        elif hasattr(model, "agents"):
+            agents = model.agents
 
-    trust_scores = [
-        getattr(a, "trust_score", None)
-        for a in agents
-        if hasattr(a, "trust_score")
-    ]
+        trust_scores = [
+            getattr(a, "trust_score", None)
+            for a in agents
+            if hasattr(a, "trust_score")
+        ]
 
-    if not trust_scores:
+        if len(trust_scores) == 0:
+            return {
+                "mean_trust": 0.0,
+                "min_trust": 0.0,
+                "max_trust": 0.0,
+                "trust_gini": 0.0,
+            }
+
+        trust_scores = np.array(trust_scores)
+
+        sorted_vals = np.sort(trust_scores)
+        n = len(sorted_vals)
+        cumulative = np.cumsum(sorted_vals)
+
+        if cumulative[-1] == 0:
+            gini = 0.0
+        else:
+            gini = (n + 1 - 2 * np.sum(cumulative) / cumulative[-1]) / n
+
+        return {
+            "mean_trust": float(np.mean(trust_scores)),
+            "min_trust": float(np.min(trust_scores)),
+            "max_trust": float(np.max(trust_scores)),
+            "trust_gini": float(gini),
+        }
+
+    except Exception:
+        # Failsafe so the simulation never crashes
         return {
             "mean_trust": 0.0,
             "min_trust": 0.0,
             "max_trust": 0.0,
-            "trust_gini": 0.0
+            "trust_gini": 0.0,
         }
-
-    trust_scores = np.array(trust_scores)
+        
