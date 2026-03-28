@@ -654,6 +654,7 @@ def episode_summary(metrics_history: List[Dict]) -> Dict[str, Any]:
         "mean_authority_trust", "min_authority_trust",
         "weight_polarization", "info_r0",
         "n_news_firms", "n_captured_news",
+        "n_accurate_news", "n_captured_accurate",
         "epistemic_health", "trust_gini", "pct_low_trust",
     ]
     for key in info_keys:

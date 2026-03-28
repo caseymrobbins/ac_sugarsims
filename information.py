@@ -53,8 +53,8 @@ PEER_SHARE_RATE = 0.05           # how much weight blending happens per peer int
 NEWS_ABSORPTION_RATE = 0.1       # how much a news signal shifts weights
 
 # News firm parameters
-NEWS_FIRM_ACCURACY_COST = 5.0    # wealth per step to maintain high accuracy
-AUDIENCE_CAPTURE_RATE = 0.01     # per-step drift toward audience beliefs
+NEWS_FIRM_ACCURACY_COST = 3.0    # wealth per step to maintain high accuracy
+AUDIENCE_CAPTURE_RATE = 0.005    # per-step drift toward audience beliefs (slow enough for editorial signal to persist)
 CARTEL_BIAS_STRENGTH = 0.3       # how much cartel capture distorts the signal
 
 
@@ -247,6 +247,8 @@ class NewsFirm(Agent):
         self.last_signal: Optional[InfoSignal] = None
         # Latent source credibility used by trust metrics and workers' source filtering
         self.trust_score: float = float(np.clip(self.accuracy, 0.05, 0.95))
+        # Public funding flag (set by planner, cleared each step)
+        self._received_public_funding: bool = False
 
     def step(self):
         if self.defunct:
@@ -257,8 +259,13 @@ class NewsFirm(Agent):
         accuracy_cost = self.accuracy * NEWS_FIRM_ACCURACY_COST
         self.wealth -= accuracy_cost
 
+        # Public funding maintains minimum editorial standards
+        if self._received_public_funding:
+            self.accuracy = max(0.3, self.accuracy)
+            self._received_public_funding = False
+
         # Revenue from audience
-        self.revenue = self.audience_size * 0.1  # small per-subscriber fee
+        self.revenue = self.audience_size * 0.3  # per-subscriber fee
         self.profit = self.revenue - accuracy_cost
         self.wealth += self.revenue
 
@@ -515,6 +522,8 @@ def compute_information_metrics(model: "EconomicModel") -> Dict[str, float]:
             "info_r0": 0.0,
             "n_news_firms": 0,
             "n_captured_news": 0,
+            "n_accurate_news": 0,
+            "n_captured_accurate": 0,
             "epistemic_health": 0.0,
             "trust_gini": 0.0,
             "pct_low_trust": 0.0,
@@ -572,7 +581,11 @@ def compute_information_metrics(model: "EconomicModel") -> Dict[str, float]:
 
     # News firm stats
     news_firms = getattr(model, 'news_firms', [])
-    n_captured = sum(1 for nf in news_firms if nf.captured_by_cartel is not None)
+    active_nf = [nf for nf in news_firms if not nf.defunct]
+    n_captured = sum(1 for nf in active_nf if nf.captured_by_cartel is not None)
+    n_accurate_news = sum(1 for nf in active_nf if nf.accuracy >= 0.4)
+    n_captured_accurate = sum(1 for nf in active_nf
+                              if nf.accuracy >= 0.4 and nf.captured_by_cartel is not None)
 
     # Boost R0 for captured news firms (superspreader effect)
     # Each captured firm adds to effective contact rate
@@ -594,8 +607,10 @@ def compute_information_metrics(model: "EconomicModel") -> Dict[str, float]:
         "min_authority_trust": float(np.min(trusts)),
         "weight_polarization": polarization,
         "info_r0": float(info_r0),
-        "n_news_firms": len(news_firms),
+        "n_news_firms": len(active_nf),
         "n_captured_news": n_captured,
+        "n_accurate_news": n_accurate_news,
+        "n_captured_accurate": n_captured_accurate,
         "epistemic_health": float(epistemic_health),
         "trust_gini": trust_gini,
         "pct_low_trust": pct_low_trust,
