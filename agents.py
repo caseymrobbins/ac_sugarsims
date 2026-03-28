@@ -418,6 +418,15 @@ class WorkerAgent(Agent):
     def _found_firm(self):
         capital = self.wealth * 0.4; self.wealth -= capital
         firm = FirmAgent(model=self.model, capital=capital)
+        # Inherit is_sevc from previous employer (Task 4)
+        if self.employer_id is not None:
+            old_firm = self.model.get_agent_by_id(self.employer_id)
+            if old_firm and isinstance(old_firm, FirmAgent):
+                firm.is_sevc = old_firm.is_sevc
+            else:
+                firm.is_sevc = False
+        else:
+            firm.is_sevc = False
         pos = self._safe_pos()
         if pos is None: return
         neighbourhood = self.model.grid.get_neighborhood(pos, moore=True, include_center=True, radius=2)
@@ -486,6 +495,13 @@ class FirmAgent(Agent):
             "capture_media": float(rng.beta(1,6)), "pollute_more": float(rng.beta(2,3)),
             "clean_up": float(rng.beta(1.5,4)), "innovate": float(rng.beta(2,3))}
         self._last_strategy = "invest_capital"
+        # SEVC EMA normalization (Task 1)
+        self.sevc_ema_mean = {'S': 0.5, 'E': 0.5, 'V': 0.5, 'C': 0.5}
+        self.sevc_ema_var = {'S': 0.1, 'E': 0.1, 'V': 0.1, 'C': 0.1}
+        # Green R&D priority slider (Task 2): 0.0 = pure productivity, 1.0 = pure green
+        self.green_rd_priority = 0.5
+        # Per-firm SEVC flag (Task 4): default True (SEVC behavior)
+        self.is_sevc = True
         # Innovation
         init_firm_tech(self)
 
@@ -493,11 +509,27 @@ class FirmAgent(Agent):
         if self.defunct: return
         self.age += 1; self.prev_profit = self.profit; self.production_this_step = 0.0; self.revenue = 0.0
         self._produce()
-        strategy = sustainable_choose_strategy(self)
+        if self.is_sevc:
+            strategy = sustainable_choose_strategy(self)
+        else:
+            # Vanilla: pick randomly from strategy_weights (no SEVC context scoring)
+            strategies = list(self.strategy_weights.keys())
+            strategy = strategies[self.model.rng.integers(len(strategies))] if strategies else "invest_capital"
         self._execute_strategy(strategy); self._last_strategy = strategy
-        sustainable_learn_from_outcome(self, strategy, self.profit - self.prev_profit)
+        if self.is_sevc:
+            sustainable_learn_from_outcome(self, strategy, self.profit - self.prev_profit)
+        else:
+            # Vanilla learning: use raw profit_change as signal
+            profit_change = self.profit - self.prev_profit
+            if strategy in self.strategy_weights:
+                adj = 0.02 * np.tanh(profit_change / max(abs(self.profit) + 1, 1))
+                cur = self.strategy_weights[strategy]
+                self.strategy_weights[strategy] = float(np.clip(cur + adj, 0.01, 0.99))
+            if self.profit < 0: self._consecutive_losses += 1
+            else: self._consecutive_losses = 0
         self.capital_stock *= 0.998
         if self.wealth < -200 and len(self.workers) == 0: self._go_bankrupt(); return
+        self._consider_mitosis()
         self.model.planner.apply_tax(self)
 
     def _execute_strategy(self, strategy):
@@ -627,6 +659,49 @@ class FirmAgent(Agent):
         wage = self.offered_wage
         if self.wealth < wage: wage = max(0, self.wealth * 0.5)
         self.wealth -= wage; self.total_wages_paid += wage; return wage
+
+    def _consider_mitosis(self):
+        """Split large, mature, dominant firms into two (Task 3)."""
+        if len(self.workers) < 15: return
+        if self.market_share < 0.10: return
+        if self.age < 50: return
+        if self.model.rng.random() >= 0.02: return
+        # Create daughter firm with 40% of capital
+        daughter = FirmAgent(model=self.model, capital=self.capital_stock * 0.4)
+        self.capital_stock *= 0.6
+        # Daughter inherits key attributes
+        daughter.tech_level = self.tech_level
+        daughter.pollution_factor = self.pollution_factor
+        daughter.green_rd_priority = self.green_rd_priority
+        daughter.trust_score = self.trust_score
+        daughter.strategy_weights = dict(self.strategy_weights)
+        daughter.is_sevc = self.is_sevc
+        daughter.age = 0
+        # Place daughter near parent
+        if self.pos is not None:
+            pos_t = (int(self.pos[0]), int(self.pos[1]))
+            neighbours = self.model.grid.get_neighborhood(pos_t, moore=True, include_center=False, radius=5)
+            empty = [c for c in neighbours if self.model.grid.is_cell_empty(c)]
+            if empty:
+                place = empty[int(self.model.rng.integers(0, len(empty)))]
+            else:
+                place = pos_t
+            self.model.grid.place_agent(daughter, place)
+        else:
+            place = self.model._random_cell()
+            self.model.grid.place_agent(daughter, place)
+        # Split workers: every other worker goes to daughter
+        worker_ids = list(self.workers.keys())
+        for i, wid in enumerate(worker_ids):
+            if i % 2 == 1:
+                w = self.workers.pop(wid)
+                daughter.workers[wid] = w
+                w.employer_id = daughter.unique_id
+        # Register daughter
+        self.model.firms.append(daughter)
+        self.model._id_cache[daughter.unique_id] = daughter
+        # Reset parent market_share (recalculated next step)
+        self.market_share = 0.0
 
     def _go_bankrupt(self):
         for wid in list(self.workers.keys()): self.fire_worker(wid)

@@ -57,6 +57,7 @@ class Condition:
     use_trust: bool          # trust system active
     trust_noise: float       # noise on trust reads (0 = perfect, 0.1 = fuzzy)
     use_horizon_index: bool  # HI coupled to planner objective
+    mixed_sevc_ratio: float = 1.0  # fraction of firms that are SEVC (1.0 = all)
 
 
 CONDITIONS = [
@@ -66,6 +67,7 @@ CONDITIONS = [
     Condition("C4_sevc_trust_sum",  "SEVC + Trust(.1) + SUM","SUM_RAW", True,  True,  0.1,  False),
     Condition("C5_sevc_trust_hi_sum","SEVC+Trust(.1)+HI+SUM","SUM_RAW", True,  True,  0.1,  True),
     Condition("C6_full_topo",       "SEVC+Trust(.1)+HI+TOPO","TOPO_X",  True,  True,  0.1,  True),
+    Condition("C7_mixed_adoption", "Mixed: 50/50 SEVC/Vanilla", "SUM_RAW", True, True, 0.1, True, mixed_sevc_ratio=0.5),
 ]
 
 SEEDS = [42, 137, 2024]
@@ -96,19 +98,30 @@ def configure_model(model, condition: Condition):
     model.trust_noise = condition.trust_noise
     model._trust_frozen = not condition.use_trust
 
-    # If SEVC is disabled, reset firms to vanilla behavior
+    # If SEVC is disabled, reset all firms to vanilla behavior
     if not condition.use_sevc:
         for firm in model.firms:
-            # Remove SEVC scoring: set all strategies to equal weight
+            firm.is_sevc = False
             if hasattr(firm, 'strategy_weights'):
                 for k in firm.strategy_weights:
                     firm.strategy_weights[k] = 0.2
-                # Remove "innovate" strategy
                 if 'innovate' in firm.strategy_weights:
                     del firm.strategy_weights['innovate']
-            # Reset tech level (no innovation module)
             if hasattr(firm, 'tech_level'):
                 firm.tech_level = 1.0
+
+    # Mixed population: randomly assign some firms as vanilla (Task 4)
+    if condition.mixed_sevc_ratio < 1.0 and condition.use_sevc:
+        n_vanilla = int(len(model.firms) * (1.0 - condition.mixed_sevc_ratio))
+        if n_vanilla > 0:
+            indices = list(range(len(model.firms)))
+            model.rng.shuffle(indices)
+            for i in indices[:n_vanilla]:
+                firm = model.firms[i]
+                firm.is_sevc = False
+                if hasattr(firm, 'strategy_weights'):
+                    for k in firm.strategy_weights:
+                        firm.strategy_weights[k] = 0.2
 
     # If trust is disabled, set all trust scores to neutral 0.5
     # and mark them as frozen so update_trust_scores skips them
@@ -157,9 +170,7 @@ def apply_patches():
         _original_learn = sc_module.sustainable_learn_from_outcome
 
         def patched_choose(firm):
-            if not getattr(firm.model, 'use_sevc', True):
-                # Vanilla: always choose highest-weight strategy
-                # (which is just random since we equalized weights)
+            if not getattr(firm, 'is_sevc', True) or not getattr(firm.model, 'use_sevc', True):
                 strategies = list(firm.strategy_weights.keys())
                 if strategies:
                     rng = firm.model.rng if hasattr(firm.model, 'rng') else np.random.default_rng()
@@ -168,8 +179,8 @@ def apply_patches():
             return _original_choose(firm)
 
         def patched_learn(firm, strategy, reward):
-            if not getattr(firm.model, 'use_sevc', True):
-                return  # No learning in vanilla mode
+            if not getattr(firm, 'is_sevc', True) or not getattr(firm.model, 'use_sevc', True):
+                return
             return _original_learn(firm, strategy, reward)
 
         sc_module.sustainable_choose_strategy = patched_choose
@@ -187,7 +198,7 @@ def apply_patches():
         _original_diffuse = inno_module.diffuse_technology
 
         def patched_rd(firm):
-            if not getattr(firm.model, 'use_sevc', True):
+            if not getattr(firm.model, 'use_sevc', True) and not getattr(firm, 'is_sevc', True):
                 return  # No R&D in vanilla mode
             return _original_rd(firm)
 
@@ -290,6 +301,7 @@ def run_single(condition: Condition, seed: int) -> Dict[str, Any]:
         "use_trust": condition.use_trust,
         "trust_noise": condition.trust_noise,
         "use_hi": condition.use_horizon_index,
+        "mixed_sevc_ratio": condition.mixed_sevc_ratio,
     }
 
 
@@ -307,15 +319,15 @@ def run_single_args(args):
 # ── Main ─────────────────────────────────────────────────────────
 
 def main():
+    global N_STEPS
     parser = argparse.ArgumentParser()
     parser.add_argument("--parallel", type=int, default=1,
                         help="Number of parallel workers (default: 1 = sequential)")
-    parser.add_argument("--steps", type=int, default=None,
-                        help=f"Steps per run (default: {N_STEPS})")
+    parser.add_argument("--steps", type=int, default=N_STEPS,
+                        help="Steps per run")
     args = parser.parse_args()
 
-    n_steps = args.steps if args.steps is not None else N_STEPS
-    global N_STEPS
+    n_steps = args.steps
     N_STEPS = n_steps
 
     os.makedirs(OUTPUT_DIR, exist_ok=True)
@@ -434,7 +446,8 @@ def print_comparison(df: pd.DataFrame):
         # Abbreviate condition names
         short = c.replace("C1_vanilla_sum", "C1:Van").replace("C2_sevc_sum", "C2:SEVC") \
                  .replace("C3_sevc_hi_sum", "C3:+HI").replace("C4_sevc_trust_sum", "C4:+Trst") \
-                 .replace("C5_sevc_trust_hi_sum", "C5:+T+HI").replace("C6_full_topo", "C6:TOPO")
+                 .replace("C5_sevc_trust_hi_sum", "C5:+T+HI").replace("C6_full_topo", "C6:TOPO") \
+                 .replace("C7_mixed_adoption", "C7:Mix")
         header += f" {short:>14}"
     print(header)
     print("-" * len(header))

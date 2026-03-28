@@ -73,8 +73,30 @@ def compute_stakeholder_scores(firm: "FirmAgent") -> Dict[str, float]:
     C = (capital_adequacy * 0.35 + stability * 0.35 + longevity * 0.15 + tech_readiness)
     C = max(0.01, min(1.0, C))
 
-    floor = min(S, E, V, C)
-    return {'S': S, 'E': E, 'V': V, 'C': C, 'floor': floor}
+    # Store raw scores for metrics/debugging
+    raw = {'S_raw': S, 'E_raw': E, 'V_raw': V, 'C_raw': C}
+
+    # EMA normalization: z-score each dimension using firm's own history,
+    # then map to [0,1] via sigmoid so min() compares comparable scales.
+    alpha = 0.05  # slow adaptation
+    dims = {'S': S, 'E': E, 'V': V, 'C': C}
+    normed = {}
+    for d, val in dims.items():
+        ema_mean = firm.sevc_ema_mean[d]
+        ema_var = firm.sevc_ema_var[d]
+        # Update EMA stats
+        firm.sevc_ema_mean[d] = (1 - alpha) * ema_mean + alpha * val
+        firm.sevc_ema_var[d] = (1 - alpha) * ema_var + alpha * (val - ema_mean) ** 2
+        # Z-score then sigmoid to [0,1]
+        std = max(math.sqrt(firm.sevc_ema_var[d]), 0.01)
+        z = (val - firm.sevc_ema_mean[d]) / std
+        normed[d] = 1.0 / (1.0 + math.exp(-z))
+
+    S_n, E_n, V_n, C_n = normed['S'], normed['E'], normed['V'], normed['C']
+    floor = min(S_n, E_n, V_n, C_n)
+    result = {'S': S_n, 'E': E_n, 'V': V_n, 'C': C_n, 'floor': floor}
+    result.update(raw)
+    return result
 
 
 def sustainable_learn_from_outcome(firm: "FirmAgent", strategy: str, profit_change: float):
@@ -130,15 +152,22 @@ def sustainable_choose_strategy(firm: "FirmAgent") -> str:
         context["clean_up"] *= 4.0
         context["pollute_more"] *= 0.05
         context["form_cartel"] *= 0.2
+        context["innovate"] *= 3.0  # green R&D helps environment
+        # Shift green_rd_priority toward 1.0 (green R&D)
+        firm.green_rd_priority = min(1.0, firm.green_rd_priority + 0.05)
     elif floor_dim == 'S':
         context["invest_capital"] *= 2.0
         context["innovate"] *= 2.0  # innovation helps shareholder value
         context["raise_wages"] *= 0.5
+        # Shift green_rd_priority toward 0.0 (productivity R&D)
+        firm.green_rd_priority = max(0.0, firm.green_rd_priority - 0.03)
     elif floor_dim == 'C':
         context["invest_capital"] *= 3.0
         context["innovate"] *= 1.5  # tech readiness helps company health
         context["downsize"] *= 0.3
         context["acquire"] *= 0.1
+        # Shift green_rd_priority toward 0.0 (productivity R&D)
+        firm.green_rd_priority = max(0.0, firm.green_rd_priority - 0.03)
 
     strategy_scores = {}
     for action, weight in firm.strategy_weights.items():

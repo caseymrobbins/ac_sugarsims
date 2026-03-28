@@ -26,12 +26,13 @@ from concurrent.futures import ProcessPoolExecutor, as_completed
 SEEDS = [101, 202, 303, 404, 505, 606]
 N_STEPS = 2000
 
-# (name, objective, use_sevc, use_innovation, use_trust, trust_noise, use_hi)
+# (name, objective, use_sevc, use_innovation, use_trust, trust_noise, use_hi, mixed_sevc_ratio)
 CONDITIONS = [
-    ("C1_sum",           "SUM_RAW", False, True,  False, 0.0,  False),
-    ("C2_sevc_sum",      "SUM_RAW", True,  True,  False, 0.0,  False),
-    ("C3_sevc_hi_sum",   "SUM_RAW", True,  True,  False, 0.0,  True),
-    ("C4_full_topo",     "TOPO_X",  True,  True,  True,  0.1,  True),
+    ("C1_sum",           "SUM_RAW", False, True,  False, 0.0,  False, 1.0),
+    ("C2_sevc_sum",      "SUM_RAW", True,  True,  False, 0.0,  False, 1.0),
+    ("C3_sevc_hi_sum",   "SUM_RAW", True,  True,  False, 0.0,  True,  1.0),
+    ("C4_full_topo",     "TOPO_X",  True,  True,  True,  0.1,  True,  1.0),
+    ("C7_mixed_adoption","SUM_RAW", True,  True,  True,  0.1,  True,  0.5),
 ]
 
 
@@ -117,6 +118,7 @@ USE_INNOVATION = @@USE_INNOVATION@@
 USE_TRUST = @@USE_TRUST@@
 TRUST_NOISE = @@TRUST_NOISE@@
 USE_HI = @@USE_HI@@
+MIXED_SEVC_RATIO = @@MIXED_SEVC_RATIO@@
 SEED = @@SEED@@
 N_STEPS = @@N_STEPS@@
 
@@ -136,9 +138,22 @@ model.use_horizon_index = USE_HI
 
 if not USE_SEVC:
     for firm in model.firms:
+        firm.is_sevc = False
         if hasattr(firm, 'strategy_weights'):
             for k in firm.strategy_weights:
                 firm.strategy_weights[k] = 0.2
+
+if MIXED_SEVC_RATIO < 1.0 and USE_SEVC:
+    n_vanilla = int(len(model.firms) * (1.0 - MIXED_SEVC_RATIO))
+    if n_vanilla > 0:
+        indices = list(range(len(model.firms)))
+        model.rng.shuffle(indices)
+        for i in indices[:n_vanilla]:
+            firm = model.firms[i]
+            firm.is_sevc = False
+            if hasattr(firm, 'strategy_weights'):
+                for k in firm.strategy_weights:
+                    firm.strategy_weights[k] = 0.2
 
 if not USE_TRUST:
     model._trust_frozen = True
@@ -176,7 +191,7 @@ print("Saved: " + outpath)
 
 _SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 
-def make_script(name, objective, use_sevc, use_innovation, use_trust, trust_noise, use_hi, seed, n_steps):
+def make_script(name, objective, use_sevc, use_innovation, use_trust, trust_noise, use_hi, mixed_sevc_ratio, seed, n_steps):
     """Generate a self-contained run script with config injected."""
     s = SCRIPT_TEMPLATE
     s = s.replace("@@CWD@@", _SCRIPT_DIR)
@@ -187,6 +202,7 @@ def make_script(name, objective, use_sevc, use_innovation, use_trust, trust_nois
     s = s.replace("@@USE_TRUST@@", str(use_trust))
     s = s.replace("@@TRUST_NOISE@@", str(trust_noise))
     s = s.replace("@@USE_HI@@", str(use_hi))
+    s = s.replace("@@MIXED_SEVC_RATIO@@", str(mixed_sevc_ratio))
     s = s.replace("@@SEED@@", str(seed))
     s = s.replace("@@N_STEPS@@", str(n_steps))
     return s
@@ -194,11 +210,11 @@ def make_script(name, objective, use_sevc, use_innovation, use_trust, trust_nois
 
 def run_one(job):
     """Write script, run as subprocess, return result."""
-    name, objective, use_sevc, use_innovation, use_trust, trust_noise, use_hi, seed, n_steps = job
+    name, objective, use_sevc, use_innovation, use_trust, trust_noise, use_hi, mixed_sevc_ratio, seed, n_steps = job
     label = name + "/seed" + str(seed)
 
     script = make_script(name, objective, use_sevc, use_innovation,
-                         use_trust, trust_noise, use_hi, seed, n_steps)
+                         use_trust, trust_noise, use_hi, mixed_sevc_ratio, seed, n_steps)
 
     script_path = "/tmp/run_" + name + "_s" + str(seed) + ".py"
     with open(script_path, "w") as f:
@@ -262,12 +278,13 @@ def main():
     for cond in CONDITIONS:
         if args.only and cond[0] != args.only:
             continue
-        name, obj, sevc, inno, trust, noise, hi = cond
+        name, obj, sevc, inno, trust, noise, hi, mixed_ratio = cond
         flags = []
         if sevc: flags.append("SEVC")
         if inno: flags.append("Inno")
         if trust: flags.append("Trust(" + str(noise) + ")")
         if hi: flags.append("HI")
+        if mixed_ratio < 1.0: flags.append("Mix(" + str(mixed_ratio) + ")")
         print("  " + name + ": " + obj + " [" + ", ".join(flags) + "]")
     print()
 

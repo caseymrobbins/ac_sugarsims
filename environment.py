@@ -46,7 +46,7 @@ class EconomicModel(Model):
                  objective: str = "SUM",
                  accel_config: AccelConfig = None):
 
-        super().__init__(rng=seed)
+        super().__init__(seed=seed)
 
         self.grid_width  = grid_width
         self.grid_height = grid_height
