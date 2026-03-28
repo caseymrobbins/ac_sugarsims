@@ -10,7 +10,6 @@ from typing import TYPE_CHECKING, List, Optional, Dict
 from sustainable_capitalism import sustainable_learn_from_outcome, sustainable_choose_strategy, compute_stakeholder_scores
 from innovation import (init_firm_tech, firm_rd_invest, apply_tech_to_production,
                          apply_tech_skill_effects, transfer_tech_on_hire)
-from trust import observed_trust
 import numpy as np
 from mesa import Agent
 if TYPE_CHECKING:
@@ -26,8 +25,71 @@ class AgentType(Enum):
 SURVIVAL_THRESHOLD = 1.0
 REPRODUCTION_COST = 50.0
 REPRODUCTION_THRESHOLD = 200.0
+TARGET_POPULATION = 1500
+BASE_REPRO_RATE = 0.001
+MAX_POPULATION = 1600
 ENTREPRENEURSHIP_THRESHOLD = 300.0
 ENTREPRENEURSHIP_PROB = 0.003
+
+
+# ---------------------------------------------------------------------------
+# Diversity / identity helpers
+# ---------------------------------------------------------------------------
+IDENTITY_TRAITS = ("A", "B", "C")
+IDENTITY_TYPES = (
+    ("A", "A"),
+    ("A", "B"),
+    ("A", "C"),
+    ("B", "B"),
+    ("B", "C"),
+    ("C", "C"),
+)
+
+def _normalize_identity(identity):
+    if identity is None:
+        return None
+    if isinstance(identity, str):
+        if len(identity) == 2 and identity[0] in IDENTITY_TRAITS and identity[1] in IDENTITY_TRAITS:
+            return tuple(sorted((identity[0], identity[1])))
+        return None
+    try:
+        a, b = identity
+        if a in IDENTITY_TRAITS and b in IDENTITY_TRAITS:
+            return tuple(sorted((str(a), str(b))))
+    except Exception:
+        return None
+    return None
+
+def _random_legacy_identity(rng):
+    # Baseline population starts as AA / BB only.
+    return ("A", "A") if rng.random() < 0.5 else ("B", "B")
+
+def _identity_similarity(id1, id2):
+    id1 = _normalize_identity(id1)
+    id2 = _normalize_identity(id2)
+    if id1 is None or id2 is None:
+        return 1.0
+    shared = len(set(id1).intersection(id2))
+    return shared / 2.0
+
+def _identity_trust_multiplier(agent_a, agent_b):
+    """
+    Trust modifier from the design doc:
+        Trust = Trust_base * (0.5 + 0.5 * similarity)
+    """
+    sim = _identity_similarity(getattr(agent_a, "identity", None), getattr(agent_b, "identity", None))
+    return 0.5 + 0.5 * sim
+
+def _mix_identity(parent_a, parent_b, rng):
+    """
+    Reproduction / social mixing rule.
+    """
+    pa = _normalize_identity(parent_a) or ("A", "A")
+    pb = _normalize_identity(parent_b) or ("B", "B")
+    child = tuple(sorted((rng.choice(pa), rng.choice(pb))))
+    if child not in IDENTITY_TYPES:
+        child = tuple(sorted((pa[0], pb[0])))
+    return child
 
 class WorkerAgent(Agent):
     agent_type = AgentType.WORKER
@@ -61,6 +123,7 @@ class WorkerAgent(Agent):
         self.lifetime_wages = 0.0
         self.harvested_this_step = 0.0
         self.trust_score = 0.5
+        self.identity = _random_legacy_identity(rng)
         self._prev_employer_id = None  # for tech transfer tracking
 
     def step(self):
@@ -106,10 +169,13 @@ class WorkerAgent(Agent):
         if self.model.rng.random() < self.mobility: self._migrate()
         self._pay_rent()
         if self.wealth >= REPRODUCTION_THRESHOLD:
-            pop_ratio = len(self.model.workers) / self.model.n_workers_initial
-            carrying_pressure = max(0.1, 1.0 / pop_ratio)
-            repro_prob = 0.003 * carrying_pressure * max(0.1, 1.0 - local_pollution * 0.02)
-            if self.model.rng.random() < repro_prob: self._reproduce()
+            population = len(self.model.workers)
+            if population >= MAX_POPULATION:
+                return
+            pressure = max(0.0, 1.0 - population / TARGET_POPULATION)
+            repro_prob = BASE_REPRO_RATE * pressure * max(0.1, 1.0 - local_pollution * 0.02)
+            if self.model.rng.random() < repro_prob:
+                self._reproduce()
         if self.wealth >= ENTREPRENEURSHIP_THRESHOLD and not self.employed and self.model.rng.random() < ENTREPRENEURSHIP_PROB:
             self._found_firm()
         if self.wealth < 10.0 and self.debt < 50.0 and self.model.rng.random() < self.risk_tolerance:
@@ -140,19 +206,25 @@ class WorkerAgent(Agent):
 
     def receive_information(self, signal):
         from information import NEWS_ABSORPTION_RATE, ACTIONS
-        # Trust gate: blend authority_trust with source's trust_score
+        # Trust gate: blend authority_trust with source's trust_score and identity similarity.
         source = self.model.get_agent_by_id(signal.source_id)
-        source_trust = observed_trust(source, self.model) if source else 0.5
-        effective_trust = self.authority_trust * signal.trust * (0.5 + 0.5 * source_trust)
-        if effective_trust < 0.01: return
+        source_trust = getattr(source, 'trust_score', 0.5) if source else 0.5
+        identity_modifier = _identity_trust_multiplier(self, source) if source is not None else 1.0
+        effective_trust = self.authority_trust * signal.trust * (0.5 + 0.5 * source_trust) * identity_modifier
+        if effective_trust < 0.01:
+            return
         for action in ACTIONS:
-            delta = signal.weight_deltas.get(action, 0.0); current = self.decision_weights.get(action, 0.5)
+            delta = signal.weight_deltas.get(action, 0.0)
+            current = self.decision_weights.get(action, 0.5)
             self.decision_weights[action] = float(np.clip(current + NEWS_ABSORPTION_RATE * effective_trust * delta, 0.01, 0.99))
         signal_avg = np.mean(list(signal.weight_deltas.values()))
-        ed = np.sign(self._last_action_outcome); sd = np.sign(signal_avg)
+        ed = np.sign(self._last_action_outcome)
+        sd = np.sign(signal_avg)
         if ed != 0 and sd != 0:
-            if ed == sd: self.authority_trust = min(0.95, self.authority_trust + 0.005)
-            else: self.authority_trust = max(0.05, self.authority_trust - 0.01)
+            if ed == sd:
+                self.authority_trust = min(0.95, self.authority_trust + 0.005)
+            else:
+                self.authority_trust = max(0.05, self.authority_trust - 0.01)
         self._last_action_outcome = self.income_last_step - self.income_prev_step
 
     def _harvest(self):
@@ -172,24 +244,33 @@ class WorkerAgent(Agent):
 
     def _seek_employment(self):
         pos = self._tpos()
-        if pos is None: return
-        neighbours = self.model.grid.get_neighborhood(pos, moore=True, include_center=False, radius=5)
+        if pos is None:
+            return
+        neighbours = self.model.grid.get_neighborhood(pos, moore=True, include_center=False, radius=4)
         firms_nearby = [a for cell in neighbours for a in self.model.grid.get_cell_list_contents([cell]) if isinstance(a, FirmAgent) and not a.defunct]
-        if not firms_nearby: return
-        # Trust filter: skip firms with very low trust
-        trusted_firms = [f for f in firms_nearby if observed_trust(f, self.model) >= 0.15]
+        if not firms_nearby:
+            return
+
+        # Trust filter: skip firms with very low trust.
+        trusted_firms = [f for f in firms_nearby if getattr(f, 'trust_score', 0.5) >= 0.15]
         if not trusted_firms:
-            trusted_firms = firms_nearby  # fallback if all firms are low-trust
-        # Score by wage * trust: workers prefer trustworthy employers
+            trusted_firms = firms_nearby
+
         def firm_attractiveness(f):
-            return f.offered_wage * (0.5 + 0.5 * observed_trust(f, self.model))
+            identity_bonus = _identity_trust_multiplier(self, f)
+            return f.offered_wage * (0.5 + 0.5 * getattr(f, 'trust_score', 0.5)) * identity_bonus
+
         best = max(trusted_firms, key=firm_attractiveness, default=None)
         current_employer = self.model.get_agent_by_id(self.employer_id) if self.employer_id else None
-        current_employer_trust = observed_trust(current_employer, self.model) if current_employer else 0.5
-        if best and firm_attractiveness(best) > self.wage * (0.5 + 0.5 * current_employer_trust):
+        current_trust = getattr(current_employer, 'trust_score', 0.5) if current_employer else 0.5
+        current_score = self.wage * (0.5 + 0.5 * current_trust) * (
+            _identity_trust_multiplier(self, current_employer) if current_employer is not None else 1.0
+        )
+        if best and firm_attractiveness(best) > current_score:
             if self.employer_id is not None:
                 old_firm = self.model.get_agent_by_id(self.employer_id)
-                if old_firm and isinstance(old_firm, FirmAgent): old_firm.fire_worker(self.unique_id)
+                if old_firm and isinstance(old_firm, FirmAgent):
+                    old_firm.fire_worker(self.unique_id)
             best.hire_worker(self)
 
     def _trade(self):
@@ -222,20 +303,28 @@ class WorkerAgent(Agent):
         self.model.economy.bilateral_trade(self, p)
 
     def _invest_in_firms(self):
-        if self.model.current_step % 10 != 0: self._collect_dividends(); return
+        if self.model.current_step % 10 != 0:
+            self._collect_dividends()
+            return
         surplus = self.wealth - 100
-        if surplus <= 0: return
+        if surplus <= 0:
+            return
         invest_amount = surplus * 0.05
         active_firms = [f for f in self.model.firms if not f.defunct and f.profit > 0]
-        if not active_firms: return
-        # Trust-weighted investment: prefer trustworthy, profitable firms
+        if not active_firms:
+            return
+
+        # Trust-weighted investment: prefer trustworthy, profitable, and identity-similar firms.
         if self.wealth > 500 and len(active_firms) > 1:
             def invest_score(f):
-                return f.profit * (0.3 + 0.7 * observed_trust(f, self.model))
+                return f.profit * (0.3 + 0.7 * getattr(f, 'trust_score', 0.5)) * _identity_trust_multiplier(self, f)
             target = max(active_firms, key=invest_score)
         else:
             target = self.model.rng.choice(active_firms)
-        self.wealth -= invest_amount; target.capital_stock += invest_amount * 0.9; target.wealth += invest_amount * 0.1
+
+        self.wealth -= invest_amount
+        target.capital_stock += invest_amount * 0.9
+        target.wealth += invest_amount * 0.1
         self.investments[target.unique_id] = self.investments.get(target.unique_id, 0) + invest_amount
         self._collect_dividends()
 
@@ -251,44 +340,67 @@ class WorkerAgent(Agent):
 
     def _migrate(self):
         pos = self._tpos()
-        if pos is None: return
+        if pos is None:
+            return
         neighbourhood = self.model.grid.get_neighborhood(pos, moore=True, include_center=False, radius=3)
         empty = [c for c in neighbourhood if self.model.grid.is_cell_empty(c)]
-        if not empty: return
-        def cv(p): return float(self.model.food_grid[p[0],p[1]]) + float(self.model.raw_grid[p[0],p[1]]) + float(self.model.capital_grid[p[0],p[1]]) + float(self.model.water_grid[p[0],p[1]]) * 0.5
-        self.model.grid.move_agent(self, max(empty, key=cv))
+        if not empty:
+            return
+
+        def cell_value(p):
+            return float(self.model.food_grid[p[0], p[1]]) + float(self.model.raw_grid[p[0], p[1]]) + float(self.model.capital_grid[p[0], p[1]]) + float(self.model.water_grid[p[0], p[1]]) * 0.5
+
+        self.model.grid.move_agent(self, max(empty, key=cell_value))
 
     def _pay_rent(self):
-        if self.pos is None: return
+        if self.pos is None:
+            return
         lo = self.model.get_landowner_at(self._tpos())
         if lo is not None:
             rent = lo.compute_rent(self)
-            # Trust discount: low-trust landowners get less compliance
-            lo_trust = observed_trust(lo, self.model)
+            lo_trust = getattr(lo, 'trust_score', 0.5)
+            rent *= _identity_trust_multiplier(self, lo)
             if lo_trust < 0.3 and self.model.rng.random() < 0.1:
-                return  # refuse to pay exploitative landlord occasionally
-            if self.wealth >= rent: self.wealth -= rent; lo.wealth += rent; lo.total_rent_collected += rent
+                return
+            if self.wealth >= rent:
+                self.wealth -= rent
+                lo.wealth += rent
+                lo.total_rent_collected += rent
 
     def _reproduce(self):
-        if self.wealth < REPRODUCTION_THRESHOLD: return
+        if self.wealth < REPRODUCTION_THRESHOLD:
+            return
         self.wealth -= REPRODUCTION_COST
         is_elite = False
         if self.employed and self.employer_id is not None:
             firm = self.model.get_agent_by_id(self.employer_id)
-            if firm and hasattr(firm, 'wealth') and firm.wealth > 500: is_elite = True
-        if not is_elite and self.wealth > 300: is_elite = True
+            if firm and hasattr(firm, 'wealth') and firm.wealth > 500:
+                is_elite = True
+        if not is_elite and self.wealth > 300:
+            is_elite = True
         edu_boost = 0.08 if is_elite else (self.model._education_quality - 1.0) * 0.05
         child_skill = float(np.clip(self.skill + edu_boost + self.model.rng.normal(0, 0.05), 0.05, 1.0))
-        child = WorkerAgent(model=self.model, wealth=REPRODUCTION_COST*0.8, skill=child_skill,
-                            metabolism=self.metabolism*float(self.model.rng.uniform(0.9,1.1)),
-                            risk_tolerance=self.risk_tolerance, mobility=self.mobility)
+        child = WorkerAgent(
+            model=self.model,
+            wealth=REPRODUCTION_COST * 0.8,
+            skill=child_skill,
+            metabolism=self.metabolism * float(self.model.rng.uniform(0.9, 1.1)),
+            risk_tolerance=self.risk_tolerance,
+            mobility=self.mobility,
+        )
+        # Hybrid identity formation from parent identities.
+        parent_b = self.model.get_agent_by_id(self.employer_id) if self.employer_id is not None else None
+        child.identity = _mix_identity(self.identity, getattr(parent_b, "identity", self.identity), self.model.rng)
+
         pos = self._tpos()
-        if pos is None: return
+        if pos is None:
+            return
         neighbourhood = self.model.grid.get_neighborhood(pos, moore=True, include_center=False, radius=2)
         empty = [c for c in neighbourhood if self.model.grid.is_cell_empty(c)]
         if empty:
             self.model.grid.place_agent(child, self.model.rng.choice(empty))
-            self.model.workers.append(child); self.model._id_cache[child.unique_id] = child
+            self.model.workers.append(child)
+            self.model._id_cache[child.unique_id] = child
             for a, w in self.decision_weights.items():
                 child.decision_weights[a] = float(np.clip(w + self.model.rng.normal(0, 0.05), 0.01, 0.99))
             child.authority_trust = float(np.clip(self.authority_trust + self.model.rng.normal(0, 0.05), 0.05, 0.95))
@@ -527,6 +639,7 @@ class LandownerAgent(Agent):
         self.controlled_cells = []; self.rent_rate = float(rng.uniform(0.05, 0.25))
         self.total_rent_collected = 0.0; self.age = 0
         self.trust_score = 0.5
+        self.identity = _random_legacy_identity(rng)
 
     def step(self):
         self.age += 1
