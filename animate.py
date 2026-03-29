@@ -292,8 +292,10 @@ input[type="range"] { flex: 1; accent-color: #e94560; }
             <div class="legend-item"><span class="legend-dot" style="background:#2ecc71"></span> Employed worker</div>
             <div class="legend-item"><span class="legend-dot" style="background:#e74c3c"></span> Unemployed worker</div>
             <div class="legend-item"><span class="legend-dot" style="background:#f1c40f"></span> In debt</div>
-            <div class="legend-item"><span class="legend-sq" style="background:#3498db"></span> Firm</div>
+            <div class="legend-item"><span class="legend-sq" style="background:#3498db"></span> SEVC firm</div>
+            <div class="legend-item"><span class="legend-sq" style="background:#9b59b6"></span> Vanilla firm</div>
             <div class="legend-item"><span class="legend-sq" style="background:#e94560"></span> Cartel firm</div>
+            <div class="legend-item"><span class="legend-sq" style="background:#e67e22;border:2px solid #c0392b"></span> Declining firm (HI&lt;0.7)</div>
             <div class="legend-item"><span style="color:#ff634780">&#9608;</span> Pollution</div>
         </div>
     </div>
@@ -401,10 +403,24 @@ function drawFrame(idx) {
         const y = (GRID - 1 - f.y) * CELL;
         const size = Math.max(4, Math.min(14, 4 + f.n_workers * 1.5));
 
-        ctx.fillStyle = f.in_cartel ? '#e94560' : '#3498db';
+        if (f.in_cartel) {
+            ctx.fillStyle = '#e94560';
+        } else if (f.is_sevc === false) {
+            ctx.fillStyle = '#9b59b6';  // vanilla = purple
+        } else {
+            ctx.fillStyle = '#3498db';  // SEVC = blue
+        }
         ctx.fillRect(x, y, size, size);
-        ctx.strokeStyle = '#000';
-        ctx.lineWidth = 0.5;
+
+        // Border: orange-red for declining HI, black otherwise
+        const hi = f.firm_hi != null ? f.firm_hi : 1.0;
+        if (hi < 0.7) {
+            ctx.strokeStyle = '#e67e22';
+            ctx.lineWidth = 1.5;
+        } else {
+            ctx.strokeStyle = '#000';
+            ctx.lineWidth = 0.5;
+        }
         ctx.strokeRect(x, y, size, size);
     }
 
@@ -423,6 +439,9 @@ function drawFrame(idx) {
         return 'warn';
     }
 
+    const govLabel = overlay.gov_type || '---';
+    const elecLabel = overlay.election_winner || 'none';
+
     metricsDiv.innerHTML = [
         row('Workers', overlay.n_workers || '?'),
         row('Firms', overlay.n_firms || '?'),
@@ -433,6 +452,12 @@ function drawFrame(idx) {
         row('Agency Floor', fmt(overlay.agency_floor, 2), clsHi(overlay.agency_floor, 2, 0.5)),
         row('Horizon Index', fmt(overlay.horizon_index, 3), clsHi(overlay.horizon_index, 0.6, 0.3)),
         row('Firm Floor', fmt(overlay.mean_firm_floor, 3), clsHi(overlay.mean_firm_floor, 0.3, 0.1)),
+        row('Firm HI', fmt(overlay.mean_firm_hi, 3), clsHi(overlay.mean_firm_hi, 0.8, 0.5)),
+        '<div style="height:8px"></div>',
+        row('Gov Type', govLabel),
+        row('Election', elecLabel),
+        row('SEVC Adopt', pct(overlay.sevc_adoption_rate)),
+        row('Pollution', fmt(overlay.total_pollution, 0)),
         '<div style="height:8px"></div>',
         row('Planner Trust', fmt(overlay.trust_planner, 3), clsHi(overlay.trust_planner, 0.5, 0.25)),
         row('System Trust', fmt(overlay.trust_institutional, 3), clsHi(overlay.trust_institutional, 0.4, 0.2)),

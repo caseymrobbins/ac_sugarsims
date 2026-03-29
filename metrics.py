@@ -408,6 +408,8 @@ def collect_animation_frame(model: "EconomicModel") -> Dict[str, Any]:
                 "production": float(f.production_this_step),
                 "in_cartel": f.cartel_id is not None,
                 "pollution_factor": float(f.pollution_factor),
+                "is_sevc": bool(getattr(f, 'is_sevc', True)),
+                "firm_hi": float(getattr(f, 'horizon_index', 1.0)),
             })
     frame["firms"] = firms_data
 
@@ -442,6 +444,11 @@ def collect_animation_frame(model: "EconomicModel") -> Dict[str, Any]:
             "n_cartels": latest.get("n_active_cartels", 0),
             "trust_planner": latest.get("trust_planner", 0.5),
             "trust_institutional": latest.get("trust_institutional", 0.5),
+            "mean_firm_hi": latest.get("mean_firm_hi", 1.0),
+            "gov_type": latest.get("gov_type", ""),
+            "election_winner": latest.get("election_winner", "none"),
+            "sevc_adoption_rate": latest.get("sevc_adoption_rate", 0),
+            "total_pollution": latest.get("total_pollution", 0),
         }
 
     return frame
