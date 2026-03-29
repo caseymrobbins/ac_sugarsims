@@ -17,7 +17,7 @@ import numpy as np
 from mesa import Model
 from mesa.space import MultiGrid
 
-from agents import WorkerAgent, FirmAgent, LandownerAgent
+from agents import WorkerAgent, FirmAgent, LandownerAgent, EnforcerAgent
 from economy import Economy
 from planner import PlannerAgent
 from information import NewsFirm, propagate_peer_information, compute_information_metrics
@@ -75,6 +75,15 @@ class EconomicModel(Model):
          self.pollution_grid,
          self.capital_grid) = self._init_resource_arrays()
 
+        # Conflict and legitimacy fields
+        self.conflict_grid = np.zeros((grid_width, grid_height), dtype=np.float64)
+        self.legitimacy_grid = np.full((grid_width, grid_height), 0.7, dtype=np.float64)
+        self._surveillance_level = 0.0  # set by planner
+        self._rebellion_events = 0  # accumulator per step
+        self._total_crime_events = 0
+        self._total_riot_events = 0
+        self.enforcers: list = []
+
         # Cell ownership: (x,y) -> landowner unique_id
         self.cell_ownership: Dict[Tuple[int,int], int] = {}
 
@@ -102,6 +111,7 @@ class EconomicModel(Model):
         self._create_landowners(n_landowners)
         self._create_news_firms(3)  # start with 3 news firms
         self._create_banks(2)      # start with 2 banks
+        self._create_enforcers(5)  # start with 5 enforcement agents
 
         # Seed initial social network connections (fixes trade deadlock)
         self._seed_network_connections()
@@ -219,6 +229,15 @@ class EconomicModel(Model):
             self.banks.append(bank)
             self._id_cache[bank.unique_id] = bank
 
+    def _create_enforcers(self, n):
+        """Create enforcement agents."""
+        for _ in range(n):
+            e = EnforcerAgent(model=self)
+            pos = self._random_cell()
+            self.grid.place_agent(e, pos)
+            self.enforcers.append(e)
+            self._id_cache[e.unique_id] = e
+
     # ── Mesa step ─────────────────────────────────────────────────────────────
 
     def step(self):
@@ -244,6 +263,34 @@ class EconomicModel(Model):
         self.pollution_grid += POLLUTION_DIFFUSE * (neighbours - self.pollution_grid)
         np.clip(self.pollution_grid, 0, POLLUTION_CAP, out=self.pollution_grid)
 
+        # Conflict field diffusion (vectorized, similar to pollution)
+        c_neighbours = (
+            np.roll(self.conflict_grid,  1, axis=0) +
+            np.roll(self.conflict_grid, -1, axis=0) +
+            np.roll(self.conflict_grid,  1, axis=1) +
+            np.roll(self.conflict_grid, -1, axis=1)
+        )
+        self.conflict_grid = 0.6 * self.conflict_grid + 0.1 * c_neighbours
+        self.conflict_grid *= 0.97  # decay
+        np.clip(self.conflict_grid, 0.0, 1.0, out=self.conflict_grid)
+
+        # Legitimacy field update (vectorized)
+        # Legitimacy rises with low enforcement brutality; falls with high conflict
+        enforcement_pressure = self._surveillance_level * 0.005
+        self.legitimacy_grid -= enforcement_pressure
+        self.legitimacy_grid -= self.conflict_grid * 0.01
+        # Economic growth boost (proxy: mean production normalized)
+        n_active = sum(1 for f in self.firms if not f.defunct)
+        if n_active > 0:
+            self.legitimacy_grid += 0.002
+        self.legitimacy_grid *= 0.999  # slow mean reversion
+        np.clip(self.legitimacy_grid, 0.0, 1.0, out=self.legitimacy_grid)
+
+        # Reset per-step event counters
+        self._rebellion_events = 0
+        self._total_crime_events = 0
+        self._total_riot_events = 0
+
         # Planner first (sets bonuses, runs elections, redistributes)
         self.planner.step()
 
@@ -257,6 +304,24 @@ class EconomicModel(Model):
             if getattr(a, "defunct", False):
                 continue
             a.step()
+
+        # Aggregate per-worker crime/riot events
+        for w in self.workers:
+            self._total_crime_events += getattr(w, '_crime_events', 0)
+            self._total_riot_events += getattr(w, '_riot_events', 0)
+
+        # Enforcer patrol step
+        for e in self.enforcers:
+            if not getattr(e, 'defunct', False):
+                e.step()
+
+        # Enforcement suppresses local conflict
+        for e in self.enforcers:
+            if e.pos is not None:
+                ex, ey = int(e.pos[0]), int(e.pos[1])
+                self.conflict_grid[ex, ey] = max(0.0, self.conflict_grid[ex, ey] - e.force * 0.1)
+                # But brutality adds long-term tension
+                self.conflict_grid[ex, ey] = min(1.0, self.conflict_grid[ex, ey] + e.aggression * 0.05)
 
         # Information propagation: peer-to-peer weight sharing
         propagate_peer_information(self)

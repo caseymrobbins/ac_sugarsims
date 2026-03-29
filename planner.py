@@ -4,7 +4,7 @@ planner.py - RL policy authority with ideal baseline, inheritance tax,
 
 Changes from original:
   - INSTRUMENT_SPEC includes inheritance_tax (planner-controlled)
-  - POLICY_DIM = 15 (was 13): added media_funding, antitrust_enforcement
+  - POLICY_DIM = 18 (was 15): added surveillance, enforcement_budget, propaganda
   - _learning_step uses ideal baseline instead of moving average
   - _compute_ideal_score provides fixed reference for each objective
   - All objective functions multiplied by horizon_index
@@ -28,8 +28,8 @@ ES_SIGMA_DECAY = 0.999
 ES_SIGMA_MIN = 0.005
 ES_LR = 0.1
 ES_MOMENTUM = 0.9
-STATE_DIM = 14
-POLICY_DIM = 15
+STATE_DIM = 16
+POLICY_DIM = 18
 ADAPT_LR = 0.01
 ADAPT_NOISE = 0.02
 REWARD_CLIP = 50.0
@@ -66,6 +66,9 @@ INSTRUMENT_SPEC: List[Tuple[str, float, float, float]] = [
     ("inheritance_tax",           0.0,   0.0,   0.80),
     ("media_funding",             0.0,   0.0,   5.0),
     ("antitrust_enforcement",     0.0,   0.0,   3.0),
+    ("surveillance_level",        0.0,   0.0,   1.0),
+    ("enforcement_budget",        0.3,   0.0,   3.0),
+    ("propaganda_budget",         0.0,   0.0,   3.0),
 ]
 
 INSTRUMENT_NAMES = [s[0] for s in INSTRUMENT_SPEC]
@@ -202,6 +205,8 @@ class PlannerAgent(Agent):
         true_unemp = 1.0 - n_employed / max(n_workers, 1)
         true_poll = float(np.mean(self.model.pollution_grid))
         hi = _get_horizon_index(self.model)
+        mean_conflict = float(np.mean(self.model.conflict_grid)) if hasattr(self.model, 'conflict_grid') else 0.0
+        mean_legitimacy = float(np.mean(self.model.legitimacy_grid)) if hasattr(self.model, 'legitimacy_grid') else 0.7
         state = np.array([
             np.log1p(true_mw * (1 + ed * 0.5)), np.log1p(true_minw * (1 + ed * 2.0)),
             float(_gini_fast(worker_w)), np.log1p(max(agencies.min(), 0.0)),
@@ -211,6 +216,8 @@ class PlannerAgent(Agent):
             float(len(firms)) / 20.0, float(self.model.current_step) / 300.0,
             self.policy.get("inheritance_tax", 0.0),
             hi,
+            mean_conflict * (1 - ed * 0.3),  # auth_captured sees less conflict
+            mean_legitimacy,
         ], dtype=np.float64)
         np.nan_to_num(state, copy=False, nan=0.0, posinf=50.0, neginf=-50.0)
         return state
@@ -402,6 +409,35 @@ class PlannerAgent(Agent):
                         m.cartel_partners = []
                         m.pollution_factor = max(0.05, m.pollution_factor * 0.85)
                     del self.model.active_cartels[cid]
+
+        # Surveillance: set model-wide surveillance level for conflict system
+        surv = _safe("surveillance_level", 0.0)
+        self.model._surveillance_level = float(np.clip(surv, 0.0, 1.0))
+
+        # Enforcement budget: scale enforcer effectiveness
+        enf_budget = _safe("enforcement_budget", 0.3)
+        if enf_budget > 0 and self.tax_revenue > 0:
+            enf_cost = enf_budget * 1.0
+            paid = min(enf_cost, self.tax_revenue); self.tax_revenue -= paid
+            ratio_e = paid / max(enf_cost, 1e-9)
+            for e in self.model.enforcers:
+                e.force = float(np.clip(0.3 + 0.7 * enf_budget * ratio_e, 0.1, 1.5))
+
+        # Propaganda: reduces conflict but increases scapegoating risk
+        prop = _safe("propaganda_budget", 0.0)
+        self.model._propaganda_budget = prop  # expose for media scapegoating
+        if prop > 0 and self.tax_revenue > 0:
+            prop_cost = prop * 1.5
+            paid_p = min(prop_cost, self.tax_revenue); self.tax_revenue -= paid_p
+            ratio_p = paid_p / max(prop_cost, 1e-9)
+            # Directly suppress conflict grid
+            if hasattr(self.model, 'conflict_grid'):
+                suppress = min(0.05, prop * 0.01 * ratio_p)
+                self.model.conflict_grid *= max(0.9, 1.0 - suppress)
+            # Boost legitimacy slightly
+            if hasattr(self.model, 'legitimacy_grid'):
+                self.model.legitimacy_grid += prop * 0.002 * ratio_p
+                np.clip(self.model.legitimacy_grid, 0.0, 1.0, out=self.model.legitimacy_grid)
 
     # ------------------------------------------------------------------
     # Objective functions

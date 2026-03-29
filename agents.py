@@ -22,6 +22,7 @@ class AgentType(Enum):
     LANDOWNER = auto()
     PLANNER = auto()
     MEDIA = auto()
+    ENFORCER = auto()
 
 SURVIVAL_THRESHOLD = 1.0
 REPRODUCTION_COST = 50.0
@@ -126,15 +127,22 @@ class WorkerAgent(Agent):
         self.trust_score = 0.5
         self.identity = _random_legacy_identity(rng)
         self._prev_employer_id = None  # for tech transfer tracking
+        # Aggression / conflict system
+        self.aggression = float(rng.beta(2, 5))  # 0=content, 0.5=friction, 1.0=rebellion
+        self._crime_events = 0  # per-step counter, reset each step
+        self._riot_events = 0
 
     def step(self):
         self.age += 1
         self.income_prev_step = self.income_last_step
         self.income_last_step = 0.0
         self.harvested_this_step = 0.0
+        self._crime_events = 0; self._riot_events = 0
         local_pollution = 0.0
         if self.pos is not None:
             local_pollution = float(self.model.pollution_grid[int(self.pos[0]), int(self.pos[1])])
+        # Aggression update from stress factors
+        self._update_aggression(local_pollution)
         effective_metabolism = self.metabolism * max(0.0, 1.0 - self.model._healthcare_bonus) + local_pollution * 0.05
         self.wealth -= effective_metabolism
         if self.wealth <= SURVIVAL_THRESHOLD:
@@ -182,6 +190,7 @@ class WorkerAgent(Agent):
         if self.wealth < 10.0 and self.debt < 50.0 and self.model.rng.random() < self.risk_tolerance:
             self.model.economy.issue_loan(self, amount=20.0)
         self.model.planner.apply_tax(self)
+        if hasattr(self.model, 'conflict_grid'): self._attempt_aggressive_action()
         if self.model.rng.random() < 0.02: self._discover_neighbor()
 
     def _tpos(self):
@@ -237,6 +246,11 @@ class WorkerAgent(Agent):
             else:
                 self.authority_trust = max(0.05, self.authority_trust - 0.01)
         self._last_action_outcome = self.income_last_step - self.income_prev_step
+        # Process scapegoating: if signal blames a different identity, increase hostility
+        scapegoat = getattr(signal, 'scapegoat_identity', None)
+        if scapegoat is not None and _identity_similarity(self.identity, scapegoat) < 0.5:
+            # Worker absorbs blame narrative: increase aggression toward scapegoat group
+            self.aggression = min(1.0, self.aggression + effective_trust * 0.02)
 
     def _harvest(self):
         pos = self._safe_pos()
@@ -301,6 +315,102 @@ class WorkerAgent(Agent):
             p = self.model.rng.choice(nearby)
             if p.unique_id not in self.network_connections: self.network_connections.append(p.unique_id)
             if self.unique_id not in p.network_connections: p.network_connections.append(self.unique_id)
+
+    def _update_aggression(self, local_pollution):
+        """Update aggression from economic stress, trust, pollution, and minority status."""
+        stress = 0.0
+        if self.wealth < self.metabolism * 5: stress += 0.3
+        if not self.employed: stress += 0.2
+        if self.trust_score < 0.3: stress += 0.2
+        stress += min(local_pollution, 5.0) * 0.1
+        # Minority identity stress: fraction of nearby agents with different identity
+        pos = self._safe_pos()
+        if pos is not None:
+            neighbors = self.model.grid.get_neighborhood(pos, moore=True, include_center=False, radius=2)
+            nearby_workers = [a for cell in neighbors for a in self.model.grid.get_cell_list_contents([cell]) if isinstance(a, WorkerAgent)]
+            if nearby_workers:
+                same = sum(1 for w in nearby_workers if _identity_similarity(self.identity, w.identity) > 0.5)
+                minority_stress = 1.0 - same / len(nearby_workers)
+                stress += minority_stress * 0.2
+        # Read local conflict field feedback
+        if pos is not None and hasattr(self.model, 'conflict_grid'):
+            local_conflict = float(self.model.conflict_grid[pos[0], pos[1]])
+            self.aggression += local_conflict * 0.01
+        # Surveillance suppression
+        surv = getattr(self.model, '_surveillance_level', 0.0)
+        effective_agg = self.aggression * (1.0 - surv)
+        # Apply stress update
+        self.aggression = float(np.clip(self.aggression + stress * 0.02 - 0.01, 0.0, 1.0))
+        # Contribute to conflict grid
+        if pos is not None and hasattr(self.model, 'conflict_grid'):
+            identity_tension = 0.0
+            if nearby_workers:
+                avg_sim = sum(_identity_similarity(self.identity, w.identity) for w in nearby_workers) / len(nearby_workers)
+                identity_tension = 1.0 - avg_sim
+            contribution = effective_agg * (1.0 - self.trust_score) * (1.0 + identity_tension) * 0.05
+            self.model.conflict_grid[pos[0], pos[1]] = min(1.0, self.model.conflict_grid[pos[0], pos[1]] + contribution)
+        # Surveillance resentment
+        if surv > 0:
+            self.aggression += surv * (1.0 - self.trust_score) * 0.01
+            self.aggression = min(1.0, self.aggression)
+
+    def _attempt_aggressive_action(self):
+        """Attempt theft or riot based on aggression level using blame model targeting."""
+        rng = self.model.rng; pos = self._safe_pos()
+        if pos is None: return
+        surv = getattr(self.model, '_surveillance_level', 0.0)
+        effective_agg = self.aggression * (1.0 - surv)
+        local_conflict = float(self.model.conflict_grid[pos[0], pos[1]]) if hasattr(self.model, 'conflict_grid') else 0.0
+        crime_prob = effective_agg * max(local_conflict, 0.2)
+        # Theft: aggression > 0.4
+        if effective_agg > 0.4 and rng.random() < crime_prob * 0.3:
+            target = self._select_blame_target(pos)
+            if target is not None:
+                stolen = target.wealth * 0.01 * self.aggression
+                if stolen > 0 and target.wealth > stolen:
+                    target.wealth -= stolen; self.wealth += stolen
+                    self._crime_events += 1
+        # Riot: aggression > 0.7 and local conflict high
+        if effective_agg > 0.7 and local_conflict > 0.5 and rng.random() < effective_agg * 0.1:
+            self._riot_events += 1
+            # Reduce nearby firm production and increase pollution
+            neighbors = self.model.grid.get_neighborhood(pos, moore=True, include_center=True, radius=2)
+            for cell in neighbors:
+                for a in self.model.grid.get_cell_list_contents([cell]):
+                    if isinstance(a, FirmAgent) and not a.defunct:
+                        a.wealth -= a.wealth * 0.02 * self.aggression
+                        from hardware import POLLUTION_CAP as _PC
+                        self.model.pollution_grid[cell[0], cell[1]] = min(_PC, self.model.pollution_grid[cell[0], cell[1]] + 0.5)
+            # Check rebellion threshold
+            if hasattr(self.model, 'legitimacy_grid'):
+                leg = float(self.model.legitimacy_grid[pos[0], pos[1]])
+                if local_conflict > 0.9 and leg < 0.3:
+                    self.model._rebellion_events = getattr(self.model, '_rebellion_events', 0) + 1
+
+    def _select_blame_target(self, pos):
+        """Select target using viewpoint-weighted hostility (blame model)."""
+        neighbors = self.model.grid.get_neighborhood(pos, moore=True, include_center=False, radius=3)
+        candidates = []
+        for cell in neighbors:
+            for a in self.model.grid.get_cell_list_contents([cell]):
+                if a.unique_id == self.unique_id: continue
+                if isinstance(a, (FirmAgent, LandownerAgent, WorkerAgent)):
+                    candidates.append(a)
+        if not candidates: return None
+        # Compute hostility scores using viewpoints, trust, and identity distance
+        best_target = None; best_hostility = -1.0
+        for t in candidates[:20]:  # cap scan for performance
+            trust_to = getattr(t, 'trust_score', 0.5)
+            id_dist = 1.0 - _identity_similarity(self.identity, getattr(t, 'identity', self.identity))
+            # Viewpoint weight: bias toward blaming wealthier targets
+            vw = 0.5
+            if isinstance(t, FirmAgent): vw = self.decision_weights.get("invest", 0.5)
+            elif isinstance(t, LandownerAgent): vw = 0.6
+            elif isinstance(t, WorkerAgent) and t.wealth > self.wealth * 2: vw = 0.3
+            hostility = vw * (1.0 - trust_to) * (1.0 + id_dist)
+            if hostility > best_hostility:
+                best_hostility = hostility; best_target = t
+        return best_target
 
     def _discover_and_trade(self):
         pos = self._safe_pos()
@@ -415,6 +525,7 @@ class WorkerAgent(Agent):
             for a, w in self.decision_weights.items():
                 child.decision_weights[a] = float(np.clip(w + self.model.rng.normal(0, 0.05), 0.01, 0.99))
             child.authority_trust = float(np.clip(self.authority_trust + self.model.rng.normal(0, 0.05), 0.05, 0.95))
+            child.aggression = float(np.clip(self.aggression * 0.5 + self.model.rng.normal(0, 0.05), 0.0, 0.3))
 
     def _choose_governance(self):
         """Choose firm governance type based on observable performance."""
@@ -789,4 +900,59 @@ class LandownerAgent(Agent):
 
     def remove(self):
         if self in self.model.landowners: self.model.landowners.remove(self)
+        super().remove()
+
+
+# ---------------------------------------------------------------------------
+# Enforcement agent
+# ---------------------------------------------------------------------------
+
+class EnforcerAgent(Agent):
+    """
+    State enforcement agent that patrols, detects aggressive workers,
+    and applies punishment. Harsh enforcement generates resentment.
+    """
+    agent_type = AgentType.ENFORCER
+
+    def __init__(self, model):
+        super().__init__(model); rng = model.rng
+        self.aggression = float(rng.beta(2, 2))       # policing intensity / brutality
+        self.force = float(rng.uniform(0.5, 1.0))     # enforcement strength
+        self.legitimacy_bias = float(rng.normal(0, 0.1))  # identity targeting bias
+        self.trust_score = 0.5
+        self.arrests = 0
+        self.defunct = False
+
+    def step(self):
+        if self.pos is None: return
+        pos = (int(self.pos[0]), int(self.pos[1]))
+        surv = getattr(self.model, '_surveillance_level', 0.0)
+        neighbors = self.model.grid.get_neighborhood(pos, moore=True, include_center=True, radius=3)
+        for cell in neighbors:
+            for a in self.model.grid.get_cell_list_contents([cell]):
+                if not isinstance(a, WorkerAgent): continue
+                # Detection probability scales with worker aggression and surveillance
+                detect_prob = a.aggression * max(surv, 0.1)
+                # Identity bias: slightly more likely to detect dissimilar identity
+                id_sim = _identity_similarity(getattr(a, 'identity', ("A","A")), ("A","A"))
+                detect_prob *= (1.0 + abs(self.legitimacy_bias) * (1.0 - id_sim))
+                if self.model.rng.random() < detect_prob and a.aggression > 0.3:
+                    # Punishment
+                    punishment = self.force * a.aggression
+                    fine = a.wealth * 0.02 * punishment
+                    if fine > 0 and a.wealth > fine:
+                        a.wealth -= fine; self.arrests += 1
+                    # Suppress aggression
+                    a.aggression *= max(0.3, 1.0 - punishment)
+                    # But harsh enforcement breeds resentment
+                    a.aggression += self.aggression * 0.05
+                    a.aggression = min(1.0, a.aggression)
+                    # Reduce local legitimacy from brutal enforcement
+                    if hasattr(self.model, 'legitimacy_grid'):
+                        cx, cy = int(cell[0]), int(cell[1])
+                        self.model.legitimacy_grid[cx, cy] -= self.aggression * 0.01
+                        self.model.legitimacy_grid[cx, cy] = max(0.0, self.model.legitimacy_grid[cx, cy])
+
+    def remove(self):
+        if self in self.model.enforcers: self.model.enforcers.remove(self)
         super().remove()
