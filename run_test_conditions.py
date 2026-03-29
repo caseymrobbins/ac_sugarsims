@@ -1,4 +1,3 @@
-```python
 """
 run_test_conditions.py
 ----------------------
@@ -311,4 +310,4 @@ if __name__ == "__main__":
     multiprocessing.freeze_support()
 
     main()
-```
+    
