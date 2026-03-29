@@ -39,11 +39,11 @@ CONDITIONS = [
         label="Vanilla SUM (no features)",
         objective="SUM_RAW",
         use_sevc=False,
-        use_trust=False,
-        trust_noise=0.0,
+        use_trust=true,
+        trust_noise=0.15,
         use_horizon_index=False,
         use_firm_hi=False,
-        gov_type="authoritarian",
+        gov_type="democratic",
     ),
     Condition(
         name="topo_sevc_hi",
@@ -58,12 +58,12 @@ CONDITIONS = [
     ),
 ]
 
-SEEDS = [7, 23, 59, 101, 233, 347, 461, 587, 719, 853]
+SEEDS = [114, 214, 314, 514, 814]
 
-GRID_SIZE = 80
-N_WORKERS = 400
-N_FIRMS = 20
-N_LANDOWNERS = 15
+GRID_SIZE = 100
+N_WORKERS = 200
+N_FIRMS = 10
+N_LANDOWNERS = 10
 
 OUTPUT_DIR = "results/test_conditions"
 
@@ -310,4 +310,4 @@ if __name__ == "__main__":
     multiprocessing.freeze_support()
 
     main()
-    
+
