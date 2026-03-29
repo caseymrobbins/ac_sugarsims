@@ -4,16 +4,15 @@ run_parallel.py
 Launches architecture experiment runs as parallel subprocesses.
 Each run is a separate Python process for genuine multi-core usage.
 
-This version runs the four requested tests:
-  - SUM
-  - SEVC
-  - HI
-  - TOPO
+8 conditions testing SEVC layers, governance types, and mixed populations:
+  C1-C3: Feature staircase (baseline -> SEVC -> HI)
+  C4-C7: Governance comparison (auth, demo_captured, auth_captured, democratic)
+  C8: Mixed 50/50 SEVC/Vanilla competition
 
 Usage:
     python run_parallel.py              # auto-detect cores
     python run_parallel.py --workers 6  # explicit
-    python run_parallel.py --only C1_sum  # single condition
+    python run_parallel.py --only C1_baseline  # single condition
 """
 
 import subprocess
@@ -26,13 +25,16 @@ from concurrent.futures import ProcessPoolExecutor, as_completed
 SEEDS = [101, 202, 303, 404, 505, 606]
 N_STEPS = 2000
 
-# (name, objective, use_sevc, use_innovation, use_trust, trust_noise, use_hi, mixed_sevc_ratio)
+# (name, objective, use_sevc, use_innovation, use_trust, trust_noise, use_hi, use_firm_hi, gov_type, mixed_sevc_ratio)
 CONDITIONS = [
-    ("C1_sum",           "SUM_RAW", False, True,  False, 0.0,  False, 1.0),
-    ("C2_sevc_sum",      "SUM_RAW", True,  True,  False, 0.0,  False, 1.0),
-    ("C3_sevc_hi_sum",   "SUM_RAW", True,  True,  False, 0.0,  True,  1.0),
-    ("C4_full_topo",     "TOPO_X",  True,  True,  True,  0.1,  True,  1.0),
-    ("C7_mixed_adoption","SUM_RAW", True,  True,  True,  0.1,  True,  0.5),
+    ("C1_baseline",       "SUM_RAW", False, True,  False, 0.0, False, False, "authoritarian",  1.0),
+    ("C2_sevc",           "SUM_RAW", True,  True,  False, 0.0, False, False, "authoritarian",  1.0),
+    ("C3_sevc_hi",        "SUM_RAW", True,  True,  False, 0.0, True,  True,  "authoritarian",  1.0),
+    ("C4_full_auth",      "SUM_RAW", True,  True,  True,  0.1, True,  True,  "authoritarian",  1.0),
+    ("C5_demo_captured",  "SUM_RAW", True,  True,  True,  0.1, True,  True,  "demo_captured",  1.0),
+    ("C6_auth_captured",  "SUM_RAW", True,  True,  True,  0.1, True,  True,  "auth_captured",  1.0),
+    ("C7_democratic",     "SUM_RAW", True,  True,  True,  0.1, True,  True,  "democratic",     1.0),
+    ("C8_mixed",          "SUM_RAW", True,  True,  True,  0.1, True,  True,  "democratic",     0.5),
 ]
 
 
@@ -118,6 +120,8 @@ USE_INNOVATION = @@USE_INNOVATION@@
 USE_TRUST = @@USE_TRUST@@
 TRUST_NOISE = @@TRUST_NOISE@@
 USE_HI = @@USE_HI@@
+USE_FIRM_HI = @@USE_FIRM_HI@@
+GOV_TYPE = "@@GOV_TYPE@@"
 MIXED_SEVC_RATIO = @@MIXED_SEVC_RATIO@@
 SEED = @@SEED@@
 N_STEPS = @@N_STEPS@@
@@ -135,6 +139,8 @@ model.use_innovation = USE_INNOVATION
 model.use_trust = USE_TRUST
 model.trust_noise = TRUST_NOISE
 model.use_horizon_index = USE_HI
+model.use_firm_hi = USE_FIRM_HI
+model.gov_type = GOV_TYPE
 
 if not USE_SEVC:
     for firm in model.firms:
@@ -142,6 +148,12 @@ if not USE_SEVC:
         if hasattr(firm, 'strategy_weights'):
             for k in firm.strategy_weights:
                 firm.strategy_weights[k] = 0.2
+else:
+    from collections import deque as _dq
+    for firm in model.firms:
+        if not hasattr(firm, 'floor_history'):
+            firm.floor_history = _dq(maxlen=100)
+            firm.horizon_index = 1.0
 
 if MIXED_SEVC_RATIO < 1.0 and USE_SEVC:
     n_vanilla = int(len(model.firms) * (1.0 - MIXED_SEVC_RATIO))
@@ -154,6 +166,12 @@ if MIXED_SEVC_RATIO < 1.0 and USE_SEVC:
             if hasattr(firm, 'strategy_weights'):
                 for k in firm.strategy_weights:
                     firm.strategy_weights[k] = 0.2
+
+if GOV_TYPE == "demo_captured" and hasattr(model, 'news_firms'):
+    for nf in model.news_firms:
+        if hasattr(nf, 'accuracy') and nf.accuracy > 0.5:
+            nf.accuracy = 0.3; nf.audience_capture = 0.6
+            break
 
 if not USE_TRUST:
     model._trust_frozen = True
@@ -182,6 +200,8 @@ df["use_innovation"] = USE_INNOVATION
 df["use_trust"] = USE_TRUST
 df["trust_noise"] = TRUST_NOISE
 df["use_hi"] = USE_HI
+df["use_firm_hi"] = USE_FIRM_HI
+df["gov_type"] = GOV_TYPE
 df["seed"] = SEED
 outpath = "results/architecture/raw_data/" + COND_NAME + "_seed" + str(SEED) + ".parquet"
 df.to_parquet(outpath, index=False)
@@ -191,7 +211,7 @@ print("Saved: " + outpath)
 
 _SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 
-def make_script(name, objective, use_sevc, use_innovation, use_trust, trust_noise, use_hi, mixed_sevc_ratio, seed, n_steps):
+def make_script(name, objective, use_sevc, use_innovation, use_trust, trust_noise, use_hi, use_firm_hi, gov_type, mixed_sevc_ratio, seed, n_steps):
     """Generate a self-contained run script with config injected."""
     s = SCRIPT_TEMPLATE
     s = s.replace("@@CWD@@", _SCRIPT_DIR)
@@ -202,6 +222,8 @@ def make_script(name, objective, use_sevc, use_innovation, use_trust, trust_nois
     s = s.replace("@@USE_TRUST@@", str(use_trust))
     s = s.replace("@@TRUST_NOISE@@", str(trust_noise))
     s = s.replace("@@USE_HI@@", str(use_hi))
+    s = s.replace("@@USE_FIRM_HI@@", str(use_firm_hi))
+    s = s.replace("@@GOV_TYPE@@", str(gov_type))
     s = s.replace("@@MIXED_SEVC_RATIO@@", str(mixed_sevc_ratio))
     s = s.replace("@@SEED@@", str(seed))
     s = s.replace("@@N_STEPS@@", str(n_steps))
@@ -210,11 +232,12 @@ def make_script(name, objective, use_sevc, use_innovation, use_trust, trust_nois
 
 def run_one(job):
     """Write script, run as subprocess, return result."""
-    name, objective, use_sevc, use_innovation, use_trust, trust_noise, use_hi, mixed_sevc_ratio, seed, n_steps = job
+    name, objective, use_sevc, use_innovation, use_trust, trust_noise, use_hi, use_firm_hi, gov_type, mixed_sevc_ratio, seed, n_steps = job
     label = name + "/seed" + str(seed)
 
     script = make_script(name, objective, use_sevc, use_innovation,
-                         use_trust, trust_noise, use_hi, mixed_sevc_ratio, seed, n_steps)
+                         use_trust, trust_noise, use_hi, use_firm_hi, gov_type,
+                         mixed_sevc_ratio, seed, n_steps)
 
     script_path = "/tmp/run_" + name + "_s" + str(seed) + ".py"
     with open(script_path, "w") as f:
@@ -278,12 +301,14 @@ def main():
     for cond in CONDITIONS:
         if args.only and cond[0] != args.only:
             continue
-        name, obj, sevc, inno, trust, noise, hi, mixed_ratio = cond
+        name, obj, sevc, inno, trust, noise, hi, firm_hi, gov, mixed_ratio = cond
         flags = []
         if sevc: flags.append("SEVC")
         if inno: flags.append("Inno")
         if trust: flags.append("Trust(" + str(noise) + ")")
         if hi: flags.append("HI")
+        if firm_hi: flags.append("FirmHI")
+        flags.append("gov=" + gov)
         if mixed_ratio < 1.0: flags.append("Mix(" + str(mixed_ratio) + ")")
         print("  " + name + ": " + obj + " [" + ", ".join(flags) + "]")
     print()
