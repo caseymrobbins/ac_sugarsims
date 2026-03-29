@@ -175,16 +175,20 @@ def update_weights_from_experience(weights: Dict[str, float],
 class InfoSignal:
     """
     A packet of information produced by a news firm.
-    Contains weight modifications and a trust level.
+    Contains weight modifications, trust level, and optional scapegoating.
     """
-    __slots__ = ['weight_deltas', 'trust', 'source_id', 'hops']
+    __slots__ = ['weight_deltas', 'trust', 'source_id', 'hops',
+                 'scapegoat_identity', 'blame_target']
 
     def __init__(self, weight_deltas: Dict[str, float], trust: float,
-                 source_id: int, hops: int = 0):
+                 source_id: int, hops: int = 0,
+                 scapegoat_identity=None, blame_target: Optional[str] = None):
         self.weight_deltas = weight_deltas   # {action: delta} to apply to weights
         self.trust = trust                    # 0-1, decays with distance
         self.source_id = source_id
         self.hops = hops
+        self.scapegoat_identity = scapegoat_identity  # identity tuple to blame
+        self.blame_target = blame_target  # "workers", "firms", "government", etc.
 
     def decay(self) -> 'InfoSignal':
         """Return a copy with decayed trust for next hop."""
@@ -193,6 +197,8 @@ class InfoSignal:
             trust=self.trust * (1 - TRUST_DECAY_PER_HOP),
             source_id=self.source_id,
             hops=self.hops + 1,
+            scapegoat_identity=self.scapegoat_identity,
+            blame_target=self.blame_target,
         )
 
 
@@ -327,10 +333,24 @@ class NewsFirm(Agent):
         # Trust level based on capital investment and reputation
         base_trust = min(0.9, 0.3 + self.capital_stock * 0.001 + self.accuracy * 0.3)
 
+        # Scapegoating: captured media or high propaganda triggers blame narratives
+        scapegoat_identity = None; blame_target = None
+        prop_budget = getattr(self.model, '_propaganda_budget', 0.0) if hasattr(self.model, '_propaganda_budget') else 0.0
+        if self.captured_by_cartel is not None or prop_budget > 1.0:
+            # Economic crisis indicator: high unemployment
+            n_workers = max(len(self.model.workers), 1)
+            unemp = 1 - sum(1 for w in self.model.workers if w.employed) / n_workers
+            if unemp > 0.15 or self.captured_by_cartel is not None:
+                from agents import IDENTITY_TYPES
+                scapegoat_identity = IDENTITY_TYPES[rng.integers(len(IDENTITY_TYPES))]
+                blame_target = rng.choice(["workers", "immigrants", "government"])
+
         return InfoSignal(
             weight_deltas=signal_deltas,
             trust=base_trust,
             source_id=self.unique_id,
+            scapegoat_identity=scapegoat_identity,
+            blame_target=blame_target,
         )
 
     def _observe_ground_truth(self) -> Dict[str, float]:

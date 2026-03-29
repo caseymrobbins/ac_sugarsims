@@ -27,6 +27,8 @@ from scipy import stats
 if TYPE_CHECKING:
     from environment import EconomicModel
 
+from agents import _identity_similarity
+
 
 # ---------------------------------------------------------------------------
 # Diversity / identity metrics
@@ -365,6 +367,56 @@ def collect_step_metrics(model: "EconomicModel") -> Dict[str, Any]:
     m["hybrid_fraction"] = _hybrid_fraction(model.workers)
     m["identity_segregation"] = _identity_segregation(model)
 
+    # Conflict, aggression, and enforcement metrics
+    if model.workers:
+        agg_vals = np.array([getattr(w, 'aggression', 0.0) for w in model.workers], dtype=np.float64)
+        m["mean_aggression"] = float(np.mean(agg_vals))
+        m["max_aggression"] = float(np.max(agg_vals))
+    else:
+        m["mean_aggression"] = 0.0; m["max_aggression"] = 0.0
+    m["crime_events"] = getattr(model, '_total_crime_events', 0)
+    m["riot_events"] = getattr(model, '_total_riot_events', 0)
+    m["rebellion_events"] = getattr(model, '_rebellion_events', 0)
+    if hasattr(model, 'conflict_grid'):
+        cg = model.conflict_grid
+        m["mean_conflict"] = float(np.mean(cg))
+        m["max_conflict"] = float(np.max(cg))
+        m["conflict_variance"] = float(np.var(cg))
+        m["n_conflict_hotspots"] = int(np.sum(cg > 0.5))
+    else:
+        m["mean_conflict"] = 0.0; m["max_conflict"] = 0.0
+        m["conflict_variance"] = 0.0; m["n_conflict_hotspots"] = 0
+    if hasattr(model, 'legitimacy_grid'):
+        lg = model.legitimacy_grid
+        m["legitimacy_mean"] = float(np.mean(lg))
+        m["legitimacy_min"] = float(np.min(lg))
+        m["legitimacy_variance"] = float(np.var(lg))
+        m["n_low_legitimacy"] = int(np.sum(lg < 0.3))
+    else:
+        m["legitimacy_mean"] = 0.7; m["legitimacy_min"] = 0.7
+        m["legitimacy_variance"] = 0.0; m["n_low_legitimacy"] = 0
+    # Enforcement metrics
+    m["n_enforcers"] = len(getattr(model, 'enforcers', []))
+    m["total_arrests"] = sum(getattr(e, 'arrests', 0) for e in getattr(model, 'enforcers', []))
+    m["surveillance_level"] = getattr(model, '_surveillance_level', 0.0)
+    # Identity conflict index: mean(aggression * (1 - identity_similarity_to_neighbors))
+    if model.workers:
+        id_conflict_vals = []
+        for w in model.workers[:100]:  # sample for performance
+            agg = getattr(w, 'aggression', 0.0)
+            if w.pos is not None:
+                neighbors = model.grid.get_neighborhood(
+                    (int(w.pos[0]), int(w.pos[1])), moore=True, include_center=False, radius=2)
+                nearby = [a for cell in neighbors[:8] for a in model.grid.get_cell_list_contents([cell])
+                         if hasattr(a, 'identity') and a.unique_id != w.unique_id]
+                if nearby:
+                    avg_sim = sum(_identity_similarity(w.identity, getattr(n, 'identity', w.identity))
+                                for n in nearby[:5]) / min(len(nearby), 5)
+                    id_conflict_vals.append(agg * (1.0 - avg_sim))
+        m["identity_conflict_index"] = float(np.mean(id_conflict_vals)) if id_conflict_vals else 0.0
+    else:
+        m["identity_conflict_index"] = 0.0
+
     return m
 
 
@@ -393,6 +445,7 @@ def collect_animation_frame(model: "EconomicModel") -> Dict[str, Any]:
                 "employed": w.employed,
                 "skill": float(w.skill),
                 "in_debt": w.debt > 0,
+                "aggression": float(getattr(w, 'aggression', 0.0)),
             })
     frame["workers"] = workers_data
 
@@ -429,6 +482,10 @@ def collect_animation_frame(model: "EconomicModel") -> Dict[str, Any]:
     frame["food_grid"] = model.food_grid[::ds, ::ds].tolist()
     frame["pollution_grid"] = model.pollution_grid[::ds, ::ds].tolist()
     frame["water_grid"] = model.water_grid[::ds, ::ds].tolist()
+    if hasattr(model, 'conflict_grid'):
+        frame["conflict_grid"] = model.conflict_grid[::ds, ::ds].tolist()
+    if hasattr(model, 'legitimacy_grid'):
+        frame["legitimacy_grid"] = model.legitimacy_grid[::ds, ::ds].tolist()
 
     # Key aggregate metrics for overlay display
     if model.metrics_history:
@@ -449,6 +506,12 @@ def collect_animation_frame(model: "EconomicModel") -> Dict[str, Any]:
             "election_winner": latest.get("election_winner", "none"),
             "sevc_adoption_rate": latest.get("sevc_adoption_rate", 0),
             "total_pollution": latest.get("total_pollution", 0),
+            "mean_aggression": latest.get("mean_aggression", 0),
+            "crime_events": latest.get("crime_events", 0),
+            "riot_events": latest.get("riot_events", 0),
+            "mean_conflict": latest.get("mean_conflict", 0),
+            "legitimacy_mean": latest.get("legitimacy_mean", 0.7),
+            "identity_conflict_index": latest.get("identity_conflict_index", 0),
         }
 
     return frame
@@ -660,6 +723,12 @@ def episode_summary(metrics_history: List[Dict]) -> Dict[str, Any]:
         "trust_firm_mean", "trust_firm_min",
         "trust_bank_mean", "trust_news_mean", "trust_news_capture_gap",
         "trust_landowner_mean", "trust_planner", "trust_institutional",
+        "mean_aggression", "max_aggression",
+        "crime_events", "riot_events", "rebellion_events",
+        "mean_conflict", "max_conflict", "conflict_variance", "n_conflict_hotspots",
+        "legitimacy_mean", "legitimacy_min", "legitimacy_variance", "n_low_legitimacy",
+        "n_enforcers", "total_arrests", "surveillance_level",
+        "identity_conflict_index",
     ]
     for key in scalar_keys:
         summary[key] = avg(key)

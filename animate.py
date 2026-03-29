@@ -296,7 +296,9 @@ input[type="range"] { flex: 1; accent-color: #e94560; }
             <div class="legend-item"><span class="legend-sq" style="background:#9b59b6"></span> Vanilla firm</div>
             <div class="legend-item"><span class="legend-sq" style="background:#e94560"></span> Cartel firm</div>
             <div class="legend-item"><span class="legend-sq" style="background:#e67e22;border:2px solid #c0392b"></span> Declining firm (HI&lt;0.7)</div>
+            <div class="legend-item"><span class="legend-dot" style="background:#ff6347"></span> Aggressive worker (&gt;0.5)</div>
             <div class="legend-item"><span style="color:#ff634780">&#9608;</span> Pollution</div>
+            <div class="legend-item"><span style="color:#ff8c0060">&#9608;</span> Conflict zone</div>
         </div>
     </div>
 </div>
@@ -376,6 +378,23 @@ function drawFrame(idx) {
         }
     }
 
+    // Conflict overlay (orange, before agents)
+    if (frame.conflict_grid) {
+        const cg = frame.conflict_grid;
+        const rows = cg.length, cols = cg[0].length;
+        const cw = W / cols, ch = H / rows;
+        for (let r = 0; r < rows; r++) {
+            for (let c = 0; c < cols; c++) {
+                const v = cg[r][c];
+                if (v > 0.05) {
+                    const a = Math.min(v, 0.5);
+                    ctx.fillStyle = `rgba(255,140,0,${a})`;
+                    ctx.fillRect(r * cw, (cols - 1 - c) * ch, cw, ch);
+                }
+            }
+        }
+    }
+
     // Workers
     const workers = frame.workers || [];
     for (const w of workers) {
@@ -386,7 +405,10 @@ function drawFrame(idx) {
         ctx.beginPath();
         ctx.arc(x, y, radius, 0, Math.PI * 2);
 
-        if (w.in_debt) {
+        const agg = w.aggression || 0;
+        if (agg > 0.7) {
+            ctx.fillStyle = '#ff6347';  // aggressive = tomato red
+        } else if (w.in_debt) {
             ctx.fillStyle = '#f1c40f';
         } else if (w.employed) {
             ctx.fillStyle = wealthColor(w.wealth);
@@ -394,6 +416,12 @@ function drawFrame(idx) {
             ctx.fillStyle = '#e74c3c';
         }
         ctx.fill();
+        // Aggressive border ring
+        if (agg > 0.5) {
+            ctx.strokeStyle = '#ff4500';
+            ctx.lineWidth = 0.8;
+            ctx.stroke();
+        }
     }
 
     // Firms
@@ -458,6 +486,12 @@ function drawFrame(idx) {
         row('Election', elecLabel),
         row('SEVC Adopt', pct(overlay.sevc_adoption_rate)),
         row('Pollution', fmt(overlay.total_pollution, 0)),
+        '<div style="height:8px"></div>',
+        row('Aggression', fmt(overlay.mean_aggression, 3), cls(overlay.mean_aggression, 0.2, 0.5)),
+        row('Conflict', fmt(overlay.mean_conflict, 3), cls(overlay.mean_conflict, 0.1, 0.4)),
+        row('Legitimacy', fmt(overlay.legitimacy_mean, 3), clsHi(overlay.legitimacy_mean, 0.6, 0.3)),
+        row('Crime', overlay.crime_events || 0, (overlay.crime_events || 0) > 5 ? 'bad' : 'good'),
+        row('Riots', overlay.riot_events || 0, (overlay.riot_events || 0) > 0 ? 'bad' : 'good'),
         '<div style="height:8px"></div>',
         row('Planner Trust', fmt(overlay.trust_planner, 3), clsHi(overlay.trust_planner, 0.5, 0.25)),
         row('System Trust', fmt(overlay.trust_institutional, 3), clsHi(overlay.trust_institutional, 0.4, 0.2)),
