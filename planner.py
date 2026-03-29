@@ -35,6 +35,21 @@ ADAPT_NOISE = 0.02
 REWARD_CLIP = 50.0
 REWARD_BASELINE_DECAY = 0.9
 
+# ---------------------------------------------------------------------------
+# Government types (Task 8)
+# ---------------------------------------------------------------------------
+
+ELECTION_CYCLE = 100  # steps between elections
+
+# Election platforms: each maps to instrument floor constraints
+PLATFORM_CONSTRAINTS = {
+    "redistribution": {"ubi_payment": 1.0, "tax_rate_firm": 0.10, "inheritance_tax": 0.10},
+    "growth":         {"tax_rate_worker": 0.0, "tax_rate_firm": 0.0, "infrastructure_investment": 1.0},
+    "education":      {"education_investment": 1.0, "min_wage": 3.0},
+    "environment":    {"pollution_tax": 0.5, "cleanup_investment": 1.0},
+    "security":       {"healthcare_investment": 1.0, "agriculture_investment": 1.0},
+}
+
 INSTRUMENT_SPEC: List[Tuple[str, float, float, float]] = [
     ("tax_rate_worker",           0.05,  0.0,   0.80),
     ("tax_rate_firm",             0.10,  0.0,   0.90),
@@ -149,9 +164,18 @@ class PlannerAgent(Agent):
         self._current_perturbations = None; self._perturbation_fitnesses = []
         self._perturbation_idx = 0; self._eval_phase = False
         self._steps_since_update = 0; self._total_updates = 0
+        # Democratic government state (Task 8)
+        self._last_election_winner = "none"
+        self._vote_shares = {}
+        self._active_constraints = {}  # instrument floors from election
+        self._steps_since_election = 0
 
     def step(self):
-        self._steps_since_update += 1; self._apply_investments(); self._redistribute()
+        self._steps_since_update += 1; self._steps_since_election += 1
+        gov = getattr(self.model, 'gov_type', 'authoritarian')
+        if gov in ('democratic', 'demo_captured') and self._steps_since_election >= ELECTION_CYCLE:
+            self._run_election(); self._steps_since_election = 0
+        self._apply_investments(); self._redistribute()
         if self._steps_since_update >= POLICY_UPDATE_INTERVAL: self._learning_step(); self._steps_since_update = 0
 
     def _observe_state(self):
@@ -168,7 +192,12 @@ class PlannerAgent(Agent):
         if self.model.landowners:
             lo_w = np.array([lo.wealth for lo in self.model.landowners]); lo_t = lo_w.sum()
             if lo_t > 0: hhi = max(hhi, float(np.sum((lo_w / lo_t) ** 2)))
-        ed = min(0.5, hhi * 0.8)
+        # Elite distortion: authoritarian captured planner sees distorted reality
+        gov = getattr(self.model, 'gov_type', 'authoritarian')
+        if gov == 'auth_captured':
+            ed = min(0.5, hhi * 0.8)
+        else:
+            ed = 0.0
         true_mw = max(worker_w.mean(), 0.0); true_minw = max(worker_w.min(), 0.0)
         true_unemp = 1.0 - n_employed / max(n_workers, 1)
         true_poll = float(np.mean(self.model.pollution_grid))
@@ -230,7 +259,56 @@ class PlannerAgent(Agent):
         if np.any(np.isnan(combined)): combined = np.full(POLICY_DIM, 0.5)
         actual = INSTRUMENT_LO + combined * INSTRUMENT_RANGE
         for i, name in enumerate(INSTRUMENT_NAMES): self.policy[name] = float(actual[i])
+        # Apply democratic election constraints as floors
+        for instr, floor in self._active_constraints.items():
+            if instr in self.policy:
+                self.policy[instr] = max(self.policy[instr], floor)
         self._total_updates += 1
+
+    def _run_election(self):
+        """Workers vote on policy direction based on their bottleneck."""
+        workers = self.model.workers
+        if not workers:
+            return
+        gov = getattr(self.model, 'gov_type', 'authoritarian')
+        votes = {"redistribution": 0, "growth": 0, "education": 0, "environment": 0, "security": 0}
+        rng = self.model.rng
+        for w in workers:
+            # Compute worker bottleneck (POLI dimensions)
+            p_score = min(1.0, w.wealth / 100.0)  # P: resources
+            o_score = w.skill  # O: options/skills
+            l_score = (float(w.employed) + float(w.debt < 100) + float(len(w.network_connections) > 0)) / 3.0  # L: levers
+            i_score = min(1.0, max(0.0, (w.income_last_step - w.income_prev_step + 5.0) / 10.0))  # I: impact
+
+            bottleneck_scores = {"redistribution": p_score, "education": o_score,
+                                 "growth": l_score, "security": i_score}
+            # Environment vote: triggered by local pollution
+            if w.pos is not None:
+                local_poll = float(self.model.pollution_grid[int(w.pos[0]), int(w.pos[1])])
+                env_score = max(0.0, 1.0 - local_poll * 0.1)
+                bottleneck_scores["environment"] = env_score
+
+            # Find worst dimension
+            platform = min(bottleneck_scores, key=bottleneck_scores.get)
+
+            # Captured democracy: misidentify bottleneck based on epistemic drift
+            if gov == "demo_captured":
+                # Workers with drifted weights may misidentify their bottleneck
+                # Use distance from neutral weights (0.5) as drift proxy
+                weight_vals = list(w.decision_weights.values())
+                drift = float(np.mean([abs(v - 0.5) for v in weight_vals]))
+                # Higher drift = more likely to vote for wrong platform
+                if rng.random() < drift * 2.0:
+                    platform = list(votes.keys())[rng.integers(len(votes))]
+
+            votes[platform] += 1
+
+        # Tally and determine winner
+        total = max(sum(votes.values()), 1)
+        self._vote_shares = {k: v / total for k, v in votes.items()}
+        winner = max(votes, key=votes.get)
+        self._last_election_winner = winner
+        self._active_constraints = dict(PLATFORM_CONSTRAINTS.get(winner, {}))
 
     def apply_tax(self, agent):
         from agents import WorkerAgent, FirmAgent, LandownerAgent

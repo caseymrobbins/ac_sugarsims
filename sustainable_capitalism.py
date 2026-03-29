@@ -99,16 +99,65 @@ def compute_stakeholder_scores(firm: "FirmAgent") -> Dict[str, float]:
     return result
 
 
+def compute_firm_horizon_index(firm: "FirmAgent") -> float:
+    """
+    Firm-level Horizon Index: detects sugar-rush firm behavior.
+
+    Compares recent floor trend against longer-term baseline.
+    A firm with rising profit but declining floor is consuming
+    its foundations (the Boeing pattern).
+
+    Returns a value in [0, 1] where:
+      1.0 = floor is stable or improving (sustainable)
+      0.0 = floor is in rapid decline (sugar rush, collapse imminent)
+    """
+    history = firm.floor_history
+    n = len(history)
+    if n < 10:
+        return 1.0  # not enough data
+
+    # Recent window: last 20 steps (or available)
+    recent_len = min(20, n)
+    recent_mean = sum(list(history)[-recent_len:]) / recent_len
+
+    # Baseline window: last 60-100 steps (or full history)
+    baseline_mean = sum(history) / n
+
+    # Ratio: recent vs baseline
+    ratio = recent_mean / max(baseline_mean, 0.01)
+    firm_hi = min(1.0, max(0.0, ratio))
+
+    # Acceleration penalty: is the decline accelerating?
+    if n >= 20:
+        last_10 = sum(list(history)[-10:]) / 10
+        prev_10 = sum(list(history)[-20:-10]) / 10
+        if prev_10 > 0.01:
+            accel_ratio = last_10 / max(prev_10, 0.01)
+            if accel_ratio < 1.0:
+                firm_hi *= max(0.5, accel_ratio)
+
+    return float(min(1.0, max(0.0, firm_hi)))
+
+
 def sustainable_learn_from_outcome(firm: "FirmAgent", strategy: str, profit_change: float):
     if strategy not in firm.strategy_weights:
         return
     scores = compute_stakeholder_scores(firm)
     current_floor = scores['floor']
+    # Track floor history and compute firm HI
+    firm.floor_history.append(current_floor)
+    firm.horizon_index = compute_firm_horizon_index(firm)
     if not hasattr(firm, '_prev_floor'):
         firm._prev_floor = current_floor
         firm._prev_scores = scores
     floor_change = current_floor - firm._prev_floor
-    adj = 0.02 * np.tanh(floor_change / max(current_floor + 0.1, 0.1))
+    # Firm HI modulates learning: declining firms get dampened signal
+    use_firm_hi = getattr(firm.model, 'use_firm_hi', False)
+    if use_firm_hi:
+        effective_signal = floor_change * firm.horizon_index
+    else:
+        effective_signal = floor_change
+    adj = 0.02 * np.tanh(effective_signal / max(current_floor + 0.1, 0.1))
     cur = firm.strategy_weights[strategy]
     firm.strategy_weights[strategy] = float(np.clip(cur + adj, 0.01, 0.99))
     if firm.profit < 0:
@@ -168,6 +217,16 @@ def sustainable_choose_strategy(firm: "FirmAgent") -> str:
         context["acquire"] *= 0.1
         # Shift green_rd_priority toward 0.0 (productivity R&D)
         firm.green_rd_priority = max(0.0, firm.green_rd_priority - 0.03)
+
+    # Firm HI intervention: when firm is on unsustainable trajectory,
+    # boost floor-raising strategies and suppress extractive ones
+    use_firm_hi = getattr(firm.model, 'use_firm_hi', False)
+    if use_firm_hi and firm.horizon_index < 0.7:
+        context["invest_capital"] *= 2.0
+        context["raise_wages"] *= 2.0
+        context["cut_wages"] *= 0.3
+        context["downsize"] *= 0.3
+        context["pollute_more"] *= 0.3
 
     strategy_scores = {}
     for action, weight in firm.strategy_weights.items():

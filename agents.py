@@ -5,6 +5,7 @@ Innovation: firms can invest in R&D, tech_level multiplies production.
 """
 from __future__ import annotations
 import contextlib
+from collections import deque
 from enum import Enum, auto
 from typing import TYPE_CHECKING, List, Optional, Dict
 from sustainable_capitalism import sustainable_learn_from_outcome, sustainable_choose_strategy, compute_stakeholder_scores
@@ -517,6 +518,9 @@ class FirmAgent(Agent):
         self.green_rd_priority = 0.5
         # Per-firm SEVC flag (Task 4): default True (SEVC behavior)
         self.is_sevc = True
+        # Firm-level Horizon Index (Task 7): ring buffer of floor scores
+        self.floor_history = deque(maxlen=100)
+        self.horizon_index = 1.0
         # Innovation
         init_firm_tech(self)
 

@@ -273,8 +273,21 @@ def collect_step_metrics(model: "EconomicModel") -> Dict[str, Any]:
     except ImportError:
         pass
 
-    # Green R&D and pollution metrics (Task 2)
+    # Firm-level Horizon Index metrics (Task 7)
     active_firms_list = [f for f in model.firms if not f.defunct]
+    if active_firms_list:
+        firm_his = [getattr(f, 'horizon_index', 1.0) for f in active_firms_list]
+        m["mean_firm_hi"] = float(np.mean(firm_his))
+        m["min_firm_hi"] = float(np.min(firm_his))
+        m["n_firms_declining"] = int(sum(1 for h in firm_his if h < 0.7))
+        m["n_firms_critical"] = int(sum(1 for h in firm_his if h < 0.4))
+    else:
+        m["mean_firm_hi"] = 1.0
+        m["min_firm_hi"] = 1.0
+        m["n_firms_declining"] = 0
+        m["n_firms_critical"] = 0
+
+    # Green R&D and pollution metrics (Task 2)
     if active_firms_list:
         m["mean_green_rd_priority"] = float(np.mean([
             getattr(f, 'green_rd_priority', 0.5) for f in active_firms_list
@@ -303,6 +316,13 @@ def collect_step_metrics(model: "EconomicModel") -> Dict[str, Any]:
         m["vanilla_mean_profit"] = 0.0
         m["sevc_mean_workers"] = 0.0
         m["vanilla_mean_workers"] = 0.0
+
+    # Government / election metrics (Task 8)
+    m["gov_type"] = getattr(model, 'gov_type', 'authoritarian')
+    planner = model.planner
+    m["election_winner"] = getattr(planner, '_last_election_winner', 'none')
+    for platform in ('redistribution', 'growth', 'education', 'environment', 'security'):
+        m["voter_turnout_" + platform] = getattr(planner, '_vote_shares', {}).get(platform, 0.0)
 
     # Horizon Index
     try:
@@ -623,7 +643,10 @@ def episode_summary(metrics_history: List[Dict]) -> Dict[str, Any]:
         "sevc_adoption_rate", "sevc_market_share",
         "sevc_mean_profit", "vanilla_mean_profit",
         "sevc_mean_workers", "vanilla_mean_workers",
+        "mean_firm_hi", "min_firm_hi", "n_firms_declining", "n_firms_critical",
         "horizon_index",
+        "election_winner", "voter_turnout_redistribution", "voter_turnout_growth",
+        "voter_turnout_education", "voter_turnout_environment", "voter_turnout_security",
         "mean_worker_age", "population_growth_rate",
         "n_active_loans", "mean_loan_rate",
         "trust_worker_mean", "trust_worker_min", "trust_worker_std",

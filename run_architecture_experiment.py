@@ -1,28 +1,30 @@
 """
 run_architecture_experiment.py
 ------------------------------
-Tests the contribution of each architectural layer:
+Tests the contribution of each architectural layer and governance type:
 
-  Condition 1: Vanilla firms, no trust, no HI, SUM_RAW
-  Condition 2: SEVC firms, no trust, no HI, SUM_RAW
-  Condition 3: SEVC firms, no trust, HI, SUM_RAW
-  Condition 4: SEVC firms, fuzzy trust (0.1), no HI, SUM_RAW
-  Condition 5: SEVC firms, fuzzy trust (0.1), HI, SUM_RAW
-  Condition 6: SEVC firms, fuzzy trust (0.1), HI, TOPO_X
+  C1: Vanilla baseline (no SEVC, no trust, authoritarian)
+  C2: SEVC only
+  C3: SEVC + HI + Firm HI
+  C4: Full stack, authoritarian government
+  C5: Full stack, captured democracy (demo_captured)
+  C6: Full stack, captured authoritarian (auth_captured)
+  C7: Full stack, clean democracy
+  C8: Mixed 50/50 SEVC/Vanilla + democracy
 
-Each condition x 3 seeds (42, 137, 2024) = 18 runs at 3000 steps.
+Each condition x 3 seeds (42, 137, 2024) = 24 runs at 3000 steps.
 
-The staircase isolates each layer's contribution:
-  1 vs 2: What does SEVC do alone?
-  2 vs 3: What does HI add to SEVC?
-  2 vs 4: What does fuzzy trust add to SEVC?
-  4 vs 5: What does HI add under realistic trust?
-  5 vs 6: What does a smart planner add to the full realistic stack?
+Staircase isolates each layer:
+  C1 vs C2: SEVC effect
+  C2 vs C3: HI + Firm HI effect
+  C3 vs C4: Trust effect under authoritarian gov
+  C4 vs C7: Authoritarian vs democratic
+  C4 vs C6: Authoritarian vs auth_captured (elite distortion)
+  C7 vs C5: Democratic vs demo_captured (media capture)
+  C8: Mixed population competition dynamics
 
 Usage:
     python run_architecture_experiment.py
-
-    # Or with parallelism (recommended):
     python run_architecture_experiment.py --parallel 4
 
 Output:
@@ -57,17 +59,20 @@ class Condition:
     use_trust: bool          # trust system active
     trust_noise: float       # noise on trust reads (0 = perfect, 0.1 = fuzzy)
     use_horizon_index: bool  # HI coupled to planner objective
+    use_firm_hi: bool        # per-firm horizon index tracking
+    gov_type: str            # authoritarian | auth_captured | democratic | demo_captured
     mixed_sevc_ratio: float = 1.0  # fraction of firms that are SEVC (1.0 = all)
 
 
 CONDITIONS = [
-    Condition("C1_vanilla_sum",     "Vanilla + SUM",         "SUM_RAW", False, False, 0.0,  False),
-    Condition("C2_sevc_sum",        "SEVC + SUM",            "SUM_RAW", True,  False, 0.0,  False),
-    Condition("C3_sevc_hi_sum",     "SEVC + HI + SUM",       "SUM_RAW", True,  False, 0.0,  True),
-    Condition("C4_sevc_trust_sum",  "SEVC + Trust(.1) + SUM","SUM_RAW", True,  True,  0.1,  False),
-    Condition("C5_sevc_trust_hi_sum","SEVC+Trust(.1)+HI+SUM","SUM_RAW", True,  True,  0.1,  True),
-    Condition("C6_full_topo",       "SEVC+Trust(.1)+HI+TOPO","TOPO_X",  True,  True,  0.1,  True),
-    Condition("C7_mixed_adoption", "Mixed: 50/50 SEVC/Vanilla", "SUM_RAW", True, True, 0.1, True, mixed_sevc_ratio=0.5),
+    Condition("C1_baseline",       "Vanilla baseline",       "SUM_RAW", False, False, 0.0, False, False, "authoritarian"),
+    Condition("C2_sevc",           "SEVC only",              "SUM_RAW", True,  False, 0.0, False, False, "authoritarian"),
+    Condition("C3_sevc_hi",        "SEVC + HI + FirmHI",     "SUM_RAW", True,  False, 0.0, True,  True,  "authoritarian"),
+    Condition("C4_full_auth",      "Full stack, auth gov",   "SUM_RAW", True,  True,  0.1, True,  True,  "authoritarian"),
+    Condition("C5_demo_captured",  "Full + captured demo",   "SUM_RAW", True,  True,  0.1, True,  True,  "demo_captured"),
+    Condition("C6_auth_captured",  "Full + captured auth",   "SUM_RAW", True,  True,  0.1, True,  True,  "auth_captured"),
+    Condition("C7_democratic",     "Full + clean democracy",  "SUM_RAW", True,  True,  0.1, True,  True,  "democratic"),
+    Condition("C8_mixed",          "Mixed 50/50 + democracy", "SUM_RAW", True,  True,  0.1, True,  True,  "democratic", mixed_sevc_ratio=0.5),
 ]
 
 SEEDS = [42, 137, 2024]
@@ -95,7 +100,8 @@ def configure_model(model, condition: Condition):
     model.use_trust = condition.use_trust
     model.trust_noise = condition.trust_noise
     model.use_horizon_index = condition.use_horizon_index
-    model.trust_noise = condition.trust_noise
+    model.use_firm_hi = condition.use_firm_hi
+    model.gov_type = condition.gov_type
     model._trust_frozen = not condition.use_trust
 
     # If SEVC is disabled, reset all firms to vanilla behavior
@@ -109,6 +115,13 @@ def configure_model(model, condition: Condition):
                     del firm.strategy_weights['innovate']
             if hasattr(firm, 'tech_level'):
                 firm.tech_level = 1.0
+    else:
+        # Even vanilla firms in SEVC-enabled runs track firm_hi
+        for firm in model.firms:
+            if not hasattr(firm, 'floor_history'):
+                from collections import deque
+                firm.floor_history = deque(maxlen=100)
+                firm.horizon_index = 1.0
 
     # Mixed population: randomly assign some firms as vanilla (Task 4)
     if condition.mixed_sevc_ratio < 1.0 and condition.use_sevc:
@@ -122,6 +135,13 @@ def configure_model(model, condition: Condition):
                 if hasattr(firm, 'strategy_weights'):
                     for k in firm.strategy_weights:
                         firm.strategy_weights[k] = 0.2
+
+    # Force-capture a news firm for demo_captured condition
+    if condition.gov_type == 'demo_captured' and hasattr(model, 'news_firms'):
+        for nf in model.news_firms:
+            if hasattr(nf, 'accuracy') and nf.accuracy > 0.5:
+                nf.accuracy = 0.3; nf.audience_capture = 0.6
+                break  # capture just one
 
     # If trust is disabled, set all trust scores to neutral 0.5
     # and mark them as frozen so update_trust_scores skips them
@@ -286,6 +306,8 @@ def run_single(condition: Condition, seed: int) -> Dict[str, Any]:
     metrics_df["use_trust"] = condition.use_trust
     metrics_df["trust_noise"] = condition.trust_noise
     metrics_df["use_hi"] = condition.use_horizon_index
+    metrics_df["use_firm_hi"] = condition.use_firm_hi
+    metrics_df["gov_type"] = condition.gov_type
     metrics_df["seed"] = seed
 
     fname = f"{raw_dir}/{condition.name}_seed{seed}.parquet"
@@ -301,6 +323,8 @@ def run_single(condition: Condition, seed: int) -> Dict[str, Any]:
         "use_trust": condition.use_trust,
         "trust_noise": condition.trust_noise,
         "use_hi": condition.use_horizon_index,
+        "use_firm_hi": condition.use_firm_hi,
+        "gov_type": condition.gov_type,
         "mixed_sevc_ratio": condition.mixed_sevc_ratio,
     }
 
@@ -354,6 +378,8 @@ def main():
         if cond.use_sevc: flags.append("SEVC")
         if cond.use_trust: flags.append(f"Trust(noise={cond.trust_noise})")
         if cond.use_horizon_index: flags.append("HI")
+        if cond.use_firm_hi: flags.append("FirmHI")
+        flags.append(f"gov={cond.gov_type}")
         print(f"  C{i+1}: {cond.label:30s} obj={cond.objective:8s} [{', '.join(flags) or 'vanilla'}]")
 
     print()
@@ -443,11 +469,10 @@ def print_comparison(df: pd.DataFrame):
     # Header
     header = f"{'Metric':<18}"
     for c in conditions:
-        # Abbreviate condition names
-        short = c.replace("C1_vanilla_sum", "C1:Van").replace("C2_sevc_sum", "C2:SEVC") \
-                 .replace("C3_sevc_hi_sum", "C3:+HI").replace("C4_sevc_trust_sum", "C4:+Trst") \
-                 .replace("C5_sevc_trust_hi_sum", "C5:+T+HI").replace("C6_full_topo", "C6:TOPO") \
-                 .replace("C7_mixed_adoption", "C7:Mix")
+        short = c.replace("C1_baseline", "C1:Base").replace("C2_sevc", "C2:SEVC") \
+                 .replace("C3_sevc_hi", "C3:+HI").replace("C4_full_auth", "C4:Auth") \
+                 .replace("C5_demo_captured", "C5:DmCap").replace("C6_auth_captured", "C6:AuCap") \
+                 .replace("C7_democratic", "C7:Demo").replace("C8_mixed", "C8:Mix")
         header += f" {short:>14}"
     print(header)
     print("-" * len(header))
@@ -482,45 +507,35 @@ def print_comparison(df: pd.DataFrame):
 
     staircase_metrics = ['worker_min', 'worker_gini', 'unemployment_rate',
                          'agency_floor', 'n_firms', 'n_active_cartels',
-                         'horizon_index', 'trust_institutional']
+                         'horizon_index', 'trust_institutional', 'mean_firm_hi']
+
+    pairs = [
+        ('C1_baseline',      'C1 (baseline)'),
+        ('C2_sevc',          'C2 (+SEVC)'),
+        ('C3_sevc_hi',       'C3 (+HI+FirmHI)'),
+        ('C4_full_auth',     'C4 (+Trust,auth)'),
+        ('C5_demo_captured', 'C5 (demo_cap)'),
+        ('C6_auth_captured', 'C6 (auth_cap)'),
+        ('C7_democratic',    'C7 (democratic)'),
+        ('C8_mixed',         'C8 (mixed)'),
+    ]
 
     for key in staircase_metrics:
         if key not in late.columns:
             continue
-        c1 = late[late['condition'] == 'C1_vanilla_sum'][key].mean()
-        c2 = late[late['condition'] == 'C2_sevc_sum'][key].mean()
-        c3 = late[late['condition'] == 'C3_sevc_hi_sum'][key].mean()
-        c4 = late[late['condition'] == 'C4_sevc_trust_sum'][key].mean()
-        c5 = late[late['condition'] == 'C5_sevc_trust_hi_sum'][key].mean()
-        c6 = late[late['condition'] == 'C6_full_topo'][key].mean()
-
         print(f"\n  {key}:")
-        print(f"    C1 (vanilla):     {c1:>12.4f}")
-        if np.isfinite(c2) and np.isfinite(c1) and abs(c1) > 1e-9:
-            delta = (c2 - c1) / abs(c1) * 100
-            print(f"    C2 (+SEVC):       {c2:>12.4f}  [{delta:+.1f}% from C1]")
-        else:
-            print(f"    C2 (+SEVC):       {c2:>12.4f}")
-        if np.isfinite(c3) and np.isfinite(c2) and abs(c2) > 1e-9:
-            delta = (c3 - c2) / abs(c2) * 100
-            print(f"    C3 (+HI):         {c3:>12.4f}  [{delta:+.1f}% from C2]")
-        else:
-            print(f"    C3 (+HI):         {c3:>12.4f}")
-        if np.isfinite(c4) and np.isfinite(c2) and abs(c2) > 1e-9:
-            delta = (c4 - c2) / abs(c2) * 100
-            print(f"    C4 (+Trust):      {c4:>12.4f}  [{delta:+.1f}% from C2]")
-        else:
-            print(f"    C4 (+Trust):      {c4:>12.4f}")
-        if np.isfinite(c5) and np.isfinite(c4) and abs(c4) > 1e-9:
-            delta = (c5 - c4) / abs(c4) * 100
-            print(f"    C5 (+Trust+HI):   {c5:>12.4f}  [{delta:+.1f}% from C4]")
-        else:
-            print(f"    C5 (+Trust+HI):   {c5:>12.4f}")
-        if np.isfinite(c6) and np.isfinite(c5) and abs(c5) > 1e-9:
-            delta = (c6 - c5) / abs(c5) * 100
-            print(f"    C6 (+TOPO):       {c6:>12.4f}  [{delta:+.1f}% from C5]")
-        else:
-            print(f"    C6 (+TOPO):       {c6:>12.4f}")
+        prev_val = None
+        for cond_name, label in pairs:
+            subset = late[late['condition'] == cond_name]
+            if subset.empty:
+                continue
+            v = subset[key].mean()
+            if prev_val is not None and np.isfinite(v) and np.isfinite(prev_val) and abs(prev_val) > 1e-9:
+                delta = (v - prev_val) / abs(prev_val) * 100
+                print(f"    {label:<20s} {v:>12.4f}  [{delta:+.1f}%]")
+            else:
+                print(f"    {label:<20s} {v:>12.4f}")
+            prev_val = v
 
     print()
 
