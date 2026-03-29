@@ -3,4 +3,5 @@ __pycache__/
 *.pyo
 .env
 results/architecture/
-results/test_conditions/
+results/test_conditions/raw_data/
+results/test_conditions/summary/
