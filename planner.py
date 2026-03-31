@@ -156,7 +156,8 @@ class PlannerAgent(Agent):
     def __init__(self, model):
         super().__init__(model); self.objective = model.objective
         obj_offset = {"SUM":0,"NASH":10000,"JAM":20000,"CROSS":30000,"TOPO":40000,"TARGET":50000,
-                      "TOPO_X":60000,"TOPO_MIN":70000,"NASH_MIN":80000,"SUM_RAW":90000}.get(self.objective, 0)
+                      "TOPO_X":60000,"TOPO_MIN":70000,"NASH_MIN":80000,"SUM_RAW":90000,
+                      "PLANNER_SEVC":100000}.get(self.objective, 0)
         self._learn_rng = np.random.default_rng(model._seed + 7919 + obj_offset)
         self._es = EvolutionStrategy(dim=POLICY_DIM, rng=self._learn_rng)
         self._linear = LinearPolicy(state_dim=STATE_DIM, action_dim=POLICY_DIM, rng=self._learn_rng)
@@ -234,6 +235,7 @@ class PlannerAgent(Agent):
         elif self.objective == "TARGET": return 1.0 * math.log(max(n, 1)) * 100
         elif self.objective == "CROSS": return float(np.sum(np.log(np.full(n, 200.0)))) * 0.5
         elif self.objective == "JAM": return math.log(5.0)
+        elif self.objective == "PLANNER_SEVC": return 1.0  # score is already [0,1]
         else: return 0.0
 
     def _learning_step(self):
@@ -459,6 +461,7 @@ class PlannerAgent(Agent):
         elif self.objective == "TOPO_X": return self._objective_topo_x()
         elif self.objective == "TOPO_MIN": return self._objective_topo_min()
         elif self.objective == "TARGET": return self._objective_target()
+        elif self.objective == "PLANNER_SEVC": return self._objective_planner_sevc()
         else: raise ValueError(f"Unknown objective: {self.objective}")
 
     def _objective_sum_raw(self):
@@ -667,6 +670,98 @@ class PlannerAgent(Agent):
         total = sum(sc[k]*wts[k] for k in sc); mx = sum(wts.values())
         base = float((total/mx) * math.log(max(len(workers),1)) * 100)
         return base * _get_horizon_index(self.model)
+
+    # ------------------------------------------------------------------
+    # PLANNER_SEVC: population-level min(S, E, V, C)
+    # ------------------------------------------------------------------
+    # Election winner -> perceived binding dimension
+    _ELECTION_DIM_MAP = {
+        "education": "E", "redistribution": "S", "security": "C",
+        "growth": "S", "environment": "V", "none": None,
+    }
+
+    def _objective_planner_sevc(self):
+        """Population-level SEVC: min(S_pop, E_pop, V_pop, C_pop) * HI."""
+        model = self.model; workers = model.workers
+        firms = [f for f in model.firms if not f.defunct]
+        if not workers:
+            self._planner_sevc_dims = {"S": 0.0, "E": 0.0, "V": 0.0, "C": 0.0}
+            return 0.0
+
+        worker_w = np.array([w.wealth for w in workers], dtype=np.float64)
+        n_workers = len(workers)
+
+        # ---- S_pop: Stakeholder/Citizen Wellbeing ----
+        bottom_20 = float(np.percentile(worker_w, 20)) if n_workers > 0 else 0.0
+        median_w = float(np.median(worker_w)) if n_workers > 0 else 1.0
+        s_wealth = min(bottom_20 / max(median_w, 1.0), 2.0)
+        n_emp = sum(1 for w in workers if w.employed)
+        s_employment = 1.0 - (1.0 - n_emp / max(n_workers, 1))  # = employment rate
+        agencies = np.array([w.compute_agency() for w in workers], dtype=np.float64)
+        agency_floor = float(np.min(agencies)); agency_mean = float(np.mean(agencies))
+        s_agency = min(agency_floor / max(agency_mean, 1.0), 2.0)
+        S_pop = max(EPSILON, (max(s_wealth, EPSILON) * max(s_employment, EPSILON) * max(s_agency, EPSILON)) ** (1.0/3.0))
+
+        # ---- E_pop: Education/Human Capital ----
+        skills = np.array([w.skill for w in workers], dtype=np.float64)
+        mean_skill = float(np.mean(skills)) if n_workers > 0 else 0.0
+        # Reference: running EMA of mean skill stored on model
+        if not hasattr(model, '_skill_ema'):
+            model._skill_ema = max(mean_skill, 0.3)
+        model._skill_ema = 0.95 * model._skill_ema + 0.05 * mean_skill
+        e_skill = min(mean_skill / max(model._skill_ema, 0.01), 2.0)
+        e_invest = float(np.clip(self.policy.get("education_investment", 0.0) / 3.0, 0.0, 1.0))
+        skill_gini = _gini_fast(skills)
+        e_equality = 1.0 - skill_gini
+        E_pop = max(EPSILON, (max(e_skill, EPSILON) * max(e_invest, EPSILON) * max(e_equality, EPSILON)) ** (1.0/3.0))
+
+        # ---- V_pop: Value/Environment ----
+        total_poll = float(np.sum(model.pollution_grid))
+        poll_per_worker = total_poll / max(n_workers, 1)
+        if not hasattr(model, '_poll_ema'):
+            model._poll_ema = max(poll_per_worker, 0.1)
+        model._poll_ema = 0.95 * model._poll_ema + 0.05 * poll_per_worker
+        v_pollution = max(0.0, 1.0 - (poll_per_worker / max(model._poll_ema * 3.0, 0.1)))
+        v_green = float(np.clip(self.policy.get("pollution_tax", 0.0) * 0.5 +
+                                self.policy.get("cleanup_investment", 0.0) * 0.2, 0.0, 1.0))
+        if firms:
+            mean_firm_v = float(np.mean([getattr(f, '_prev_scores', {}).get('V_raw', 0.5)
+                                         if hasattr(f, '_prev_scores') else 0.5 for f in firms]))
+        else:
+            mean_firm_v = 0.5
+        V_pop = max(EPSILON, (max(v_pollution, EPSILON) * max(v_green, EPSILON) * max(mean_firm_v, EPSILON)) ** (1.0/3.0))
+
+        # ---- C_pop: Country/Institutional Health ----
+        trusts = np.array([getattr(w, 'authority_trust', 0.7) for w in workers], dtype=np.float64)
+        c_trust = float(np.mean(trusts))
+        # Epistemic health proxy: trust * (1 - polarization) * r0_near_1
+        mc = float(np.mean([len(w.network_connections) for w in workers])) if workers else 0
+        r0 = (mc * 0.05 * c_trust * 0.1) / 0.02
+        c_epistemic = max(0.01, c_trust * max(0.01, 1.0 - abs(r0 - 1.0) * 0.3))
+        if firms:
+            shares = np.array([f.market_share for f in firms]); hhi = float(np.sum(shares ** 2))
+        else:
+            hhi = 1.0
+        c_diversity = 1.0 - hhi
+        total_prod = sum(f.production_this_step for f in firms)
+        c_fiscal = min(max(self.tax_revenue / max(total_prod, 1.0), 0.0), 2.0)
+        C_pop = max(EPSILON, (max(c_trust, EPSILON) * max(c_epistemic, EPSILON) *
+                              max(c_diversity, EPSILON) * max(c_fiscal, EPSILON)) ** 0.25)
+
+        # Store dimensions for metrics tracking
+        self._planner_sevc_dims = {"S": float(S_pop), "E": float(E_pop), "V": float(V_pop), "C": float(C_pop)}
+
+        # Election weighting: if democratic, boost weight of voter-perceived floor
+        score = min(S_pop, E_pop, V_pop, C_pop)
+        gov = getattr(model, 'gov_type', 'authoritarian')
+        if gov in ('democratic', 'demo_captured') and self._last_election_winner != 'none':
+            dim = self._ELECTION_DIM_MAP.get(self._last_election_winner)
+            if dim and dim in self._planner_sevc_dims:
+                # Blend: 70% true min, 30% voter-perceived floor
+                voter_dim_val = self._planner_sevc_dims[dim]
+                score = 0.7 * score + 0.3 * voter_dim_val
+
+        return float(score) * _get_horizon_index(model)
 
     def get_policy_snapshot(self):
         snap = dict(self.policy); snap["objective_value"] = self.last_objective_value

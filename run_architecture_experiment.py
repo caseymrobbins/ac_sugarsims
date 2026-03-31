@@ -73,6 +73,9 @@ CONDITIONS = [
     Condition("C6_auth_captured",  "Full + captured auth",   "SUM_RAW", True,  True,  0.1, True,  True,  "auth_captured"),
     Condition("C7_democratic",     "Full + clean democracy",  "SUM_RAW", True,  True,  0.1, True,  True,  "democratic"),
     Condition("C8_mixed",          "Mixed 50/50 + democracy", "SUM_RAW", True,  True,  0.1, True,  True,  "democratic", mixed_sevc_ratio=0.5),
+    Condition("C9_planner_sevc_democratic",   "Planner SEVC + democracy",      "PLANNER_SEVC", True, True, 0.1, True, True, "democratic"),
+    Condition("C10_planner_sevc_auth",        "Planner SEVC + authoritarian",  "PLANNER_SEVC", True, True, 0.1, True, True, "authoritarian"),
+    Condition("C11_planner_sevc_demo_captured","Planner SEVC + captured demo", "PLANNER_SEVC", True, True, 0.1, True, True, "demo_captured"),
 ]
 
 SEEDS = [42, 137, 2024]

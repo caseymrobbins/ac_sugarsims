@@ -624,7 +624,6 @@ class FirmAgent(Agent):
         self._last_strategy = "invest_capital"
         # SEVC EMA normalization (Task 1)
         self.sevc_ema_mean = {'S': 0.5, 'E': 0.5, 'V': 0.5, 'C': 0.5}
-        self.sevc_ema_var = {'S': 0.1, 'E': 0.1, 'V': 0.1, 'C': 0.1}
         # Green R&D priority slider (Task 2): 0.0 = pure productivity, 1.0 = pure green
         self.green_rd_priority = 0.5
         # Per-firm SEVC flag (Task 4): default True (SEVC behavior)

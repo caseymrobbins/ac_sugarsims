@@ -4,15 +4,19 @@ run_parallel.py
 Launches architecture experiment runs as parallel subprocesses.
 Each run is a separate Python process for genuine multi-core usage.
 
-8 conditions testing SEVC layers, governance types, and mixed populations:
+11 conditions testing SEVC layers, governance types, mixed populations,
+and planner SEVC objectives:
   C1-C3: Feature staircase (baseline -> SEVC -> HI)
   C4-C7: Governance comparison (auth, demo_captured, auth_captured, democratic)
   C8: Mixed 50/50 SEVC/Vanilla competition
+  C9-C11: Planner SEVC objective (democratic, authoritarian, captured demo)
 
 Usage:
     python run_parallel.py              # auto-detect cores
     python run_parallel.py --workers 6  # explicit
     python run_parallel.py --only C1_baseline  # single condition
+    python run_parallel.py --animate    # generate HTML animations for each run
+    python run_parallel.py --preset test2  # run 2-condition test with 10 seeds
 """
 
 import subprocess
@@ -35,7 +39,17 @@ CONDITIONS = [
     ("C6_auth_captured",  "SUM_RAW", True,  True,  True,  0.1, True,  True,  "auth_captured",  1.0),
     ("C7_democratic",     "SUM_RAW", True,  True,  True,  0.1, True,  True,  "democratic",     1.0),
     ("C8_mixed",          "SUM_RAW", True,  True,  True,  0.1, True,  True,  "democratic",     0.5),
+    ("C9_planner_sevc_democratic",    "PLANNER_SEVC", True, True, True, 0.1, True, True, "democratic",    1.0),
+    ("C10_planner_sevc_auth",         "PLANNER_SEVC", True, True, True, 0.1, True, True, "authoritarian", 1.0),
+    ("C11_planner_sevc_demo_captured","PLANNER_SEVC", True, True, True, 0.1, True, True, "demo_captured", 1.0),
 ]
+
+# Preset: 2-condition test (vanilla vs full stack) with 10 seeds
+TEST2_CONDITIONS = [
+    ("vanilla_sum",   "SUM_RAW",      False, True, False, 0.0, False, False, "authoritarian", 1.0),
+    ("topo_sevc_hi",  "TOPO_X",       True,  True, True,  0.1, True,  True,  "democratic",    1.0),
+]
+TEST2_SEEDS = [7, 23, 59, 101, 233, 347, 461, 587, 719, 853]
 
 
 SCRIPT_TEMPLATE = r'''
@@ -48,7 +62,7 @@ sys.path.insert(0, "@@CWD@@")
 
 from environment import EconomicModel
 
-# ── Patches ──
+# -- Patches --
 
 import sustainable_capitalism as sc_module
 _oc = sc_module.sustainable_choose_strategy
@@ -111,7 +125,7 @@ if hasattr(planner_mod, '_get_horizon_index'):
         return _ohi(model)
     planner_mod._get_horizon_index = phi
 
-# ── Config (injected) ──
+# -- Config (injected) --
 
 COND_NAME = "@@NAME@@"
 OBJECTIVE = "@@OBJECTIVE@@"
@@ -125,8 +139,11 @@ GOV_TYPE = "@@GOV_TYPE@@"
 MIXED_SEVC_RATIO = @@MIXED_SEVC_RATIO@@
 SEED = @@SEED@@
 N_STEPS = @@N_STEPS@@
+ANIMATE = @@ANIMATE@@
+ANIM_SUBSAMPLE = @@ANIM_SUBSAMPLE@@
+OUTPUT_DIR = "@@OUTPUT_DIR@@"
 
-# ── Run ──
+# -- Run --
 
 model = EconomicModel(
     seed=SEED, grid_width=80, grid_height=80,
@@ -134,6 +151,7 @@ model = EconomicModel(
     objective=OBJECTIVE,
 )
 
+model._collect_animation = ANIMATE
 model.use_sevc = USE_SEVC
 model.use_innovation = USE_INNOVATION
 model.use_trust = USE_TRUST
@@ -191,7 +209,7 @@ for step in range(N_STEPS):
 elapsed = time.time() - t0
 print("done " + "{:.1f}".format(elapsed) + "s")
 
-os.makedirs("results/architecture/raw_data", exist_ok=True)
+os.makedirs(OUTPUT_DIR + "/raw_data", exist_ok=True)
 df = pd.DataFrame(model.metrics_history)
 df["condition"] = COND_NAME
 df["objective"] = OBJECTIVE
@@ -203,15 +221,35 @@ df["use_hi"] = USE_HI
 df["use_firm_hi"] = USE_FIRM_HI
 df["gov_type"] = GOV_TYPE
 df["seed"] = SEED
-outpath = "results/architecture/raw_data/" + COND_NAME + "_seed" + str(SEED) + ".parquet"
+outpath = OUTPUT_DIR + "/raw_data/" + COND_NAME + "_seed" + str(SEED) + ".parquet"
 df.to_parquet(outpath, index=False)
 print("Saved: " + outpath)
+
+if ANIMATE and model.animation_frames:
+    anim_dir = OUTPUT_DIR + "/animations"
+    os.makedirs(anim_dir, exist_ok=True)
+    try:
+        from animate import generate_animation_html
+        anim_path = anim_dir + "/" + COND_NAME + "_seed" + str(SEED) + ".html"
+        generate_animation_html(
+            model.animation_frames,
+            output_path=anim_path,
+            grid_size=80,
+            title=COND_NAME + " (seed=" + str(SEED) + ")",
+            subsample=ANIM_SUBSAMPLE,
+        )
+        fsize = os.path.getsize(anim_path) / (1024 * 1024)
+        print("Animation: " + anim_path + " (" + "{:.1f}".format(fsize) + " MB)")
+    except Exception as e:
+        print("Animation failed: " + str(e))
 '''
 
 
 _SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 
-def make_script(name, objective, use_sevc, use_innovation, use_trust, trust_noise, use_hi, use_firm_hi, gov_type, mixed_sevc_ratio, seed, n_steps):
+def make_script(name, objective, use_sevc, use_innovation, use_trust, trust_noise,
+                use_hi, use_firm_hi, gov_type, mixed_sevc_ratio, seed, n_steps,
+                animate=False, anim_subsample=2, output_dir="results/architecture"):
     """Generate a self-contained run script with config injected."""
     s = SCRIPT_TEMPLATE
     s = s.replace("@@CWD@@", _SCRIPT_DIR)
@@ -227,17 +265,24 @@ def make_script(name, objective, use_sevc, use_innovation, use_trust, trust_nois
     s = s.replace("@@MIXED_SEVC_RATIO@@", str(mixed_sevc_ratio))
     s = s.replace("@@SEED@@", str(seed))
     s = s.replace("@@N_STEPS@@", str(n_steps))
+    s = s.replace("@@ANIMATE@@", str(animate))
+    s = s.replace("@@ANIM_SUBSAMPLE@@", str(anim_subsample))
+    s = s.replace("@@OUTPUT_DIR@@", output_dir)
     return s
 
 
 def run_one(job):
     """Write script, run as subprocess, return result."""
-    name, objective, use_sevc, use_innovation, use_trust, trust_noise, use_hi, use_firm_hi, gov_type, mixed_sevc_ratio, seed, n_steps = job
+    (name, objective, use_sevc, use_innovation, use_trust, trust_noise,
+     use_hi, use_firm_hi, gov_type, mixed_sevc_ratio,
+     seed, n_steps, animate, anim_subsample, output_dir) = job
     label = name + "/seed" + str(seed)
 
     script = make_script(name, objective, use_sevc, use_innovation,
                          use_trust, trust_noise, use_hi, use_firm_hi, gov_type,
-                         mixed_sevc_ratio, seed, n_steps)
+                         mixed_sevc_ratio, seed, n_steps,
+                         animate=animate, anim_subsample=anim_subsample,
+                         output_dir=output_dir)
 
     script_path = "/tmp/run_" + name + "_s" + str(seed) + ".py"
     with open(script_path, "w") as f:
@@ -276,8 +321,28 @@ def main():
                         help="Parallel workers (0 = auto)")
     parser.add_argument("--only", type=str, default=None,
                         help="Run only this condition")
-    parser.add_argument("--steps", type=int, default=N_STEPS)
+    parser.add_argument("--steps", type=int, default=0,
+                        help="Steps per run (0 = use preset default)")
+    parser.add_argument("--animate", action="store_true",
+                        help="Generate HTML animation for each run")
+    parser.add_argument("--subsample", type=int, default=2,
+                        help="Animation frame subsample rate (default: 2)")
+    parser.add_argument("--preset", type=str, default=None,
+                        choices=["full", "test2"],
+                        help="Preset: 'full' = all 11 conditions, 'test2' = vanilla vs topo+sevc+hi (10 seeds)")
     args = parser.parse_args()
+
+    # Select conditions and seeds based on preset
+    if args.preset == "test2":
+        conditions = TEST2_CONDITIONS
+        seeds = TEST2_SEEDS
+        n_steps = args.steps if args.steps > 0 else 500
+        output_dir = "results/test_conditions"
+    else:
+        conditions = CONDITIONS
+        seeds = SEEDS
+        n_steps = args.steps if args.steps > 0 else N_STEPS
+        output_dir = "results/architecture"
 
     n_workers = args.workers
     if n_workers <= 0:
@@ -285,20 +350,24 @@ def main():
         n_workers = max(1, multiprocessing.cpu_count() - 1)
 
     jobs = []
-    for cond in CONDITIONS:
+    for cond in conditions:
         name = cond[0]
         if args.only and name != args.only:
             continue
-        for seed in SEEDS:
-            jobs.append(cond + (seed, args.steps))
+        for seed in seeds:
+            jobs.append(cond + (seed, n_steps, args.animate, args.subsample, output_dir))
 
     print("=" * 70)
     print("  PARALLEL ARCHITECTURE EXPERIMENT")
+    if args.preset:
+        print("  Preset: " + args.preset)
     print("  Jobs: " + str(len(jobs)))
     print("  Workers: " + str(n_workers))
-    print("  Steps: " + str(args.steps))
+    print("  Steps: " + str(n_steps))
+    print("  Animate: " + str(args.animate))
+    print("  Output: " + output_dir)
     print("=" * 70)
-    for cond in CONDITIONS:
+    for cond in conditions:
         if args.only and cond[0] != args.only:
             continue
         name, obj, sevc, inno, trust, noise, hi, firm_hi, gov, mixed_ratio = cond
@@ -313,7 +382,7 @@ def main():
         print("  " + name + ": " + obj + " [" + ", ".join(flags) + "]")
     print()
 
-    os.makedirs("results/architecture/raw_data", exist_ok=True)
+    os.makedirs(output_dir + "/raw_data", exist_ok=True)
 
     t0 = time.time()
 
@@ -325,7 +394,7 @@ def main():
                 results.append(future.result())
             except Exception as e:
                 job = futures[future]
-                print("  EXCEPTION: " + str(job[0]) + "/" + str(job[-2]) + ": " + str(e))
+                print("  EXCEPTION: " + str(job[0]) + "/" + str(job[-4]) + ": " + str(e))
 
     elapsed = time.time() - t0
     ok = sum(1 for r in results if r.get("status") == "OK")
@@ -339,7 +408,80 @@ def main():
     print("=" * 70)
 
     import pandas as pd
-    pd.DataFrame(results).to_csv("results/architecture/run_log.csv", index=False)
+    pd.DataFrame(results).to_csv(output_dir + "/run_log.csv", index=False)
+
+    # Print comparison summary if test2 preset
+    if args.preset == "test2":
+        _print_comparison(output_dir)
+
+
+def _print_comparison(output_dir):
+    """Load raw data and print head-to-head comparison."""
+    import pandas as pd
+    raw_dir = output_dir + "/raw_data"
+    files = sorted(f for f in os.listdir(raw_dir) if f.endswith(".parquet"))
+    if not files:
+        return
+    all_data = pd.concat([pd.read_parquet(raw_dir + "/" + f) for f in files], ignore_index=True)
+
+    max_step = all_data["step"].max()
+    tail = all_data[all_data["step"] >= max_step * 0.8]
+    conditions = sorted(tail["condition"].unique())
+
+    metrics = [
+        ("worker_min",            "Floor Wealth",     ".1f",  "higher"),
+        ("worker_mean",           "Worker Mean",      ".1f",  "higher"),
+        ("worker_gini",           "Worker Gini",      ".3f",  "lower"),
+        ("unemployment_rate",     "Unemployment",     ".1%",  "lower"),
+        ("agency_floor",          "Agency Floor",     ".2f",  "higher"),
+        ("horizon_index",         "Horizon Index",    ".3f",  "higher"),
+        ("mean_firm_floor",       "Firm SEVC Floor",  ".3f",  "higher"),
+        ("mean_firm_floor_raw",   "Firm Floor Raw",   ".3f",  "higher"),
+        ("mean_firm_floor_norm",  "Firm Floor Norm",  ".3f",  "higher"),
+        ("mean_firm_hi",          "Firm HI",          ".3f",  "higher"),
+        ("n_firms",               "Firms",            ".1f",  "higher"),
+        ("total_production",      "Production",       ".0f",  "higher"),
+        ("total_pollution",       "Pollution",        ".0f",  "lower"),
+        ("legitimacy_mean",       "Legitimacy",       ".3f",  "higher"),
+        ("mean_aggression",       "Aggression",       ".3f",  "lower"),
+        ("mean_conflict",         "Conflict",         ".4f",  "lower"),
+        ("planner_sevc_score",    "Planner SEVC",     ".3f",  "higher"),
+        ("planner_S_pop",         "Planner S",        ".3f",  "higher"),
+        ("planner_E_pop",         "Planner E",        ".3f",  "higher"),
+        ("planner_V_pop",         "Planner V",        ".3f",  "higher"),
+        ("planner_C_pop",         "Planner C",        ".3f",  "higher"),
+        ("mean_firm_binding_S",   "Binding S frac",   ".2f",  "info"),
+        ("mean_firm_binding_E",   "Binding E frac",   ".2f",  "info"),
+        ("mean_firm_binding_V",   "Binding V frac",   ".2f",  "info"),
+        ("mean_firm_binding_C",   "Binding C frac",   ".2f",  "info"),
+    ]
+
+    import numpy as np
+    print("\n" + "=" * 80)
+    print("  HEAD-TO-HEAD COMPARISON (steady-state mean +/- std across seeds)")
+    print("=" * 80)
+
+    header = "{:<20}".format("Metric")
+    for c in conditions:
+        header += "  {:>26}".format(c)
+    print(header)
+    print("-" * len(header))
+
+    for key, label, fmt, direction in metrics:
+        if key not in tail.columns:
+            continue
+        row = "{:<20}".format(label)
+        for c in conditions:
+            subset = tail[tail["condition"] == c][key]
+            mean_v = subset.mean(); std_v = subset.std()
+            row += "  {:>12{fmt}} +/- {:>7{fmt}}".format(mean_v, std_v, fmt=fmt)
+        print(row)
+
+    print()
+    summary_dir = output_dir + "/summary"
+    os.makedirs(summary_dir, exist_ok=True)
+    all_data.to_parquet(summary_dir + "/all_data.parquet", index=False)
+    print("Saved: " + summary_dir + "/all_data.parquet")
 
 
 if __name__ == "__main__":
