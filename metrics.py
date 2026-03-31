@@ -347,6 +347,15 @@ def collect_step_metrics(model: "EconomicModel") -> Dict[str, Any]:
         m["planner_V_pop"] = 0.0; m["planner_C_pop"] = 0.0
         m["planner_sevc_score"] = 0.0; m["planner_binding_dimension"] = "none"
 
+    # Election-planner alignment: does binding dim match election winner?
+    _dim_map = {"education": "E", "redistribution": "S", "security": "C",
+                "growth": "S", "environment": "V"}
+    winner = getattr(planner, '_last_election_winner', 'none')
+    binding = m.get("planner_binding_dimension", "none")
+    voter_dim = _dim_map.get(winner, "none")
+    m["election_planner_aligned"] = 1.0 if (voter_dim == binding and voter_dim != "none") else 0.0
+    m["election_weight"] = getattr(model, 'election_weight', 0.0)
+
     # Horizon Index
     try:
         from horizon_index import compute_horizon_index
@@ -754,6 +763,7 @@ def episode_summary(metrics_history: List[Dict]) -> Dict[str, Any]:
         "planner_sevc_score",
         "mean_firm_binding_S", "mean_firm_binding_E",
         "mean_firm_binding_V", "mean_firm_binding_C",
+        "election_planner_aligned", "election_weight",
     ]
     for key in scalar_keys:
         summary[key] = avg(key)

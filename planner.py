@@ -751,15 +751,20 @@ class PlannerAgent(Agent):
         # Store dimensions for metrics tracking
         self._planner_sevc_dims = {"S": float(S_pop), "E": float(E_pop), "V": float(V_pop), "C": float(C_pop)}
 
-        # Election weighting: if democratic, boost weight of voter-perceived floor
+        # Base score: min of all four dimensions (floor constraint)
         score = min(S_pop, E_pop, V_pop, C_pop)
+
+        # Democratic responsiveness: additive bonus for election-winning dimension
+        # Small relative to floor constraint -- planner cannot ignore collapsing floors
+        # to chase the vote, but prefers instrument vectors that also address the mandate
         gov = getattr(model, 'gov_type', 'authoritarian')
-        if gov in ('democratic', 'demo_captured') and self._last_election_winner != 'none':
+        election_weight = getattr(model, 'election_weight', 0.0)
+        if (gov in ('democratic', 'demo_captured') and self._last_election_winner != 'none'
+                and election_weight > 0):
             dim = self._ELECTION_DIM_MAP.get(self._last_election_winner)
             if dim and dim in self._planner_sevc_dims:
-                # Blend: 70% true min, 30% voter-perceived floor
-                voter_dim_val = self._planner_sevc_dims[dim]
-                score = 0.7 * score + 0.3 * voter_dim_val
+                responsiveness_bonus = 0.1 * election_weight * self._planner_sevc_dims[dim]
+                score += responsiveness_bonus
 
         return float(score) * _get_horizon_index(model)
 

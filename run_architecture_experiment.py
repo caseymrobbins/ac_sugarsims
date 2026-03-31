@@ -62,6 +62,8 @@ class Condition:
     use_firm_hi: bool        # per-firm horizon index tracking
     gov_type: str            # authoritarian | auth_captured | democratic | demo_captured
     mixed_sevc_ratio: float = 1.0  # fraction of firms that are SEVC (1.0 = all)
+    election_weight: float = 0.0   # democratic responsiveness weight (0=technocrat, 2=responsive)
+    media_captured: bool = False    # force-capture a news firm at start
 
 
 CONDITIONS = [
@@ -76,6 +78,10 @@ CONDITIONS = [
     Condition("C9_planner_sevc_democratic",   "Planner SEVC + democracy",      "PLANNER_SEVC", True, True, 0.1, True, True, "democratic"),
     Condition("C10_planner_sevc_auth",        "Planner SEVC + authoritarian",  "PLANNER_SEVC", True, True, 0.1, True, True, "authoritarian"),
     Condition("C11_planner_sevc_demo_captured","Planner SEVC + captured demo", "PLANNER_SEVC", True, True, 0.1, True, True, "demo_captured"),
+    Condition("C12_responsive_democratic",     "Responsive SEVC democracy",   "PLANNER_SEVC", True, True, 0.1, True, True, "democratic",    election_weight=2.0),
+    Condition("C13_responsive_demo_captured",  "Responsive SEVC captured",    "PLANNER_SEVC", True, True, 0.1, True, True, "demo_captured", election_weight=2.0, media_captured=True),
+    Condition("C14_pure_technocrat_democratic", "Technocrat SEVC democracy",   "PLANNER_SEVC", True, True, 0.1, True, True, "democratic",    election_weight=0.0),
+    Condition("C15_pure_technocrat_auth",       "Technocrat SEVC auth",        "PLANNER_SEVC", True, True, 0.1, True, True, "authoritarian", election_weight=0.0),
 ]
 
 SEEDS = [42, 137, 2024]
@@ -106,6 +112,7 @@ def configure_model(model, condition: Condition):
     model.use_firm_hi = condition.use_firm_hi
     model.gov_type = condition.gov_type
     model._trust_frozen = not condition.use_trust
+    model.election_weight = getattr(condition, 'election_weight', 0.0)
 
     # If SEVC is disabled, reset all firms to vanilla behavior
     if not condition.use_sevc:
@@ -139,12 +146,13 @@ def configure_model(model, condition: Condition):
                     for k in firm.strategy_weights:
                         firm.strategy_weights[k] = 0.2
 
-    # Force-capture a news firm for demo_captured condition
-    if condition.gov_type == 'demo_captured' and hasattr(model, 'news_firms'):
-        for nf in model.news_firms:
-            if hasattr(nf, 'accuracy') and nf.accuracy > 0.5:
-                nf.accuracy = 0.3; nf.audience_capture = 0.6
-                break  # capture just one
+    # Force-capture a news firm for demo_captured or explicit media_captured
+    if (condition.gov_type == 'demo_captured' or getattr(condition, 'media_captured', False)):
+        if hasattr(model, 'news_firms'):
+            for nf in model.news_firms:
+                if hasattr(nf, 'accuracy') and nf.accuracy > 0.5:
+                    nf.accuracy = 0.3; nf.audience_capture = 0.6
+                    break  # capture just one
 
     # If trust is disabled, set all trust scores to neutral 0.5
     # and mark them as frozen so update_trust_scores skips them
