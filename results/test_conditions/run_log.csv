@@ -1,21 +1,11 @@
-condition,label,seed,elapsed,n_steps
-vanilla_sum,Vanilla SUM (no features),7,40.866860151290894,500
-vanilla_sum,Vanilla SUM (no features),23,32.28331255912781,500
-vanilla_sum,Vanilla SUM (no features),59,35.105013847351074,500
-vanilla_sum,Vanilla SUM (no features),101,36.369831800460815,500
-vanilla_sum,Vanilla SUM (no features),233,21.93274164199829,500
-vanilla_sum,Vanilla SUM (no features),347,18.399373292922974,500
-vanilla_sum,Vanilla SUM (no features),461,33.222996950149536,500
-vanilla_sum,Vanilla SUM (no features),587,32.24629330635071,500
-vanilla_sum,Vanilla SUM (no features),719,21.053260803222656,500
-vanilla_sum,Vanilla SUM (no features),853,29.356253623962402,500
-topo_sevc_hi,TOPO + SEVC + HI + FirmHI,7,73.45803928375244,500
-topo_sevc_hi,TOPO + SEVC + HI + FirmHI,23,69.05367827415466,500
-topo_sevc_hi,TOPO + SEVC + HI + FirmHI,59,67.9290030002594,500
-topo_sevc_hi,TOPO + SEVC + HI + FirmHI,101,69.77400922775269,500
-topo_sevc_hi,TOPO + SEVC + HI + FirmHI,233,67.4586136341095,500
-topo_sevc_hi,TOPO + SEVC + HI + FirmHI,347,47.83562684059143,500
-topo_sevc_hi,TOPO + SEVC + HI + FirmHI,461,76.7237274646759,500
-topo_sevc_hi,TOPO + SEVC + HI + FirmHI,587,72.00747513771057,500
-topo_sevc_hi,TOPO + SEVC + HI + FirmHI,719,70.79705595970154,500
-topo_sevc_hi,TOPO + SEVC + HI + FirmHI,853,63.68165349960327,500
+name,seed,status,elapsed
+vanilla_sum,7,OK,3.1092891693115234
+vanilla_sum,23,OK,3.7157509326934814
+vanilla_sum,59,OK,3.4799787998199463
+vanilla_sum,101,OK,4.103346347808838
+vanilla_sum,233,OK,2.6309609413146973
+vanilla_sum,347,OK,2.4585423469543457
+vanilla_sum,461,OK,2.588376998901367
+vanilla_sum,587,OK,2.8908958435058594
+vanilla_sum,719,OK,3.6357364654541016
+vanilla_sum,853,OK,2.7026381492614746

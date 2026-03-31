@@ -237,41 +237,47 @@ def collect_step_metrics(model: "EconomicModel") -> Dict[str, Any]:
     # Sustainable capitalism: firm stakeholder floors
     try:
         from sustainable_capitalism import compute_stakeholder_scores
-        firm_floors = []
+        firm_floors_norm = []
         firm_floors_raw = []
         firm_S, firm_E, firm_V, firm_C = [], [], [], []
+        firm_bindings = {"S": 0, "E": 0, "V": 0, "C": 0}
         for f in model.firms:
             if not f.defunct:
                 scores = compute_stakeholder_scores(f)
-                firm_floors.append(scores['floor'])
+                firm_floors_norm.append(scores['floor'])
                 firm_S.append(scores['S'])
                 firm_E.append(scores['E'])
                 firm_V.append(scores['V'])
                 firm_C.append(scores['C'])
-                # Raw floor from unnormalized scores
                 raw_floor = min(scores.get('S_raw', scores['S']),
                                 scores.get('E_raw', scores['E']),
                                 scores.get('V_raw', scores['V']),
                                 scores.get('C_raw', scores['C']))
                 firm_floors_raw.append(raw_floor)
-        if firm_floors:
-            m["mean_firm_floor"] = float(np.mean(firm_floors))
-            m["min_firm_floor"] = float(np.min(firm_floors))
-            m["mean_firm_floor_norm"] = float(np.mean(firm_floors))
+                binding = scores.get('binding', 'S')
+                if binding in firm_bindings:
+                    firm_bindings[binding] += 1
+        n_scored = max(len(firm_floors_norm), 1)
+        if firm_floors_norm:
+            m["mean_firm_floor"] = float(np.mean(firm_floors_norm))
+            m["min_firm_floor"] = float(np.min(firm_floors_norm))
+            m["mean_firm_floor_norm"] = float(np.mean(firm_floors_norm))
             m["mean_firm_floor_raw"] = float(np.mean(firm_floors_raw))
             m["mean_firm_S"] = float(np.mean(firm_S))
             m["mean_firm_E"] = float(np.mean(firm_E))
             m["mean_firm_V"] = float(np.mean(firm_V))
             m["mean_firm_C"] = float(np.mean(firm_C))
+            m["mean_firm_binding_S"] = firm_bindings["S"] / n_scored
+            m["mean_firm_binding_E"] = firm_bindings["E"] / n_scored
+            m["mean_firm_binding_V"] = firm_bindings["V"] / n_scored
+            m["mean_firm_binding_C"] = firm_bindings["C"] / n_scored
         else:
-            m["mean_firm_floor"] = 0.0
-            m["min_firm_floor"] = 0.0
-            m["mean_firm_floor_norm"] = 0.0
-            m["mean_firm_floor_raw"] = 0.0
-            m["mean_firm_S"] = 0.0
-            m["mean_firm_E"] = 0.0
-            m["mean_firm_V"] = 0.0
-            m["mean_firm_C"] = 0.0
+            m["mean_firm_floor"] = 0.0; m["min_firm_floor"] = 0.0
+            m["mean_firm_floor_norm"] = 0.0; m["mean_firm_floor_raw"] = 0.0
+            m["mean_firm_S"] = 0.0; m["mean_firm_E"] = 0.0
+            m["mean_firm_V"] = 0.0; m["mean_firm_C"] = 0.0
+            m["mean_firm_binding_S"] = 0.0; m["mean_firm_binding_E"] = 0.0
+            m["mean_firm_binding_V"] = 0.0; m["mean_firm_binding_C"] = 0.0
     except ImportError:
         pass
 
@@ -325,6 +331,21 @@ def collect_step_metrics(model: "EconomicModel") -> Dict[str, Any]:
     m["election_winner"] = getattr(planner, '_last_election_winner', 'none')
     for platform in ('redistribution', 'growth', 'education', 'environment', 'security'):
         m["voter_turnout_" + platform] = getattr(planner, '_vote_shares', {}).get(platform, 0.0)
+
+    # Planner SEVC dimensions (Task 10)
+    pdims = getattr(planner, '_planner_sevc_dims', None)
+    if pdims:
+        m["planner_S_pop"] = pdims.get("S", 0.0)
+        m["planner_E_pop"] = pdims.get("E", 0.0)
+        m["planner_V_pop"] = pdims.get("V", 0.0)
+        m["planner_C_pop"] = pdims.get("C", 0.0)
+        vals = [pdims["S"], pdims["E"], pdims["V"], pdims["C"]]
+        m["planner_sevc_score"] = min(vals)
+        m["planner_binding_dimension"] = ["S", "E", "V", "C"][int(np.argmin(vals))]
+    else:
+        m["planner_S_pop"] = 0.0; m["planner_E_pop"] = 0.0
+        m["planner_V_pop"] = 0.0; m["planner_C_pop"] = 0.0
+        m["planner_sevc_score"] = 0.0; m["planner_binding_dimension"] = "none"
 
     # Horizon Index
     try:
@@ -729,6 +750,10 @@ def episode_summary(metrics_history: List[Dict]) -> Dict[str, Any]:
         "legitimacy_mean", "legitimacy_min", "legitimacy_variance", "n_low_legitimacy",
         "n_enforcers", "total_arrests", "surveillance_level",
         "identity_conflict_index",
+        "planner_S_pop", "planner_E_pop", "planner_V_pop", "planner_C_pop",
+        "planner_sevc_score",
+        "mean_firm_binding_S", "mean_firm_binding_E",
+        "mean_firm_binding_V", "mean_firm_binding_C",
     ]
     for key in scalar_keys:
         summary[key] = avg(key)

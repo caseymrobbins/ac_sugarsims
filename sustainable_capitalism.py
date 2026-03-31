@@ -76,25 +76,22 @@ def compute_stakeholder_scores(firm: "FirmAgent") -> Dict[str, float]:
     # Store raw scores for metrics/debugging
     raw = {'S_raw': S, 'E_raw': E, 'V_raw': V, 'C_raw': C}
 
-    # EMA normalization: z-score each dimension using firm's own history,
-    # then map to [0,1] via sigmoid so min() compares comparable scales.
+    # EMA-reference normalization: score = raw / ema_reference
+    # 1.0 = performing at historical average; <1.0 = declining; >1.0 = improving
+    # This ensures min() selects genuinely worst dimension relative to its own baseline.
     alpha = 0.05  # slow adaptation
     dims = {'S': S, 'E': E, 'V': V, 'C': C}
     normed = {}
     for d, val in dims.items():
-        ema_mean = firm.sevc_ema_mean[d]
-        ema_var = firm.sevc_ema_var[d]
-        # Update EMA stats
-        firm.sevc_ema_mean[d] = (1 - alpha) * ema_mean + alpha * val
-        firm.sevc_ema_var[d] = (1 - alpha) * ema_var + alpha * (val - ema_mean) ** 2
-        # Z-score then sigmoid to [0,1]
-        std = max(math.sqrt(firm.sevc_ema_var[d]), 0.01)
-        z = (val - firm.sevc_ema_mean[d]) / std
-        normed[d] = 1.0 / (1.0 + math.exp(-z))
+        # Update EMA reference
+        firm.sevc_ema_mean[d] = (1 - alpha) * firm.sevc_ema_mean[d] + alpha * val
+        ref = max(firm.sevc_ema_mean[d], 0.001)
+        normed[d] = val / ref
 
     S_n, E_n, V_n, C_n = normed['S'], normed['E'], normed['V'], normed['C']
     floor = min(S_n, E_n, V_n, C_n)
-    result = {'S': S_n, 'E': E_n, 'V': V_n, 'C': C_n, 'floor': floor}
+    binding = min(normed, key=normed.get)
+    result = {'S': S_n, 'E': E_n, 'V': V_n, 'C': C_n, 'floor': floor, 'binding': binding}
     result.update(raw)
     return result
 
@@ -174,7 +171,8 @@ def sustainable_choose_strategy(firm: "FirmAgent") -> str:
     profitable = firm.profit > 0
 
     scores = compute_stakeholder_scores(firm)
-    floor_dim = min(scores, key=lambda k: scores[k] if k != 'floor' else 999)
+    _skip = ('floor', 'binding', 'S_raw', 'E_raw', 'V_raw', 'C_raw')
+    floor_dim = min(scores, key=lambda k: scores[k] if k not in _skip else 999)
 
     context = {
         "invest_capital":  (1.0 if profitable else 0.2) * min(firm.wealth / 200, 1),
