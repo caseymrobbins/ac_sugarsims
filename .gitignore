@@ -5,3 +5,5 @@ __pycache__/
 results/architecture/
 results/test_conditions/raw_data/
 results/test_conditions/summary/
+results/responsiveness/raw_data/
+results/responsiveness/summary/
