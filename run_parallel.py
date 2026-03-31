@@ -29,27 +29,40 @@ from concurrent.futures import ProcessPoolExecutor, as_completed
 SEEDS = [101, 202, 303, 404, 505, 606]
 N_STEPS = 2000
 
-# (name, objective, use_sevc, use_innovation, use_trust, trust_noise, use_hi, use_firm_hi, gov_type, mixed_sevc_ratio)
+# (name, objective, use_sevc, use_innovation, use_trust, trust_noise, use_hi, use_firm_hi, gov_type, mixed_sevc_ratio, election_weight, media_captured)
 CONDITIONS = [
-    ("C1_baseline",       "SUM_RAW", False, True,  False, 0.0, False, False, "authoritarian",  1.0),
-    ("C2_sevc",           "SUM_RAW", True,  True,  False, 0.0, False, False, "authoritarian",  1.0),
-    ("C3_sevc_hi",        "SUM_RAW", True,  True,  False, 0.0, True,  True,  "authoritarian",  1.0),
-    ("C4_full_auth",      "SUM_RAW", True,  True,  True,  0.1, True,  True,  "authoritarian",  1.0),
-    ("C5_demo_captured",  "SUM_RAW", True,  True,  True,  0.1, True,  True,  "demo_captured",  1.0),
-    ("C6_auth_captured",  "SUM_RAW", True,  True,  True,  0.1, True,  True,  "auth_captured",  1.0),
-    ("C7_democratic",     "SUM_RAW", True,  True,  True,  0.1, True,  True,  "democratic",     1.0),
-    ("C8_mixed",          "SUM_RAW", True,  True,  True,  0.1, True,  True,  "democratic",     0.5),
-    ("C9_planner_sevc_democratic",    "PLANNER_SEVC", True, True, True, 0.1, True, True, "democratic",    1.0),
-    ("C10_planner_sevc_auth",         "PLANNER_SEVC", True, True, True, 0.1, True, True, "authoritarian", 1.0),
-    ("C11_planner_sevc_demo_captured","PLANNER_SEVC", True, True, True, 0.1, True, True, "demo_captured", 1.0),
+    ("C1_baseline",       "SUM_RAW", False, True,  False, 0.0, False, False, "authoritarian",  1.0, 0.0, False),
+    ("C2_sevc",           "SUM_RAW", True,  True,  False, 0.0, False, False, "authoritarian",  1.0, 0.0, False),
+    ("C3_sevc_hi",        "SUM_RAW", True,  True,  False, 0.0, True,  True,  "authoritarian",  1.0, 0.0, False),
+    ("C4_full_auth",      "SUM_RAW", True,  True,  True,  0.1, True,  True,  "authoritarian",  1.0, 0.0, False),
+    ("C5_demo_captured",  "SUM_RAW", True,  True,  True,  0.1, True,  True,  "demo_captured",  1.0, 0.0, False),
+    ("C6_auth_captured",  "SUM_RAW", True,  True,  True,  0.1, True,  True,  "auth_captured",  1.0, 0.0, False),
+    ("C7_democratic",     "SUM_RAW", True,  True,  True,  0.1, True,  True,  "democratic",     1.0, 0.0, False),
+    ("C8_mixed",          "SUM_RAW", True,  True,  True,  0.1, True,  True,  "democratic",     0.5, 0.0, False),
+    ("C9_planner_sevc_democratic",    "PLANNER_SEVC", True, True, True, 0.1, True, True, "democratic",    1.0, 0.0, False),
+    ("C10_planner_sevc_auth",         "PLANNER_SEVC", True, True, True, 0.1, True, True, "authoritarian", 1.0, 0.0, False),
+    ("C11_planner_sevc_demo_captured","PLANNER_SEVC", True, True, True, 0.1, True, True, "demo_captured", 1.0, 0.0, False),
+    ("C12_responsive_democratic",     "PLANNER_SEVC", True, True, True, 0.1, True, True, "democratic",    1.0, 2.0, False),
+    ("C13_responsive_demo_captured",  "PLANNER_SEVC", True, True, True, 0.1, True, True, "demo_captured", 1.0, 2.0, True),
+    ("C14_pure_technocrat_democratic", "PLANNER_SEVC", True, True, True, 0.1, True, True, "democratic",    1.0, 0.0, False),
+    ("C15_pure_technocrat_auth",       "PLANNER_SEVC", True, True, True, 0.1, True, True, "authoritarian", 1.0, 0.0, False),
 ]
 
 # Preset: 2-condition test (vanilla vs full stack) with 10 seeds
 TEST2_CONDITIONS = [
-    ("vanilla_sum",   "SUM_RAW",      False, True, False, 0.0, False, False, "authoritarian", 1.0),
-    ("topo_sevc_hi",  "TOPO_X",       True,  True, True,  0.1, True,  True,  "democratic",    1.0),
+    ("vanilla_sum",   "SUM_RAW",      False, True, False, 0.0, False, False, "authoritarian", 1.0, 0.0, False),
+    ("topo_sevc_hi",  "TOPO_X",       True,  True, True,  0.1, True,  True,  "democratic",    1.0, 0.0, False),
 ]
 TEST2_SEEDS = [7, 23, 59, 101, 233, 347, 461, 587, 719, 853]
+
+# Preset: C12-C15 responsiveness test with 8 new seeds
+RESP_CONDITIONS = [
+    ("C12_responsive_democratic",     "PLANNER_SEVC", True, True, True, 0.1, True, True, "democratic",    1.0, 2.0, False),
+    ("C13_responsive_demo_captured",  "PLANNER_SEVC", True, True, True, 0.1, True, True, "demo_captured", 1.0, 2.0, True),
+    ("C14_pure_technocrat_democratic", "PLANNER_SEVC", True, True, True, 0.1, True, True, "democratic",    1.0, 0.0, False),
+    ("C15_pure_technocrat_auth",       "PLANNER_SEVC", True, True, True, 0.1, True, True, "authoritarian", 1.0, 0.0, False),
+]
+RESP_SEEDS = [42, 137, 256, 389, 501, 623, 777, 888]
 
 
 SCRIPT_TEMPLATE = r'''
@@ -137,6 +150,8 @@ USE_HI = @@USE_HI@@
 USE_FIRM_HI = @@USE_FIRM_HI@@
 GOV_TYPE = "@@GOV_TYPE@@"
 MIXED_SEVC_RATIO = @@MIXED_SEVC_RATIO@@
+ELECTION_WEIGHT = @@ELECTION_WEIGHT@@
+MEDIA_CAPTURED = @@MEDIA_CAPTURED@@
 SEED = @@SEED@@
 N_STEPS = @@N_STEPS@@
 ANIMATE = @@ANIMATE@@
@@ -159,6 +174,7 @@ model.trust_noise = TRUST_NOISE
 model.use_horizon_index = USE_HI
 model.use_firm_hi = USE_FIRM_HI
 model.gov_type = GOV_TYPE
+model.election_weight = ELECTION_WEIGHT
 
 if not USE_SEVC:
     for firm in model.firms:
@@ -185,7 +201,7 @@ if MIXED_SEVC_RATIO < 1.0 and USE_SEVC:
                 for k in firm.strategy_weights:
                     firm.strategy_weights[k] = 0.2
 
-if GOV_TYPE == "demo_captured" and hasattr(model, 'news_firms'):
+if (GOV_TYPE == "demo_captured" or MEDIA_CAPTURED) and hasattr(model, 'news_firms'):
     for nf in model.news_firms:
         if hasattr(nf, 'accuracy') and nf.accuracy > 0.5:
             nf.accuracy = 0.3; nf.audience_capture = 0.6
@@ -248,7 +264,9 @@ if ANIMATE and model.animation_frames:
 _SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 
 def make_script(name, objective, use_sevc, use_innovation, use_trust, trust_noise,
-                use_hi, use_firm_hi, gov_type, mixed_sevc_ratio, seed, n_steps,
+                use_hi, use_firm_hi, gov_type, mixed_sevc_ratio,
+                election_weight, media_captured,
+                seed, n_steps,
                 animate=False, anim_subsample=2, output_dir="results/architecture"):
     """Generate a self-contained run script with config injected."""
     s = SCRIPT_TEMPLATE
@@ -263,6 +281,8 @@ def make_script(name, objective, use_sevc, use_innovation, use_trust, trust_nois
     s = s.replace("@@USE_FIRM_HI@@", str(use_firm_hi))
     s = s.replace("@@GOV_TYPE@@", str(gov_type))
     s = s.replace("@@MIXED_SEVC_RATIO@@", str(mixed_sevc_ratio))
+    s = s.replace("@@ELECTION_WEIGHT@@", str(election_weight))
+    s = s.replace("@@MEDIA_CAPTURED@@", str(media_captured))
     s = s.replace("@@SEED@@", str(seed))
     s = s.replace("@@N_STEPS@@", str(n_steps))
     s = s.replace("@@ANIMATE@@", str(animate))
@@ -275,12 +295,14 @@ def run_one(job):
     """Write script, run as subprocess, return result."""
     (name, objective, use_sevc, use_innovation, use_trust, trust_noise,
      use_hi, use_firm_hi, gov_type, mixed_sevc_ratio,
+     election_weight, media_captured,
      seed, n_steps, animate, anim_subsample, output_dir) = job
     label = name + "/seed" + str(seed)
 
     script = make_script(name, objective, use_sevc, use_innovation,
                          use_trust, trust_noise, use_hi, use_firm_hi, gov_type,
-                         mixed_sevc_ratio, seed, n_steps,
+                         mixed_sevc_ratio, election_weight, media_captured,
+                         seed, n_steps,
                          animate=animate, anim_subsample=anim_subsample,
                          output_dir=output_dir)
 
@@ -328,8 +350,8 @@ def main():
     parser.add_argument("--subsample", type=int, default=2,
                         help="Animation frame subsample rate (default: 2)")
     parser.add_argument("--preset", type=str, default=None,
-                        choices=["full", "test2"],
-                        help="Preset: 'full' = all 11 conditions, 'test2' = vanilla vs topo+sevc+hi (10 seeds)")
+                        choices=["full", "test2", "resp"],
+                        help="Preset: 'full' = all 15 conditions, 'test2' = vanilla vs topo (10 seeds), 'resp' = C12-C15 (8 seeds)")
     args = parser.parse_args()
 
     # Select conditions and seeds based on preset
@@ -338,6 +360,11 @@ def main():
         seeds = TEST2_SEEDS
         n_steps = args.steps if args.steps > 0 else 500
         output_dir = "results/test_conditions"
+    elif args.preset == "resp":
+        conditions = RESP_CONDITIONS
+        seeds = RESP_SEEDS
+        n_steps = args.steps if args.steps > 0 else N_STEPS
+        output_dir = "results/responsiveness"
     else:
         conditions = CONDITIONS
         seeds = SEEDS
@@ -370,7 +397,7 @@ def main():
     for cond in conditions:
         if args.only and cond[0] != args.only:
             continue
-        name, obj, sevc, inno, trust, noise, hi, firm_hi, gov, mixed_ratio = cond
+        name, obj, sevc, inno, trust, noise, hi, firm_hi, gov, mixed_ratio, elec_w, media_cap = cond
         flags = []
         if sevc: flags.append("SEVC")
         if inno: flags.append("Inno")
@@ -379,6 +406,8 @@ def main():
         if firm_hi: flags.append("FirmHI")
         flags.append("gov=" + gov)
         if mixed_ratio < 1.0: flags.append("Mix(" + str(mixed_ratio) + ")")
+        if elec_w > 0: flags.append("Resp(" + str(elec_w) + ")")
+        if media_cap: flags.append("MediaCap")
         print("  " + name + ": " + obj + " [" + ", ".join(flags) + "]")
     print()
 
@@ -454,6 +483,10 @@ def _print_comparison(output_dir):
         ("mean_firm_binding_E",   "Binding E frac",   ".2f",  "info"),
         ("mean_firm_binding_V",   "Binding V frac",   ".2f",  "info"),
         ("mean_firm_binding_C",   "Binding C frac",   ".2f",  "info"),
+        ("election_planner_aligned", "Elec-Plan Align", ".2f",  "higher"),
+        ("trust_planner",         "Planner Trust",    ".3f",  "higher"),
+        ("trust_institutional",   "Inst. Trust",      ".3f",  "higher"),
+        ("crime_events",          "Crime/step",       ".1f",  "lower"),
     ]
 
     import numpy as np
