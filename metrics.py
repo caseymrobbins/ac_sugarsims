@@ -325,6 +325,28 @@ def collect_step_metrics(model: "EconomicModel") -> Dict[str, Any]:
         m["sevc_mean_workers"] = 0.0
         m["vanilla_mean_workers"] = 0.0
 
+    # Production-capture ratio metrics (Task 11)
+    if active_firms_list:
+        capture_ratios = [getattr(f, 'capture_ratio', 0.5) for f in active_firms_list]
+        cr_arr = np.array(capture_ratios, dtype=np.float64)
+        m["mean_capture_ratio"]   = float(np.mean(cr_arr))
+        m["median_capture_ratio"] = float(np.median(cr_arr))
+        m["min_firm_capture_ratio"] = float(np.min(cr_arr))
+        cr_pos = cr_arr[cr_arr > 0]
+        if len(cr_pos) > 1 and cr_pos.sum() > 0:
+            n = len(cr_pos); cr_s = np.sort(cr_pos)
+            m["capture_gini"] = float((2*np.sum(np.arange(1,n+1)*cr_s)-(n+1)*cr_s.sum())/(n*cr_s.sum()))
+        else:
+            m["capture_gini"] = 0.0
+        total_wages_step = sum(getattr(f, 'wages_this_step', 0.0) for f in active_firms_list)
+        total_rev_step   = sum(f.revenue for f in active_firms_list)
+        m["total_wages_to_revenue"] = float(total_wages_step / max(total_rev_step, 1e-9))
+    else:
+        m["mean_capture_ratio"] = 0.0; m["median_capture_ratio"] = 0.0
+        m["min_firm_capture_ratio"] = 0.0; m["capture_gini"] = 0.0
+        m["total_wages_to_revenue"] = 0.0
+    m["planner_min_capture_ratio"] = float(model.planner.policy.get("min_capture_ratio", 0.0))
+
     # Government / election metrics (Task 8)
     m["gov_type"] = getattr(model, 'gov_type', 'authoritarian')
     planner = model.planner
@@ -743,6 +765,8 @@ def episode_summary(metrics_history: List[Dict]) -> Dict[str, Any]:
         "sevc_adoption_rate", "sevc_market_share",
         "sevc_mean_profit", "vanilla_mean_profit",
         "sevc_mean_workers", "vanilla_mean_workers",
+        "mean_capture_ratio", "median_capture_ratio", "min_firm_capture_ratio",
+        "capture_gini", "total_wages_to_revenue", "planner_min_capture_ratio",
         "mean_firm_hi", "min_firm_hi", "n_firms_declining", "n_firms_critical",
         "horizon_index",
         "election_winner", "voter_turnout_redistribution", "voter_turnout_growth",
@@ -780,6 +804,9 @@ def episode_summary(metrics_history: List[Dict]) -> Dict[str, Any]:
     summary["terminal_agency_floor"] = last("agency_floor")
     summary["terminal_horizon_index"] = last("horizon_index")
     summary["terminal_mean_firm_floor"] = last("mean_firm_floor")
+    summary["mean_capture_ratio"] = avg("mean_capture_ratio")
+    summary["terminal_capture_ratio"] = last("mean_capture_ratio")
+    summary["terminal_total_wages_to_revenue"] = last("total_wages_to_revenue")
     summary["terminal_trust_planner"] = last("trust_planner")
     summary["terminal_trust_institutional"] = last("trust_institutional")
 

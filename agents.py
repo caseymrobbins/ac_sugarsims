@@ -694,6 +694,8 @@ class FirmAgent(Agent):
         self.profit = 0.0; self.prev_profit = 0.0; self.revenue = 0.0; self.production_this_step = 0.0
         self.cartel_id = None; self.cartel_partners = []; self.defunct = False; self.age = 0
         self.market_share = 0.0; self.total_wages_paid = 0.0; self.total_profit_accumulated = 0.0
+        self.wages_this_step: float = 0.0  # per-step wage expenditure (reset each step)
+        self.capture_ratio: float = 0.5    # wages_this_step / revenue; updated by SEVC scoring
         self.pollution_factor = float(rng.uniform(0.05, 0.30)); self.total_pollution_emitted = 0.0
         self._consecutive_losses = 0; self.total_dividends_paid = 0.0
         self.trust_score = 0.5
@@ -718,6 +720,7 @@ class FirmAgent(Agent):
     def step(self):
         if self.defunct: return
         self.age += 1; self.prev_profit = self.profit; self.production_this_step = 0.0; self.revenue = 0.0
+        self.wages_this_step = 0.0  # reset per-step wage counter
         self._produce()
         if self.is_sevc:
             strategy = sustainable_choose_strategy(self)
@@ -868,7 +871,7 @@ class FirmAgent(Agent):
     def pay_worker(self, worker):
         wage = self.offered_wage
         if self.wealth < wage: wage = max(0, self.wealth * 0.5)
-        self.wealth -= wage; self.total_wages_paid += wage; return wage
+        self.wealth -= wage; self.total_wages_paid += wage; self.wages_this_step += wage; return wage
 
     def _consider_mitosis(self):
         """Split large, mature, dominant firms into two (Task 3)."""
