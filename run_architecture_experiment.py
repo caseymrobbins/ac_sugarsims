@@ -64,6 +64,12 @@ class Condition:
     mixed_sevc_ratio: float = 1.0  # fraction of firms that are SEVC (1.0 = all)
     election_weight: float = 0.0   # democratic responsiveness weight (0=technocrat, 2=responsive)
     media_captured: bool = False    # force-capture a news firm at start
+    production_aware_E: bool = False      # capture ratio as E component (Task 11)
+    production_aware_S_pop: bool = False  # economy-wide capture ratio in S_pop (Task 11)
+    ceo_compensation_tied: bool = False   # CEO bonus = profit×10%×sevc_floor (Task 12)
+    ceo_base_equals_floor: bool = False   # CEO base = lowest worker wage (Task 12)
+    ceo_equity_tied: bool = False         # CEO equity mark-to-market at book×sevc_floor (Task 12)
+    capture_normalization: str = "fixed"  # "fixed" | "ema" for E capture_score reference (Task 12)
 
 
 CONDITIONS = [
@@ -82,10 +88,21 @@ CONDITIONS = [
     Condition("C13_responsive_demo_captured",  "Responsive SEVC captured",    "PLANNER_SEVC", True, True, 0.1, True, True, "demo_captured", election_weight=2.0, media_captured=True),
     Condition("C14_pure_technocrat_democratic", "Technocrat SEVC democracy",   "PLANNER_SEVC", True, True, 0.1, True, True, "democratic",    election_weight=0.0),
     Condition("C15_pure_technocrat_auth",       "Technocrat SEVC auth",        "PLANNER_SEVC", True, True, 0.1, True, True, "authoritarian", election_weight=0.0),
+    # Task 11: Production-Aware Capital
+    Condition("C16_production_aware_democratic", "Production-aware SEVC + demo", "PLANNER_SEVC", True, True, 0.1, True, True, "democratic",   election_weight=2.0, production_aware_E=True,  production_aware_S_pop=True),
+    Condition("C17_production_aware_no_sevc",    "PA planner + vanilla firms",   "PLANNER_SEVC", False, True, 0.1, True, True, "democratic",  election_weight=2.0, production_aware_E=False, production_aware_S_pop=True),
+    Condition("C18_production_aware_captured",   "Production-aware + captured",  "PLANNER_SEVC", True, True, 0.1, True, True, "demo_captured", election_weight=2.0, media_captured=True, production_aware_E=True, production_aware_S_pop=True),
+    # Task 12: CEO Compensation Tied to SEVC Floor
+    Condition("C19_ceo_tied_democratic", "CEO tied + clean democracy", "PLANNER_SEVC", True, True, 0.1, True, True, "democratic",    election_weight=2.0, production_aware_E=True, production_aware_S_pop=True, ceo_compensation_tied=True, ceo_base_equals_floor=True, ceo_equity_tied=True, capture_normalization="ema"),
+    Condition("C20_ceo_tied_captured",   "CEO tied + captured media",  "PLANNER_SEVC", True, True, 0.1, True, True, "demo_captured", election_weight=2.0, media_captured=True, production_aware_E=True, production_aware_S_pop=True, ceo_compensation_tied=True, ceo_base_equals_floor=True, ceo_equity_tied=True, capture_normalization="ema"),
     # Task 13: Capacity-driven mitosis conditions
     Condition("C21_mitosis_democratic",  "Capacity mitosis + democracy",  "PLANNER_SEVC", True, True, 0.1, True, True, "democratic",    election_weight=1.0),
     Condition("C22_no_mitosis_democratic","No mitosis baseline + democracy","PLANNER_SEVC", True, True, 0.1, True, True, "democratic",   election_weight=1.0),
 ]
+
+# Seeds for Task 11 production-aware conditions (8 seeds as specified)
+SEEDS_PA = [42, 137, 256, 389, 501, 623, 777, 888]
+N_STEPS_PA = 2000
 
 SEEDS = [42, 137, 2024]
 N_STEPS = 3000
@@ -118,6 +135,12 @@ def configure_model(model, condition: Condition):
     model.election_weight = getattr(condition, 'election_weight', 0.0)
     # Task 13: capacity mitosis (disabled for C22 no-mitosis baseline)
     model.use_capacity_mitosis = not condition.name.startswith("C22_no_mitosis")
+    model.production_aware_E    = getattr(condition, 'production_aware_E', False)
+    model.production_aware_S_pop = getattr(condition, 'production_aware_S_pop', False)
+    model.ceo_compensation_tied = getattr(condition, 'ceo_compensation_tied', False)
+    model.ceo_base_equals_floor = getattr(condition, 'ceo_base_equals_floor', False)
+    model.ceo_equity_tied       = getattr(condition, 'ceo_equity_tied', False)
+    model.capture_normalization = getattr(condition, 'capture_normalization', 'fixed')
 
     # If SEVC is disabled, reset all firms to vanilla behavior
     if not condition.use_sevc:
@@ -356,6 +379,52 @@ def run_single_args(args):
         return {"condition": condition.name, "seed": seed, "error": str(e)}
 
 
+# ── Production-aware experiment runner (Task 11) ──────────────────
+
+def run_production_aware(parallel: int = 1):
+    """
+    Run the three production-aware conditions (C16/C17/C18) with 8 seeds
+    and 2000 steps.  Results go to results/architecture/raw_data/ alongside
+    the other architecture conditions.
+    """
+    pa_conditions = [c for c in CONDITIONS if c.name.startswith(("C16", "C17", "C18"))]
+    queue = [(cond, seed) for cond in pa_conditions for seed in SEEDS_PA]
+
+    os.makedirs(f"{OUTPUT_DIR}/raw_data", exist_ok=True)
+    os.makedirs(f"{OUTPUT_DIR}/summary", exist_ok=True)
+
+    print("=" * 70)
+    print("  TASK 11: PRODUCTION-AWARE CAPITAL EXPERIMENT")
+    print(f"  Conditions: {[c.name for c in pa_conditions]}")
+    print(f"  Seeds: {SEEDS_PA}")
+    print(f"  Steps: {N_STEPS_PA}")
+    print(f"  Total runs: {len(queue)}")
+    print("=" * 70)
+
+    apply_patches()
+
+    # Temporarily override N_STEPS so run_single_args picks it up
+    global N_STEPS
+    _orig_steps = N_STEPS
+    N_STEPS = N_STEPS_PA
+
+    results = []
+    if parallel > 1:
+        from multiprocessing import Pool
+        with Pool(parallel, initializer=apply_patches) as pool:
+            results = pool.map(run_single_args, queue)
+    else:
+        for args in queue:
+            results.append(run_single_args(args))
+
+    N_STEPS = _orig_steps
+
+    results_df = pd.DataFrame(results)
+    results_df.to_csv(f"{OUTPUT_DIR}/summary/run_log_pa.csv", index=False)
+    print(f"\nDone: {len(results)} runs. Results in {OUTPUT_DIR}/raw_data/")
+    return results_df
+
+
 # ── Main ─────────────────────────────────────────────────────────
 
 def main():
@@ -365,7 +434,13 @@ def main():
                         help="Number of parallel workers (default: 1 = sequential)")
     parser.add_argument("--steps", type=int, default=N_STEPS,
                         help="Steps per run")
+    parser.add_argument("--production-aware", action="store_true",
+                        help="Run only the Task 11 production-aware conditions (C16/C17/C18)")
     args = parser.parse_args()
+
+    if args.production_aware:
+        run_production_aware(parallel=args.parallel)
+        return
 
     n_steps = args.steps
     N_STEPS = n_steps

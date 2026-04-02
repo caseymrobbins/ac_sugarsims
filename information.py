@@ -28,6 +28,7 @@ Measurable outputs:
 
 from __future__ import annotations
 
+from collections import deque
 from typing import TYPE_CHECKING, Dict, List, Optional, Tuple
 
 import numpy as np
@@ -53,9 +54,12 @@ PEER_SHARE_RATE = 0.05           # how much weight blending happens per peer int
 NEWS_ABSORPTION_RATE = 0.1       # how much a news signal shifts weights
 
 # News firm parameters
-NEWS_FIRM_ACCURACY_COST = 3.0    # wealth per step to maintain high accuracy
+NEWS_FIRM_ACCURACY_COST = 2.0    # wealth per step to maintain high accuracy (reduced: was 3.0)
 AUDIENCE_CAPTURE_RATE = 0.005    # per-step drift toward audience beliefs (slow enough for editorial signal to persist)
 CARTEL_BIAS_STRENGTH = 0.3       # how much cartel capture distorts the signal
+
+# Per-agent epistemic health tracking
+SIGNAL_WINDOW_SIZE = 20          # rolling window of recent signals for EH computation
 
 
 # ---------------------------------------------------------------------------
@@ -176,19 +180,27 @@ class InfoSignal:
     """
     A packet of information produced by a news firm.
     Contains weight modifications, trust level, and optional scapegoating.
+
+    Source quality fields (for per-agent EH computation):
+      is_captured_source  -- True if the originating news firm is cartel-captured
+      source_accuracy     -- Effective accuracy of originating firm (0-1); degraded by capture fraction
     """
     __slots__ = ['weight_deltas', 'trust', 'source_id', 'hops',
-                 'scapegoat_identity', 'blame_target']
+                 'scapegoat_identity', 'blame_target',
+                 'is_captured_source', 'source_accuracy']
 
     def __init__(self, weight_deltas: Dict[str, float], trust: float,
                  source_id: int, hops: int = 0,
-                 scapegoat_identity=None, blame_target: Optional[str] = None):
+                 scapegoat_identity=None, blame_target: Optional[str] = None,
+                 is_captured_source: bool = False, source_accuracy: float = 0.5):
         self.weight_deltas = weight_deltas   # {action: delta} to apply to weights
         self.trust = trust                    # 0-1, decays with distance
         self.source_id = source_id
         self.hops = hops
         self.scapegoat_identity = scapegoat_identity  # identity tuple to blame
         self.blame_target = blame_target  # "workers", "firms", "government", etc.
+        self.is_captured_source = is_captured_source  # True if cartel-captured origin
+        self.source_accuracy = source_accuracy        # effective accuracy at origin
 
     def decay(self) -> 'InfoSignal':
         """Return a copy with decayed trust for next hop."""
@@ -199,6 +211,8 @@ class InfoSignal:
             hops=self.hops + 1,
             scapegoat_identity=self.scapegoat_identity,
             blame_target=self.blame_target,
+            is_captured_source=self.is_captured_source,
+            source_accuracy=self.source_accuracy,
         )
 
 
@@ -265,13 +279,15 @@ class NewsFirm(Agent):
         accuracy_cost = self.accuracy * NEWS_FIRM_ACCURACY_COST
         self.wealth -= accuracy_cost
 
-        # Public funding maintains minimum editorial standards
+        # Public funding: boosts accuracy floor and provides baseline revenue
         if self._received_public_funding:
             self.accuracy = max(0.3, self.accuracy)
+            # Baseline public revenue (models public broadcasting subsidy)
+            self.revenue = max(self.revenue, accuracy_cost * 0.5)
             self._received_public_funding = False
 
-        # Revenue from audience
-        self.revenue = self.audience_size * 0.3  # per-subscriber fee
+        # Revenue from audience (0.5 per subscriber; was 0.3 — break-even now ~4 subscribers at full accuracy)
+        self.revenue = self.audience_size * 0.5
         self.profit = self.revenue - accuracy_cost
         self.wealth += self.revenue
 
@@ -345,12 +361,21 @@ class NewsFirm(Agent):
                 scapegoat_identity = IDENTITY_TYPES[rng.integers(len(IDENTITY_TYPES))]
                 blame_target = rng.choice(["workers", "immigrants", "government"])
 
+        # Effective accuracy: capture degrades it proportional to cartel bias strength
+        is_captured = self.captured_by_cartel is not None
+        effective_accuracy = (
+            self.accuracy * (1.0 - CARTEL_BIAS_STRENGTH)
+            if is_captured else self.accuracy
+        )
+
         return InfoSignal(
             weight_deltas=signal_deltas,
             trust=base_trust,
             source_id=self.unique_id,
             scapegoat_identity=scapegoat_identity,
             blame_target=blame_target,
+            is_captured_source=is_captured,
+            source_accuracy=float(np.clip(effective_accuracy, 0.0, 1.0)),
         )
 
     def _observe_ground_truth(self) -> Dict[str, float]:
@@ -517,6 +542,81 @@ def propagate_peer_information(model: "EconomicModel"):
 
 
 # ---------------------------------------------------------------------------
+# Per-agent and system-level epistemic health (four-variable model)
+# ---------------------------------------------------------------------------
+
+def compute_agent_eh(worker) -> float:
+    """
+    Compute per-agent epistemic health using the four-variable model:
+
+        EH_i = (VE_i * CI_i) / (1 + M_i) * g(tau_c_i)
+
+    where:
+      M_i   -- misinformation exposure: fraction of recent signals from captured sources
+      VE_i  -- viewpoint entropy: source diversity (HHI-based), in [0,1]
+      CI_i  -- claim integrity: mean effective accuracy of consumed signals, in [0,1]
+      tau_c_i -- contestation quality: experience-correction fraction weighted by source accuracy
+
+    EH_i is clipped to [0, 1].
+    """
+    M_i     = getattr(worker, 'misinformation_exposure', 0.0)
+    VE_i    = getattr(worker, 'viewpoint_entropy', 0.5)
+    CI_i    = getattr(worker, 'claim_integrity', 0.5)
+    tau_c_i = getattr(worker, 'contestation_quality', 0.5)
+
+    # g(tau_c) = identity (simplest monotone increasing, g(0)=0, g(1)=1)
+    g_tau = tau_c_i
+
+    eh = (VE_i * CI_i) / (1.0 + M_i) * g_tau
+    return float(np.clip(eh, 0.0, 1.0))
+
+
+def _gini(values: List[float]) -> float:
+    """Compute Gini coefficient for a list of non-negative values."""
+    arr = np.array(values, dtype=float)
+    if arr.sum() == 0 or len(arr) < 2:
+        return 0.0
+    arr = np.sort(arr)
+    n = len(arr)
+    return float((2 * np.sum(np.arange(1, n + 1) * arr) - (n + 1) * arr.sum()) / (n * arr.sum()))
+
+
+def compute_system_eh(model: "EconomicModel") -> Dict[str, float]:
+    """
+    System-level epistemic health decomposition.
+
+    Returns mean, floor (min), median, Gini, and per-variable system averages.
+    Uses per-agent EH so captured-media conditions correctly show LOWER EH.
+    """
+    workers = [w for w in model.workers if getattr(w, 'alive', True)]
+    if not workers:
+        return {
+            'epistemic_health_mean':   0.0,
+            'epistemic_health_floor':  0.0,
+            'epistemic_health_median': 0.0,
+            'eh_gini':                 0.0,
+            'pct_low_eh':              0.0,
+            'system_M':                0.0,
+            'system_VE':               0.0,
+            'system_CI':               0.0,
+            'system_tau_c':            0.0,
+        }
+
+    agent_ehs = [compute_agent_eh(w) for w in workers]
+    return {
+        'epistemic_health_mean':   float(np.mean(agent_ehs)),
+        'epistemic_health_floor':  float(np.min(agent_ehs)),
+        'epistemic_health_median': float(np.median(agent_ehs)),
+        'eh_gini':                 _gini(agent_ehs),
+        'pct_low_eh':              float(np.mean([e < 0.2 for e in agent_ehs])),
+        'system_M':    float(np.mean([getattr(w, 'misinformation_exposure', 0.0) for w in workers])),
+        'system_VE':   float(np.mean([getattr(w, 'viewpoint_entropy', 0.5)       for w in workers])),
+        'system_CI':   float(np.mean([getattr(w, 'claim_integrity', 0.5)          for w in workers])),
+        'system_tau_c':float(np.mean([getattr(w, 'contestation_quality', 0.5)    for w in workers])),
+    }
+
+
+# ---------------------------------------------------------------------------
 # Metrics helpers
 # ---------------------------------------------------------------------------
 
@@ -524,54 +624,59 @@ def compute_information_metrics(model: "EconomicModel") -> Dict[str, float]:
     """
     Compute epistemic health metrics for the current step.
 
-    Includes information R0: the effective reproduction number for
-    information spread. R0 = contact_rate * transmission_prob * duration.
-      - contact_rate: mean connections per agent * peer_share fraction
-      - transmission_prob: mean authority_trust (willingness to accept)
-      - duration: ~1/learning_rate (how long before experience overwrites)
+    Returns the four-variable EH decomposition (M, VE, CI, tau_c) plus
+    per-agent EH distribution statistics, alongside the legacy trust and
+    polarization metrics that remain independently useful.
 
-    R0 > 1 means information (including misinformation) goes viral.
-    R0 < 1 means signals die out through experience correction.
+    Information R0 (SIR analogy) is kept as a diagnostic but is no longer
+    a component of the EH formula.
     """
     workers = model.workers
+    _zero = {
+        "mean_authority_trust": 0.0,
+        "min_authority_trust": 0.0,
+        "weight_polarization": 0.0,
+        "info_r0": 0.0,
+        "n_news_firms": 0,
+        "n_captured_news": 0,
+        "n_accurate_news": 0,
+        "n_captured_accurate": 0,
+        "trust_gini": 0.0,
+        "pct_low_trust": 0.0,
+        # Four-variable EH
+        "system_M": 0.0,
+        "system_VE": 0.0,
+        "system_CI": 0.0,
+        "system_tau_c": 0.0,
+        "epistemic_health_mean": 0.0,
+        "epistemic_health_floor": 0.0,
+        "epistemic_health_median": 0.0,
+        "eh_gini": 0.0,
+        "pct_low_eh": 0.0,
+    }
     if not workers or not hasattr(workers[0], 'decision_weights'):
-        return {
-            "mean_authority_trust": 0.0,
-            "min_authority_trust": 0.0,
-            "weight_polarization": 0.0,
-            "info_r0": 0.0,
-            "n_news_firms": 0,
-            "n_captured_news": 0,
-            "n_accurate_news": 0,
-            "n_captured_accurate": 0,
-            "epistemic_health": 0.0,
-            "trust_gini": 0.0,
-            "pct_low_trust": 0.0,
-        }
+        return _zero
 
-    # Authority trust distribution
+    # --- Authority trust distribution ---
     trusts = np.array([getattr(w, 'authority_trust', 0.5) for w in workers])
     mean_trust = float(np.mean(trusts))
 
-    # Trust Gini: inequality in information access
     trust_sorted = np.sort(trusts)
     n = len(trust_sorted)
     if n > 1 and trust_sorted.sum() > 0:
         trust_gini = float(
-            (2 * np.sum((np.arange(1, n+1)) * trust_sorted) - (n+1) * trust_sorted.sum())
+            (2 * np.sum(np.arange(1, n + 1) * trust_sorted) - (n + 1) * trust_sorted.sum())
             / (n * trust_sorted.sum()))
     else:
         trust_gini = 0.0
 
-    # Fraction with critically low trust (susceptible to capture)
     pct_low_trust = float(np.mean(trusts < 0.3))
 
-    # Weight vector polarization
+    # --- Weight vector polarization ---
     weight_matrix = np.array([
         [w.decision_weights.get(a, 0.5) for a in ACTIONS]
         for w in workers if hasattr(w, 'decision_weights')
     ])
-
     if len(weight_matrix) > 1:
         mean_weights = weight_matrix.mean(axis=0)
         deviations = weight_matrix - mean_weights
@@ -579,27 +684,14 @@ def compute_information_metrics(model: "EconomicModel") -> Dict[str, float]:
     else:
         polarization = 0.0
 
-    # Information R0 calculation (SIR analogy)
-    # contact_rate: fraction of population reached per step via peer sharing
-    mean_connections = float(np.mean([
-        len(w.network_connections) for w in workers
-    ])) if workers else 0
-    contact_rate = mean_connections * PEER_SHARE_RATE  # effective contacts per step
-
-    # transmission_prob: mean trust * absorption rate
+    # --- Information R0 (SIR analogy, kept as diagnostic) ---
+    mean_connections = float(np.mean([len(w.network_connections) for w in workers])) if workers else 0.0
+    contact_rate = mean_connections * PEER_SHARE_RATE
     transmission_prob = mean_trust * NEWS_ABSORPTION_RATE
-
-    # recovery_rate: how fast experience overwrites received information
-    # ~learning_rate from weight updates (0.02)
     recovery_rate = 0.02
+    info_r0 = (contact_rate * transmission_prob) / recovery_rate if recovery_rate > 0 else 0.0
 
-    # R0 = (contact_rate * transmission_prob) / recovery_rate
-    if recovery_rate > 0:
-        info_r0 = (contact_rate * transmission_prob) / recovery_rate
-    else:
-        info_r0 = 0.0
-
-    # News firm stats
+    # --- News firm stats ---
     news_firms = getattr(model, 'news_firms', [])
     active_nf = [nf for nf in news_firms if not nf.defunct]
     n_captured = sum(1 for nf in active_nf if nf.captured_by_cartel is not None)
@@ -607,20 +699,13 @@ def compute_information_metrics(model: "EconomicModel") -> Dict[str, float]:
     n_captured_accurate = sum(1 for nf in active_nf
                               if nf.accuracy >= 0.4 and nf.captured_by_cartel is not None)
 
-    # Boost R0 for captured news firms (superspreader effect)
-    # Each captured firm adds to effective contact rate
+    # Superspreader boost to R0 from captured firms (diagnostic only)
     for nf in news_firms:
         if nf.captured_by_cartel is not None and not nf.defunct:
-            # Captured firm's audience adds to biased signal R0
             info_r0 += nf.audience_size * transmission_prob / max(len(workers), 1)
 
-    # Epistemic health: composite metric
-    # High trust + low polarization + R0 near 1 = healthy information ecology
-    # Low trust + high polarization + R0 >> 1 = information crisis
-    eh_trust = mean_trust
-    eh_polarization = max(0, 1.0 - polarization * 2)
-    eh_r0 = max(0, 1.0 - abs(info_r0 - 1.0) * 0.5)  # penalty for R0 far from 1
-    epistemic_health = (eh_trust * eh_polarization * eh_r0) ** (1/3)  # geometric mean
+    # --- Four-variable EH decomposition ---
+    eh_metrics = compute_system_eh(model)
 
     return {
         "mean_authority_trust": mean_trust,
@@ -631,7 +716,16 @@ def compute_information_metrics(model: "EconomicModel") -> Dict[str, float]:
         "n_captured_news": n_captured,
         "n_accurate_news": n_accurate_news,
         "n_captured_accurate": n_captured_accurate,
-        "epistemic_health": float(epistemic_health),
         "trust_gini": trust_gini,
         "pct_low_trust": pct_low_trust,
+        # Four-variable EH
+        "system_M":              eh_metrics["system_M"],
+        "system_VE":             eh_metrics["system_VE"],
+        "system_CI":             eh_metrics["system_CI"],
+        "system_tau_c":          eh_metrics["system_tau_c"],
+        "epistemic_health_mean": eh_metrics["epistemic_health_mean"],
+        "epistemic_health_floor":eh_metrics["epistemic_health_floor"],
+        "epistemic_health_median":eh_metrics["epistemic_health_median"],
+        "eh_gini":               eh_metrics["eh_gini"],
+        "pct_low_eh":            eh_metrics["pct_low_eh"],
     }

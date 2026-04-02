@@ -29,7 +29,7 @@ ES_SIGMA_MIN = 0.005
 ES_LR = 0.1
 ES_MOMENTUM = 0.9
 STATE_DIM = 16
-POLICY_DIM = 18
+POLICY_DIM = 19
 ADAPT_LR = 0.01
 ADAPT_NOISE = 0.02
 REWARD_CLIP = 50.0
@@ -69,6 +69,8 @@ INSTRUMENT_SPEC: List[Tuple[str, float, float, float]] = [
     ("surveillance_level",        0.0,   0.0,   1.0),
     ("enforcement_budget",        0.3,   0.0,   3.0),
     ("propaganda_budget",         0.0,   0.0,   3.0),
+    # Production-sharing floor: minimum fraction of per-worker revenue to workers
+    ("min_capture_ratio",         0.1,   0.0,   0.5),
 ]
 
 INSTRUMENT_NAMES = [s[0] for s in INSTRUMENT_SPEC]
@@ -336,6 +338,14 @@ class PlannerAgent(Agent):
             tax += agent.production_this_step * agent.pollution_factor * _safe("pollution_tax", 0.0)
             min_w = _safe("min_wage", 1.0)
             if agent.offered_wage < min_w: agent.offered_wage = min_w
+            # Production-sharing floor: firms below min_capture_ratio pay a surcharge
+            floor_ratio = _safe("min_capture_ratio", 0.0)
+            if floor_ratio > 0.0 and agent.revenue > 0:
+                firm_capture = getattr(agent, 'capture_ratio', 1.0)
+                if firm_capture < floor_ratio:
+                    shortfall_fraction = floor_ratio - firm_capture
+                    surcharge = agent.revenue * shortfall_fraction * 0.5  # 50% of gap as tax
+                    tax += max(0.0, surcharge)
         elif isinstance(agent, LandownerAgent):
             rate = _safe("tax_rate_landowner", 0.08); tax = max(0.0, agent.total_rent_collected * 0.01) * rate
         else: return
@@ -700,7 +710,17 @@ class PlannerAgent(Agent):
         agencies = np.array([w.compute_agency() for w in workers], dtype=np.float64)
         agency_floor = float(np.min(agencies)); agency_mean = float(np.mean(agencies))
         s_agency = min(agency_floor / max(agency_mean, 1.0), 2.0)
-        S_pop = max(EPSILON, (max(s_wealth, EPSILON) * max(s_employment, EPSILON) * max(s_agency, EPSILON)) ** (1.0/3.0))
+
+        # Economy-wide production-capture ratio (optional: gated on production_aware_S_pop flag)
+        if getattr(model, 'production_aware_S_pop', False) and firms:
+            total_wages_step = sum(getattr(f, 'wages_this_step', 0.0) for f in firms)
+            total_rev_step   = sum(f.revenue for f in firms)
+            economy_capture  = total_wages_step / max(total_rev_step, 1e-9)
+            s_capture = min(economy_capture / 0.3, 2.0)  # 0.3 = Costco benchmark
+            S_pop = max(EPSILON, (max(s_wealth, EPSILON) * max(s_employment, EPSILON)
+                                  * max(s_agency, EPSILON) * max(s_capture, EPSILON)) ** 0.25)
+        else:
+            S_pop = max(EPSILON, (max(s_wealth, EPSILON) * max(s_employment, EPSILON) * max(s_agency, EPSILON)) ** (1.0/3.0))
 
         # ---- E_pop: Education/Human Capital ----
         skills = np.array([w.skill for w in workers], dtype=np.float64)

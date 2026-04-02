@@ -26,29 +26,23 @@ import time
 import argparse
 from concurrent.futures import ProcessPoolExecutor, as_completed
 
-SEEDS = [101, 202, 303, 404, 505, 606]
+SEEDS = [42, 101, 137, 202, 256, 303, 404, 505]
 N_STEPS = 2000
 
-# (name, objective, use_sevc, use_innovation, use_trust, trust_noise, use_hi, use_firm_hi, gov_type, mixed_sevc_ratio, election_weight, media_captured)
+# (name, objective, use_sevc, use_innovation, use_trust, trust_noise, use_hi, use_firm_hi, gov_type,
+#   mixed_sevc_ratio, election_weight, media_captured, production_aware_E, production_aware_S_pop,
+#   ceo_compensation_tied, ceo_base_equals_floor, ceo_equity_tied, capture_normalization,
+#   use_capacity_mitosis)
 CONDITIONS = [
-    ("C1_baseline",       "SUM_RAW", False, True,  False, 0.0, False, False, "authoritarian",  1.0, 0.0, False, True),
-    ("C2_sevc",           "SUM_RAW", True,  True,  False, 0.0, False, False, "authoritarian",  1.0, 0.0, False, True),
-    ("C3_sevc_hi",        "SUM_RAW", True,  True,  False, 0.0, True,  True,  "authoritarian",  1.0, 0.0, False, True),
-    ("C4_full_auth",      "SUM_RAW", True,  True,  True,  0.1, True,  True,  "authoritarian",  1.0, 0.0, False, True),
-    ("C5_demo_captured",  "SUM_RAW", True,  True,  True,  0.1, True,  True,  "demo_captured",  1.0, 0.0, False, True),
-    ("C6_auth_captured",  "SUM_RAW", True,  True,  True,  0.1, True,  True,  "auth_captured",  1.0, 0.0, False, True),
-    ("C7_democratic",     "SUM_RAW", True,  True,  True,  0.1, True,  True,  "democratic",     1.0, 0.0, False, True),
-    ("C8_mixed",          "SUM_RAW", True,  True,  True,  0.1, True,  True,  "democratic",     0.5, 0.0, False, True),
-    ("C9_planner_sevc_democratic",    "PLANNER_SEVC", True, True, True, 0.1, True, True, "democratic",    1.0, 0.0, False, True),
-    ("C10_planner_sevc_auth",         "PLANNER_SEVC", True, True, True, 0.1, True, True, "authoritarian", 1.0, 0.0, False, True),
-    ("C11_planner_sevc_demo_captured","PLANNER_SEVC", True, True, True, 0.1, True, True, "demo_captured", 1.0, 0.0, False, True),
-    ("C12_responsive_democratic",     "PLANNER_SEVC", True, True, True, 0.1, True, True, "democratic",    1.0, 2.0, False, True),
-    ("C13_responsive_demo_captured",  "PLANNER_SEVC", True, True, True, 0.1, True, True, "demo_captured", 1.0, 2.0, True,  True),
-    ("C14_pure_technocrat_democratic", "PLANNER_SEVC", True, True, True, 0.1, True, True, "democratic",    1.0, 0.0, False, True),
-    ("C15_pure_technocrat_auth",       "PLANNER_SEVC", True, True, True, 0.1, True, True, "authoritarian", 1.0, 0.0, False, True),
+    ("C16_production_aware_democratic",  "PLANNER_SEVC", True,  True, True, 0.1, True, True, "democratic",    1.0, 2.0, False, True,  True,  False, False, False, "fixed"),
+    ("C17_production_aware_no_sevc",     "PLANNER_SEVC", False, True, True, 0.1, True, True, "democratic",    1.0, 2.0, False, False, True,  False, False, False, "fixed"),
+    ("C18_production_aware_captured",    "PLANNER_SEVC", True,  True, True, 0.1, True, True, "demo_captured", 1.0, 2.0, True,  True,  True,  False, False, False, "fixed"),
+    # Task 12: CEO compensation tied to SEVC floor
+    ("C19_ceo_tied_democratic",          "PLANNER_SEVC", True,  True, True, 0.1, True, True, "democratic",    1.0, 2.0, False, True,  True,  True,  True,  True,  "ema"),
+    ("C20_ceo_tied_captured",            "PLANNER_SEVC", True,  True, True, 0.1, True, True, "demo_captured", 1.0, 2.0, True,  True,  True,  True,  True,  True,  "ema"),
     # Task 13: capacity-driven mitosis
-    ("C21_mitosis_democratic",   "PLANNER_SEVC", True, True, True, 0.1, True, True, "democratic", 1.0, 1.0, False, True),
-    ("C22_no_mitosis_democratic","PLANNER_SEVC", True, True, True, 0.1, True, True, "democratic", 1.0, 1.0, False, False),
+    ("C21_mitosis_democratic",   "PLANNER_SEVC", True, True, True, 0.1, True, True, "democratic", 1.0, 1.0, False, False, False, False, False, False, "fixed", True),
+    ("C22_no_mitosis_democratic","PLANNER_SEVC", True, True, True, 0.1, True, True, "democratic", 1.0, 1.0, False, False, False, False, False, False, "fixed", False),
 ]
 
 # Preset: 2-condition test (vanilla vs full stack) with 10 seeds
@@ -57,6 +51,21 @@ TEST2_CONDITIONS = [
     ("topo_sevc_hi",  "TOPO_X",       True,  True, True,  0.1, True,  True,  "democratic",    1.0, 0.0, False, True),
 ]
 TEST2_SEEDS = [7, 23, 59, 101, 233, 347, 461, 587, 719, 853]
+
+# Task 11: Production-Aware Capital conditions (C16/C17/C18)
+# Tuple: (name, objective, use_sevc, use_innovation, use_trust, trust_noise,
+#          use_hi, use_firm_hi, gov_type, mixed_sevc_ratio, election_weight,
+#          media_captured, production_aware_E, production_aware_S_pop)
+PA_CONDITIONS = [
+    # C16: full production-aware SEVC, responsive democracy — primary test
+    ("C16_production_aware_democratic",  "PLANNER_SEVC", True,  True, True, 0.1, True, True, "democratic",    1.0, 2.0, False, True,  True),
+    # C17: vanilla firms + planner capture floor — planner-only baseline
+    ("C17_production_aware_no_sevc",     "PLANNER_SEVC", False, True, True, 0.1, True, True, "democratic",    1.0, 2.0, False, False, True),
+    # C18: production-aware SEVC + captured media — robustness test
+    ("C18_production_aware_captured",    "PLANNER_SEVC", True,  True, True, 0.1, True, True, "demo_captured", 1.0, 2.0, True,  True,  True),
+]
+PA_SEEDS  = [42, 137, 256, 389, 501, 623, 777, 888]
+PA_STEPS  = 2000
 
 # Preset: C12-C15 responsiveness test with 8 new seeds
 RESP_CONDITIONS = [
@@ -69,8 +78,8 @@ RESP_SEEDS = [42, 137, 256, 389, 501, 623, 777, 888]
 
 # Preset: C21-C22 mitosis test with 8 seeds
 MITOSIS_CONDITIONS = [
-    ("C21_mitosis_democratic",   "PLANNER_SEVC", True, True, True, 0.1, True, True, "democratic", 1.0, 1.0, False, True),
-    ("C22_no_mitosis_democratic","PLANNER_SEVC", True, True, True, 0.1, True, True, "democratic", 1.0, 1.0, False, False),
+    ("C21_mitosis_democratic",   "PLANNER_SEVC", True, True, True, 0.1, True, True, "democratic", 1.0, 1.0, False, False, False, False, False, False, "fixed", True),
+    ("C22_no_mitosis_democratic","PLANNER_SEVC", True, True, True, 0.1, True, True, "democratic", 1.0, 1.0, False, False, False, False, False, False, "fixed", False),
 ]
 MITOSIS_SEEDS = [42, 137, 256, 389, 501, 623, 777, 888]
 
@@ -162,6 +171,12 @@ GOV_TYPE = "@@GOV_TYPE@@"
 MIXED_SEVC_RATIO = @@MIXED_SEVC_RATIO@@
 ELECTION_WEIGHT = @@ELECTION_WEIGHT@@
 MEDIA_CAPTURED = @@MEDIA_CAPTURED@@
+PRODUCTION_AWARE_E    = @@PRODUCTION_AWARE_E@@
+PRODUCTION_AWARE_S_POP = @@PRODUCTION_AWARE_S_POP@@
+CEO_COMPENSATION_TIED = @@CEO_COMPENSATION_TIED@@
+CEO_BASE_EQUALS_FLOOR = @@CEO_BASE_EQUALS_FLOOR@@
+CEO_EQUITY_TIED       = @@CEO_EQUITY_TIED@@
+CAPTURE_NORMALIZATION = "@@CAPTURE_NORMALIZATION@@"
 USE_CAPACITY_MITOSIS = @@USE_CAPACITY_MITOSIS@@
 SEED = @@SEED@@
 N_STEPS = @@N_STEPS@@
@@ -186,6 +201,12 @@ model.use_horizon_index = USE_HI
 model.use_firm_hi = USE_FIRM_HI
 model.gov_type = GOV_TYPE
 model.election_weight = ELECTION_WEIGHT
+model.production_aware_E     = PRODUCTION_AWARE_E
+model.production_aware_S_pop = PRODUCTION_AWARE_S_POP
+model.ceo_compensation_tied  = CEO_COMPENSATION_TIED
+model.ceo_base_equals_floor  = CEO_BASE_EQUALS_FLOOR
+model.ceo_equity_tied        = CEO_EQUITY_TIED
+model.capture_normalization  = CAPTURE_NORMALIZATION
 model.use_capacity_mitosis = USE_CAPACITY_MITOSIS
 
 if not USE_SEVC:
@@ -277,9 +298,13 @@ _SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 
 def make_script(name, objective, use_sevc, use_innovation, use_trust, trust_noise,
                 use_hi, use_firm_hi, gov_type, mixed_sevc_ratio,
-                election_weight, media_captured, use_capacity_mitosis=True,
-                seed=42, n_steps=500,
-                animate=False, anim_subsample=2, output_dir="results/architecture"):
+                election_weight, media_captured,
+                seed, n_steps,
+                animate=False, anim_subsample=2, output_dir="results/architecture",
+                production_aware_E=False, production_aware_S_pop=False,
+                ceo_compensation_tied=False, ceo_base_equals_floor=False,
+                ceo_equity_tied=False, capture_normalization="fixed",
+                use_capacity_mitosis=True):
     """Generate a self-contained run script with config injected."""
     s = SCRIPT_TEMPLATE
     s = s.replace("@@CWD@@", _SCRIPT_DIR)
@@ -295,6 +320,12 @@ def make_script(name, objective, use_sevc, use_innovation, use_trust, trust_nois
     s = s.replace("@@MIXED_SEVC_RATIO@@", str(mixed_sevc_ratio))
     s = s.replace("@@ELECTION_WEIGHT@@", str(election_weight))
     s = s.replace("@@MEDIA_CAPTURED@@", str(media_captured))
+    s = s.replace("@@PRODUCTION_AWARE_E@@", str(production_aware_E))
+    s = s.replace("@@PRODUCTION_AWARE_S_POP@@", str(production_aware_S_pop))
+    s = s.replace("@@CEO_COMPENSATION_TIED@@", str(ceo_compensation_tied))
+    s = s.replace("@@CEO_BASE_EQUALS_FLOOR@@", str(ceo_base_equals_floor))
+    s = s.replace("@@CEO_EQUITY_TIED@@", str(ceo_equity_tied))
+    s = s.replace("@@CAPTURE_NORMALIZATION@@", str(capture_normalization))
     s = s.replace("@@USE_CAPACITY_MITOSIS@@", str(use_capacity_mitosis))
     s = s.replace("@@SEED@@", str(seed))
     s = s.replace("@@N_STEPS@@", str(n_steps))
@@ -308,17 +339,25 @@ def run_one(job):
     """Write script, run as subprocess, return result."""
     (name, objective, use_sevc, use_innovation, use_trust, trust_noise,
      use_hi, use_firm_hi, gov_type, mixed_sevc_ratio,
-     election_weight, media_captured, use_capacity_mitosis,
+     election_weight, media_captured, production_aware_E, production_aware_S_pop,
+     ceo_compensation_tied, ceo_base_equals_floor, ceo_equity_tied, capture_normalization,
+     use_capacity_mitosis,
      seed, n_steps, animate, anim_subsample, output_dir) = job
     label = name + "/seed" + str(seed)
 
     script = make_script(name, objective, use_sevc, use_innovation,
                          use_trust, trust_noise, use_hi, use_firm_hi, gov_type,
                          mixed_sevc_ratio, election_weight, media_captured,
-                         use_capacity_mitosis,
                          seed, n_steps,
                          animate=animate, anim_subsample=anim_subsample,
-                         output_dir=output_dir)
+                         output_dir=output_dir,
+                         production_aware_E=production_aware_E,
+                         production_aware_S_pop=production_aware_S_pop,
+                         ceo_compensation_tied=ceo_compensation_tied,
+                         ceo_base_equals_floor=ceo_base_equals_floor,
+                         ceo_equity_tied=ceo_equity_tied,
+                         capture_normalization=capture_normalization,
+                         use_capacity_mitosis=use_capacity_mitosis)
 
     script_path = "/tmp/run_" + name + "_s" + str(seed) + ".py"
     with open(script_path, "w") as f:
@@ -364,8 +403,8 @@ def main():
     parser.add_argument("--subsample", type=int, default=2,
                         help="Animation frame subsample rate (default: 2)")
     parser.add_argument("--preset", type=str, default=None,
-                        choices=["full", "test2", "resp", "mitosis"],
-                        help="Preset: 'full' = all conditions, 'test2' = vanilla vs topo (10 seeds), 'resp' = C12-C15 (8 seeds), 'mitosis' = C21-C22 (8 seeds)")
+                        choices=["full", "test2", "resp", "pa", "mitosis"],
+                        help="Preset: 'full' = all conditions, 'test2' = vanilla vs topo, 'resp' = C12-C15, 'pa' = C16-C18, 'mitosis' = C21-C22")
     args = parser.parse_args()
 
     # Select conditions and seeds based on preset
@@ -379,6 +418,11 @@ def main():
         seeds = RESP_SEEDS
         n_steps = args.steps if args.steps > 0 else N_STEPS
         output_dir = "results/responsiveness"
+    elif args.preset == "pa":
+        conditions = PA_CONDITIONS
+        seeds = PA_SEEDS
+        n_steps = args.steps if args.steps > 0 else PA_STEPS
+        output_dir = "results/production_aware"
     elif args.preset == "mitosis":
         conditions = MITOSIS_CONDITIONS
         seeds = MITOSIS_SEEDS
@@ -401,7 +445,15 @@ def main():
         if args.only and name != args.only:
             continue
         for seed in seeds:
-            jobs.append(cond + (seed, n_steps, args.animate, args.subsample, output_dir))
+            # Pad legacy tuples up to 18 fields
+            full_cond = cond
+            if len(full_cond) < 14:
+                full_cond = full_cond + (False, False)        # pad production_aware flags
+            if len(full_cond) < 18:
+                full_cond = full_cond + (False, False, False, "fixed")  # pad CEO flags
+            if len(full_cond) < 19:
+                full_cond = full_cond + (True,)               # pad use_capacity_mitosis
+            jobs.append(full_cond + (seed, n_steps, args.animate, args.subsample, output_dir))
 
     print("=" * 70)
     print("  PARALLEL ARCHITECTURE EXPERIMENT")
@@ -416,7 +468,11 @@ def main():
     for cond in conditions:
         if args.only and cond[0] != args.only:
             continue
-        name, obj, sevc, inno, trust, noise, hi, firm_hi, gov, mixed_ratio, elec_w, media_cap = cond
+        name, obj, sevc, inno, trust, noise, hi, firm_hi, gov, mixed_ratio, elec_w, media_cap = cond[:12]
+        pa_e   = cond[12] if len(cond) > 12 else False
+        pa_s   = cond[13] if len(cond) > 13 else False
+        ceo_t  = cond[14] if len(cond) > 14 else False
+        cap_n  = cond[17] if len(cond) > 17 else "fixed"
         flags = []
         if sevc: flags.append("SEVC")
         if inno: flags.append("Inno")
@@ -427,6 +483,8 @@ def main():
         if mixed_ratio < 1.0: flags.append("Mix(" + str(mixed_ratio) + ")")
         if elec_w > 0: flags.append("Resp(" + str(elec_w) + ")")
         if media_cap: flags.append("MediaCap")
+        if pa_e or pa_s: flags.append("PA(E=" + str(pa_e) + ",S=" + str(pa_s) + ")")
+        if ceo_t: flags.append("CEO(norm=" + str(cap_n) + ")")
         print("  " + name + ": " + obj + " [" + ", ".join(flags) + "]")
     print()
 

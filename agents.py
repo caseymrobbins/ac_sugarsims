@@ -131,6 +131,15 @@ class WorkerAgent(Agent):
         self.aggression = float(rng.beta(2, 5))  # 0=content, 0.5=friction, 1.0=rebellion
         self._crime_events = 0  # per-step counter, reset each step
         self._riot_events = 0
+        # Per-agent epistemic health: rolling window of received signal metadata
+        # Each entry: (is_captured_source: bool, source_accuracy: float, source_id: int)
+        from information import SIGNAL_WINDOW_SIZE
+        self._signal_window: deque = deque(maxlen=SIGNAL_WINDOW_SIZE)
+        # EH four-variable attributes (updated in receive_information)
+        self.misinformation_exposure: float = 0.0   # M_i: fraction of signals from captured sources
+        self.viewpoint_entropy: float = 0.5          # VE_i: source diversity (HHI-based)
+        self.claim_integrity: float = 0.5            # CI_i: weighted mean source accuracy
+        self.contestation_quality: float = 0.5       # tau_c_i: experience vs captured signal ratio
 
     def step(self):
         self.age += 1
@@ -256,6 +265,58 @@ class WorkerAgent(Agent):
         if scapegoat is not None and _identity_similarity(self.identity, scapegoat) < 0.5:
             # Worker absorbs blame narrative: increase aggression toward scapegoat group
             self.aggression = min(1.0, self.aggression + effective_trust * 0.02)
+
+        # Record signal metadata in rolling window for per-agent EH computation
+        is_captured = getattr(signal, 'is_captured_source', False)
+        src_accuracy = getattr(signal, 'source_accuracy', 0.5)
+        self._signal_window.append((is_captured, src_accuracy, signal.source_id))
+        self._update_eh_attributes()
+
+    def _update_eh_attributes(self):
+        """Recompute M_i, VE_i, CI_i, tau_c_i from the rolling signal window."""
+        window = list(self._signal_window)
+        n = len(window)
+        if n == 0:
+            return
+
+        # --- M_i: misinformation exposure ---
+        # Fraction of signals that came from captured sources
+        n_captured = sum(1 for (cap, _, _) in window if cap)
+        self.misinformation_exposure = float(n_captured) / n
+
+        # --- VE_i: viewpoint entropy via HHI ---
+        # Count how many signals came from each distinct source
+        source_counts: Dict[int, int] = {}
+        for (_, _, sid) in window:
+            source_counts[sid] = source_counts.get(sid, 0) + 1
+        n_sources = len(source_counts)
+        if n_sources <= 1:
+            self.viewpoint_entropy = 0.0
+        else:
+            shares = [c / n for c in source_counts.values()]
+            hhi = sum(s * s for s in shares)
+            # VE = 1 - HHI, normalized to [0,1] via (1-HHI)/(1-1/n_sources)
+            max_diversity = 1.0 - 1.0 / n_sources
+            self.viewpoint_entropy = float(np.clip((1.0 - hhi) / max_diversity, 0.0, 1.0))
+
+        # --- CI_i: claim integrity (weighted mean source accuracy) ---
+        # Equal weight per signal; source_accuracy is effective_accuracy from producer
+        self.claim_integrity = float(np.mean([acc for (_, acc, _) in window]))
+
+        # --- tau_c_i: contestation quality ---
+        # Fraction of agent's information update driven by experience vs captured signals
+        # experience_correction_rate ≈ weight-update learning rate * |outcome|
+        experience_rate = 0.02 * (abs(self._last_action_outcome) + 1e-9)
+        captured_rate = self.misinformation_exposure * len(window) / max(n, 1)
+        denom = experience_rate + captured_rate
+        if denom > 0:
+            raw_tau = experience_rate / denom
+        else:
+            raw_tau = 0.5
+        # Weight correction by mean accuracy of non-captured sources in the window
+        non_captured_acc = [acc for (cap, acc, _) in window if not cap]
+        quality_weight = float(np.mean(non_captured_acc)) if non_captured_acc else 0.0
+        self.contestation_quality = float(np.clip(raw_tau * quality_weight, 0.0, 1.0))
 
     def _harvest(self):
         pos = self._safe_pos()
@@ -595,16 +656,36 @@ class WorkerAgent(Agent):
         super().remove()
 
     def compute_agency(self):
-        resources = max(self.wealth, 1e-9)
+        # Raw POLI dimensions
+        resources = max(self.wealth, 1e-9)                                  # P: material prerequisites
         if self.pos is not None:
             p = (int(self.pos[0]), int(self.pos[1]))
-            local_density = float(self.model.food_grid[p[0],p[1]]) + float(self.model.raw_grid[p[0],p[1]]) + float(self.model.capital_grid[p[0],p[1]])
-        else: local_density = 1.0
-        options = max(self.skill * (local_density + 1), 1e-9)
-        levers = 1.0 + float(self.employed) + float(self.debt < 100) + float(len(self.network_connections) > 0)
-        impact = max(abs(self.income_last_step - self.income_prev_step) + 1e-9, 1e-9)
-        raw_agency = (resources * options * levers * impact) ** 0.25
-        return float(raw_agency * (0.5 + 0.5 * self.authority_trust))
+            local_density = (float(self.model.food_grid[p[0],p[1]]) +
+                             float(self.model.raw_grid[p[0],p[1]]) +
+                             float(self.model.capital_grid[p[0],p[1]]))
+        else:
+            local_density = 1.0
+        options = max(self.skill * (local_density + 1), 1e-9)               # O: available options
+        levers = 1.0 + float(self.employed) + float(self.debt < 100) + float(len(self.network_connections) > 0)  # L: action levers
+        impact = max(abs(self.income_last_step - self.income_prev_step) + 1e-9, 1e-9)  # I: effective impact
+
+        # POLI-EH separation: each dimension filtered by its phase-specific epistemic variable
+        #   P-phase: M degrades perception of own prerequisites
+        #   O-phase: VE (viewpoint entropy) constrains which options are visible
+        #   L-phase: CI (claim integrity) determines quality of lever selection
+        #   I-phase: tau_c (contestation quality) determines if impact is read correctly
+        M       = getattr(self, 'misinformation_exposure', 0.0)
+        VE      = getattr(self, 'viewpoint_entropy', 0.5)
+        CI      = getattr(self, 'claim_integrity', 0.5)
+        tau_c   = getattr(self, 'contestation_quality', 0.5)
+
+        P_eff = resources / (1.0 + M)          # high M distorts P-perception
+        O_eff = max(options * VE, 1e-9)        # low VE shrinks visible option set
+        L_eff = levers * CI                    # low CI corrupts lever selection
+        I_eff = max(impact * tau_c, 1e-9)      # low tau_c mutes effective impact
+
+        agency = (P_eff * O_eff * L_eff * I_eff) ** 0.25
+        return float(agency)
 
 
 class FirmAgent(Agent):
@@ -618,6 +699,9 @@ class FirmAgent(Agent):
         self.profit = 0.0; self.prev_profit = 0.0; self.revenue = 0.0; self.production_this_step = 0.0
         self.cartel_id = None; self.cartel_partners = []; self.defunct = False; self.age = 0
         self.market_share = 0.0; self.total_wages_paid = 0.0; self.total_profit_accumulated = 0.0
+        self.wages_this_step: float = 0.0  # per-step wage expenditure (reset each step)
+        self.capture_ratio: float = 0.5    # wages_this_step / revenue; updated by SEVC scoring
+        self.capture_ratio_ema: float = 0.05  # EMA reference for adaptive normalization (Task 12)
         self.pollution_factor = float(rng.uniform(0.05, 0.30)); self.total_pollution_emitted = 0.0
         self._consecutive_losses = 0; self.total_dividends_paid = 0.0
         self.trust_score = 0.5
@@ -642,12 +726,24 @@ class FirmAgent(Agent):
         # Headroom stability (Task 13): tracks S-floor gap variance
         self.headroom_history = deque(maxlen=30)
         self.headroom_stability = 0.0
+        # CEO compensation (Task 12)
+        self.ceo_id: Optional[int] = None
+        self.ceo_equity_share: float = float(np.clip(rng.uniform(0.05, 0.20), 0.05, 0.20))
+        self.ceo_equity_value: float = 0.0
+        self._prev_ceo_equity_value: float = 0.0
+        self.ceo_compensation_this_step: float = 0.0
+        self.ceo_base_salary: float = 0.0
+        self.ceo_bonus: float = 0.0
+        self.ceo_potential_bonus: float = 0.0
+        self.sevc_floor: float = 0.5    # current SEVC floor (written by compute_stakeholder_scores)
+        self.sevc_binding: str = "S"    # current binding dimension
         # Innovation
         init_firm_tech(self)
 
     def step(self):
         if self.defunct: return
         self.age += 1; self.prev_profit = self.profit; self.production_this_step = 0.0; self.revenue = 0.0
+        self.wages_this_step = 0.0  # reset per-step wage counter
         self._produce()
         if self.is_sevc:
             strategy = sustainable_choose_strategy(self)
@@ -668,9 +764,60 @@ class FirmAgent(Agent):
             if self.profit < 0: self._consecutive_losses += 1
             else: self._consecutive_losses = 0
         self.capital_stock *= 0.998
+        self._pay_ceo()
         if self.wealth < -200 and len(self.workers) == 0: self._go_bankrupt(); return
         self._consider_mitosis()
         self.model.planner.apply_tax(self)
+
+    def _get_ceo(self):
+        """Return the highest-skilled current worker as the acting CEO."""
+        if not self.workers:
+            return None
+        return max(self.workers.values(), key=lambda w: w.skill)
+
+    def _pay_ceo(self):
+        """
+        CEO compensation tied to SEVC floor (Task 12).
+
+        base_salary = lowest worker wage at this firm (floor-equalised base)
+        bonus       = potential_bonus * sevc_floor
+        equity      = book_value * ceo_equity_share * sevc_floor (mark-to-market)
+
+        Only active when model.ceo_compensation_tied is True.
+        """
+        if not getattr(self.model, 'ceo_compensation_tied', False):
+            return
+        ceo = self._get_ceo()
+        if ceo is None:
+            return
+        self.ceo_id = ceo.unique_id
+
+        # Base salary
+        if getattr(self.model, 'ceo_base_equals_floor', False) and self.workers:
+            self.ceo_base_salary = float(min(w.wage for w in self.workers.values()))
+        else:
+            self.ceo_base_salary = float(ceo.wage)
+
+        # Bonus: potential = 10% of positive profit; actual = potential * sevc_floor
+        self.ceo_potential_bonus = float(max(self.profit, 0.0) * 0.10)
+        sevc_fl = float(np.clip(self.sevc_floor, 0.0, 1.0))
+        self.ceo_bonus = self.ceo_potential_bonus * sevc_fl
+        self.ceo_compensation_this_step = self.ceo_base_salary + self.ceo_bonus
+
+        # Pay out from firm wealth
+        payment = float(min(self.ceo_compensation_this_step, max(0.0, self.wealth)))
+        self.wealth -= payment
+        ceo.wealth += payment
+        ceo.income_last_step += payment
+
+        # Equity mark-to-market: stock_price = book_value * sevc_floor
+        if getattr(self.model, 'ceo_equity_tied', False):
+            book_value = max(self.capital_stock + max(getattr(self, 'total_profit_accumulated', 0.0), 0.0), 0.0)
+            self._prev_ceo_equity_value = self.ceo_equity_value
+            self.ceo_equity_value = book_value * self.ceo_equity_share * min(sevc_fl * 2.0, 2.0)
+            # Smooth equity delta: only 5% materialises per step, capped at ±10 to avoid instability
+            equity_delta = float(np.clip((self.ceo_equity_value - self._prev_ceo_equity_value) * 0.05, -10.0, 10.0))
+            ceo.wealth += equity_delta
 
     def _execute_strategy(self, strategy):
         if strategy == "invest_capital":
@@ -798,7 +945,7 @@ class FirmAgent(Agent):
     def pay_worker(self, worker):
         wage = self.offered_wage
         if self.wealth < wage: wage = max(0, self.wealth * 0.5)
-        self.wealth -= wage; self.total_wages_paid += wage; return wage
+        self.wealth -= wage; self.total_wages_paid += wage; self.wages_this_step += wage; return wage
 
     def _consider_mitosis(self):
         """Capacity-driven mitosis: split when growth outpaces institutional capacity."""
