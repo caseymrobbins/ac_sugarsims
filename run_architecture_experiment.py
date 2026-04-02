@@ -89,17 +89,15 @@ CONDITIONS = [
     Condition("C14_pure_technocrat_democratic", "Technocrat SEVC democracy",   "PLANNER_SEVC", True, True, 0.1, True, True, "democratic",    election_weight=0.0),
     Condition("C15_pure_technocrat_auth",       "Technocrat SEVC auth",        "PLANNER_SEVC", True, True, 0.1, True, True, "authoritarian", election_weight=0.0),
     # Task 11: Production-Aware Capital
-    # C16: Full production-aware SEVC, responsive democracy — primary test
     Condition("C16_production_aware_democratic", "Production-aware SEVC + demo", "PLANNER_SEVC", True, True, 0.1, True, True, "democratic",   election_weight=2.0, production_aware_E=True,  production_aware_S_pop=True),
-    # C17: Vanilla firms + planner capture floor — tests planner-only vs topology shaping
     Condition("C17_production_aware_no_sevc",    "PA planner + vanilla firms",   "PLANNER_SEVC", False, True, 0.1, True, True, "democratic",  election_weight=2.0, production_aware_E=False, production_aware_S_pop=True),
-    # C18: Production-aware SEVC under captured media — robustness to epistemic degradation
     Condition("C18_production_aware_captured",   "Production-aware + captured",  "PLANNER_SEVC", True, True, 0.1, True, True, "demo_captured", election_weight=2.0, media_captured=True, production_aware_E=True, production_aware_S_pop=True),
     # Task 12: CEO Compensation Tied to SEVC Floor
-    # C19: CEO tied, clean democracy — does personal incentive alignment raise SEVC floor?
     Condition("C19_ceo_tied_democratic", "CEO tied + clean democracy", "PLANNER_SEVC", True, True, 0.1, True, True, "democratic",    election_weight=2.0, production_aware_E=True, production_aware_S_pop=True, ceo_compensation_tied=True, ceo_base_equals_floor=True, ceo_equity_tied=True, capture_normalization="ema"),
-    # C20: CEO tied, captured media — does CEO alignment survive epistemic degradation?
     Condition("C20_ceo_tied_captured",   "CEO tied + captured media",  "PLANNER_SEVC", True, True, 0.1, True, True, "demo_captured", election_weight=2.0, media_captured=True, production_aware_E=True, production_aware_S_pop=True, ceo_compensation_tied=True, ceo_base_equals_floor=True, ceo_equity_tied=True, capture_normalization="ema"),
+    # Task 13: Capacity-driven mitosis conditions
+    Condition("C21_mitosis_democratic",  "Capacity mitosis + democracy",  "PLANNER_SEVC", True, True, 0.1, True, True, "democratic",    election_weight=1.0),
+    Condition("C22_no_mitosis_democratic","No mitosis baseline + democracy","PLANNER_SEVC", True, True, 0.1, True, True, "democratic",   election_weight=1.0),
 ]
 
 # Seeds for Task 11 production-aware conditions (8 seeds as specified)
@@ -135,6 +133,8 @@ def configure_model(model, condition: Condition):
     model.gov_type = condition.gov_type
     model._trust_frozen = not condition.use_trust
     model.election_weight = getattr(condition, 'election_weight', 0.0)
+    # Task 13: capacity mitosis (disabled for C22 no-mitosis baseline)
+    model.use_capacity_mitosis = not condition.name.startswith("C22_no_mitosis")
     model.production_aware_E    = getattr(condition, 'production_aware_E', False)
     model.production_aware_S_pop = getattr(condition, 'production_aware_S_pop', False)
     model.ceo_compensation_tied = getattr(condition, 'ceo_compensation_tied', False)

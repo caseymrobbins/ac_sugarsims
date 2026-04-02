@@ -295,6 +295,33 @@ def collect_step_metrics(model: "EconomicModel") -> Dict[str, Any]:
         m["n_firms_declining"] = 0
         m["n_firms_critical"] = 0
 
+    # Capacity-driven mitosis and headroom metrics (Task 13)
+    if active_firms_list:
+        n_workers_total = max(len(model.workers), 1)
+        m["firms_per_worker"] = len(active_firms_list) / n_workers_total
+        stabs = [getattr(f, 'headroom_stability', 0.0) for f in active_firms_list]
+        m["mean_headroom_stability"] = float(np.mean(stabs))
+        m["n_mitosis_events"] = int(sum(getattr(f, '_mitosis_events', 0) for f in active_firms_list))
+        # Profit acceleration and headroom gap (from firms with enough history)
+        accels = []; gaps = []
+        for f in active_firms_list:
+            ph = getattr(f, '_profit_history', None)
+            if ph and len(ph) >= 20:
+                h = list(ph); early = h[:10]; late = h[-10:]
+                eg = (early[-1] - early[0]) / max(abs(early[0]) + 1, 1)
+                lg = (late[-1] - late[0]) / max(abs(late[0]) + 1, 1)
+                accels.append(lg - eg)
+            sc = getattr(f, '_prev_scores', None)
+            if sc:
+                s_raw = sc.get('S_raw', sc.get('S', 0.5))
+                gaps.append(s_raw - sc.get('floor', 0.5))
+        m["mean_profit_acceleration"] = float(np.mean(accels)) if accels else 0.0
+        m["mean_headroom_gap"] = float(np.mean(gaps)) if gaps else 0.0
+    else:
+        m["firms_per_worker"] = 0.0; m["mean_headroom_stability"] = 0.0
+        m["n_mitosis_events"] = 0; m["mean_profit_acceleration"] = 0.0
+        m["mean_headroom_gap"] = 0.0
+
     # Green R&D and pollution metrics (Task 2)
     if active_firms_list:
         m["mean_green_rd_priority"] = float(np.mean([
@@ -811,6 +838,8 @@ def episode_summary(metrics_history: List[Dict]) -> Dict[str, Any]:
         "mean_firm_binding_S", "mean_firm_binding_E",
         "mean_firm_binding_V", "mean_firm_binding_C",
         "election_planner_aligned", "election_weight",
+        "firms_per_worker", "mean_headroom_stability",
+        "n_mitosis_events", "mean_profit_acceleration", "mean_headroom_gap",
     ]
     for key in scalar_keys:
         summary[key] = avg(key)
