@@ -185,8 +185,13 @@ class WorkerAgent(Agent):
             repro_prob = BASE_REPRO_RATE * pressure * max(0.1, 1.0 - local_pollution * 0.02)
             if self.model.rng.random() < repro_prob:
                 self._reproduce()
-        if self.wealth >= ENTREPRENEURSHIP_THRESHOLD and not self.employed and self.model.rng.random() < ENTREPRENEURSHIP_PROB:
-            self._found_firm()
+        if self.wealth >= ENTREPRENEURSHIP_THRESHOLD and not self.employed:
+            n_firms = len([f for f in self.model.firms if not f.defunct])
+            n_workers = max(len(self.model.workers), 1)
+            firm_density = n_firms / n_workers
+            dampen = max(0.1, 1.0 - firm_density * 2.0) if firm_density > 0.5 else 1.0
+            if self.model.rng.random() < ENTREPRENEURSHIP_PROB * dampen:
+                self._found_firm()
         if self.wealth < 10.0 and self.debt < 50.0 and self.model.rng.random() < self.risk_tolerance:
             self.model.economy.issue_loan(self, amount=20.0)
         self.model.planner.apply_tax(self)
@@ -631,6 +636,12 @@ class FirmAgent(Agent):
         # Firm-level Horizon Index (Task 7): ring buffer of floor scores
         self.floor_history = deque(maxlen=100)
         self.horizon_index = 1.0
+        # Capacity-driven mitosis (Task 13): profit history for acceleration
+        self._profit_history = deque(maxlen=30)
+        self._mitosis_events = 0  # per-step counter
+        # Headroom stability (Task 13): tracks S-floor gap variance
+        self.headroom_history = deque(maxlen=30)
+        self.headroom_stability = 0.0
         # Innovation
         init_firm_tech(self)
 
@@ -790,47 +801,61 @@ class FirmAgent(Agent):
         self.wealth -= wage; self.total_wages_paid += wage; return wage
 
     def _consider_mitosis(self):
-        """Split large, mature, dominant firms into two (Task 3)."""
-        if len(self.workers) < 15: return
-        if self.market_share < 0.10: return
-        if self.age < 50: return
-        if self.model.rng.random() >= 0.02: return
-        # Create daughter firm with 40% of capital
+        """Capacity-driven mitosis: split when growth outpaces institutional capacity."""
+        self._mitosis_events = 0
+        self._profit_history.append(self.profit)
+        if not getattr(self.model, 'use_capacity_mitosis', True): return
+        # Minimum scale and maturity
+        if len(self.workers) < 8: return
+        if self.age < 30: return
+        if len(self._profit_history) < 20: return
+        history = list(self._profit_history)
+        # 1. Profit acceleration: compare recent growth to earlier growth
+        early = history[:10]; late = history[-10:]
+        early_g = (early[-1] - early[0]) / max(abs(early[0]) + 1, 1)
+        late_g = (late[-1] - late[0]) / max(abs(late[0]) + 1, 1)
+        acceleration = late_g - early_g
+        if acceleration < 0.05: return
+        # 2. S pulling away from floor: headroom gap
+        scores = getattr(self, '_prev_scores', None)
+        if scores is None: return
+        s_score = scores.get('S_raw', scores.get('S', 0.5))
+        floor_score = scores.get('floor', 0.5)
+        headroom_gap = s_score - floor_score
+        if headroom_gap < 0.15: return
+        # 3. Probabilistic: higher acceleration + wider gap = more likely
+        split_prob = min(0.15, acceleration * headroom_gap * 0.5)
+        if self.model.rng.random() >= split_prob: return
+        self._execute_mitosis()
+
+    def _execute_mitosis(self):
+        """Split firm: daughter gets top-third workers by skill, 40% capital."""
         daughter = FirmAgent(model=self.model, capital=self.capital_stock * 0.4)
         self.capital_stock *= 0.6
-        # Daughter inherits key attributes
-        daughter.tech_level = self.tech_level
-        daughter.pollution_factor = self.pollution_factor
-        daughter.green_rd_priority = self.green_rd_priority
-        daughter.trust_score = self.trust_score
-        daughter.strategy_weights = dict(self.strategy_weights)
-        daughter.is_sevc = self.is_sevc
+        daughter.tech_level = self.tech_level; daughter.pollution_factor = self.pollution_factor
+        daughter.green_rd_priority = self.green_rd_priority; daughter.trust_score = self.trust_score
+        daughter.strategy_weights = dict(self.strategy_weights); daughter.is_sevc = self.is_sevc
         daughter.age = 0
         # Place daughter near parent
         if self.pos is not None:
             pos_t = (int(self.pos[0]), int(self.pos[1]))
             neighbours = self.model.grid.get_neighborhood(pos_t, moore=True, include_center=False, radius=5)
             empty = [c for c in neighbours if self.model.grid.is_cell_empty(c)]
-            if empty:
-                place = empty[int(self.model.rng.integers(0, len(empty)))]
-            else:
-                place = pos_t
+            place = empty[int(self.model.rng.integers(0, len(empty)))] if empty else pos_t
             self.model.grid.place_agent(daughter, place)
         else:
-            place = self.model._random_cell()
-            self.model.grid.place_agent(daughter, place)
-        # Split workers: every other worker goes to daughter
-        worker_ids = list(self.workers.keys())
-        for i, wid in enumerate(worker_ids):
-            if i % 2 == 1:
-                w = self.workers.pop(wid)
-                daughter.workers[wid] = w
-                w.employer_id = daughter.unique_id
-        # Register daughter
-        self.model.firms.append(daughter)
-        self.model._id_cache[daughter.unique_id] = daughter
-        # Reset parent market_share (recalculated next step)
-        self.market_share = 0.0
+            self.model.grid.place_agent(daughter, self.model._random_cell())
+        # Split workers: top third by skill goes to daughter
+        worker_list = sorted(self.workers.items(), key=lambda kv: kv[1].skill, reverse=True)
+        split_point = max(1, len(worker_list) // 3)
+        for i, (wid, w) in enumerate(worker_list):
+            if i < split_point:
+                self.workers.pop(wid); daughter.workers[wid] = w; w.employer_id = daughter.unique_id
+        self.model.firms.append(daughter); self.model._id_cache[daughter.unique_id] = daughter
+        # Reset histories so neither re-triggers immediately
+        self._profit_history.clear(); self.market_share = 0.0
+        for d in ['S', 'E', 'V', 'C']: daughter.sevc_ema_mean[d] = self.sevc_ema_mean[d]
+        self._mitosis_events = 1
 
     def _go_bankrupt(self):
         for wid in list(self.workers.keys()): self.fire_worker(wid)

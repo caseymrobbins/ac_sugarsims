@@ -155,8 +155,12 @@ def firm_rd_invest(firm: "FirmAgent") -> float:
     else:
         skill_multiplier = 0.5
 
+    # Headroom stability bonus: stable firms convert R&D more effectively (Task 13B)
+    hs = getattr(firm, 'headroom_stability', 0.0)
+    stability_bonus = 1.0 + max(0.0, hs - 0.5) * 0.6  # up to 1.3x at stability=1.0
+
     # Competition drives innovation effectiveness
-    improvement = base_improvement * skill_multiplier * comp_modifier
+    improvement = base_improvement * skill_multiplier * comp_modifier * stability_bonus
 
     # Stochastic breakthrough (probability also modulated by competition)
     breakthrough_prob = RD_BREAKTHROUGH_PROB * comp_modifier

@@ -31,38 +31,48 @@ N_STEPS = 2000
 
 # (name, objective, use_sevc, use_innovation, use_trust, trust_noise, use_hi, use_firm_hi, gov_type, mixed_sevc_ratio, election_weight, media_captured)
 CONDITIONS = [
-    ("C1_baseline",       "SUM_RAW", False, True,  False, 0.0, False, False, "authoritarian",  1.0, 0.0, False),
-    ("C2_sevc",           "SUM_RAW", True,  True,  False, 0.0, False, False, "authoritarian",  1.0, 0.0, False),
-    ("C3_sevc_hi",        "SUM_RAW", True,  True,  False, 0.0, True,  True,  "authoritarian",  1.0, 0.0, False),
-    ("C4_full_auth",      "SUM_RAW", True,  True,  True,  0.1, True,  True,  "authoritarian",  1.0, 0.0, False),
-    ("C5_demo_captured",  "SUM_RAW", True,  True,  True,  0.1, True,  True,  "demo_captured",  1.0, 0.0, False),
-    ("C6_auth_captured",  "SUM_RAW", True,  True,  True,  0.1, True,  True,  "auth_captured",  1.0, 0.0, False),
-    ("C7_democratic",     "SUM_RAW", True,  True,  True,  0.1, True,  True,  "democratic",     1.0, 0.0, False),
-    ("C8_mixed",          "SUM_RAW", True,  True,  True,  0.1, True,  True,  "democratic",     0.5, 0.0, False),
-    ("C9_planner_sevc_democratic",    "PLANNER_SEVC", True, True, True, 0.1, True, True, "democratic",    1.0, 0.0, False),
-    ("C10_planner_sevc_auth",         "PLANNER_SEVC", True, True, True, 0.1, True, True, "authoritarian", 1.0, 0.0, False),
-    ("C11_planner_sevc_demo_captured","PLANNER_SEVC", True, True, True, 0.1, True, True, "demo_captured", 1.0, 0.0, False),
-    ("C12_responsive_democratic",     "PLANNER_SEVC", True, True, True, 0.1, True, True, "democratic",    1.0, 2.0, False),
-    ("C13_responsive_demo_captured",  "PLANNER_SEVC", True, True, True, 0.1, True, True, "demo_captured", 1.0, 2.0, True),
-    ("C14_pure_technocrat_democratic", "PLANNER_SEVC", True, True, True, 0.1, True, True, "democratic",    1.0, 0.0, False),
-    ("C15_pure_technocrat_auth",       "PLANNER_SEVC", True, True, True, 0.1, True, True, "authoritarian", 1.0, 0.0, False),
+    ("C1_baseline",       "SUM_RAW", False, True,  False, 0.0, False, False, "authoritarian",  1.0, 0.0, False, True),
+    ("C2_sevc",           "SUM_RAW", True,  True,  False, 0.0, False, False, "authoritarian",  1.0, 0.0, False, True),
+    ("C3_sevc_hi",        "SUM_RAW", True,  True,  False, 0.0, True,  True,  "authoritarian",  1.0, 0.0, False, True),
+    ("C4_full_auth",      "SUM_RAW", True,  True,  True,  0.1, True,  True,  "authoritarian",  1.0, 0.0, False, True),
+    ("C5_demo_captured",  "SUM_RAW", True,  True,  True,  0.1, True,  True,  "demo_captured",  1.0, 0.0, False, True),
+    ("C6_auth_captured",  "SUM_RAW", True,  True,  True,  0.1, True,  True,  "auth_captured",  1.0, 0.0, False, True),
+    ("C7_democratic",     "SUM_RAW", True,  True,  True,  0.1, True,  True,  "democratic",     1.0, 0.0, False, True),
+    ("C8_mixed",          "SUM_RAW", True,  True,  True,  0.1, True,  True,  "democratic",     0.5, 0.0, False, True),
+    ("C9_planner_sevc_democratic",    "PLANNER_SEVC", True, True, True, 0.1, True, True, "democratic",    1.0, 0.0, False, True),
+    ("C10_planner_sevc_auth",         "PLANNER_SEVC", True, True, True, 0.1, True, True, "authoritarian", 1.0, 0.0, False, True),
+    ("C11_planner_sevc_demo_captured","PLANNER_SEVC", True, True, True, 0.1, True, True, "demo_captured", 1.0, 0.0, False, True),
+    ("C12_responsive_democratic",     "PLANNER_SEVC", True, True, True, 0.1, True, True, "democratic",    1.0, 2.0, False, True),
+    ("C13_responsive_demo_captured",  "PLANNER_SEVC", True, True, True, 0.1, True, True, "demo_captured", 1.0, 2.0, True,  True),
+    ("C14_pure_technocrat_democratic", "PLANNER_SEVC", True, True, True, 0.1, True, True, "democratic",    1.0, 0.0, False, True),
+    ("C15_pure_technocrat_auth",       "PLANNER_SEVC", True, True, True, 0.1, True, True, "authoritarian", 1.0, 0.0, False, True),
+    # Task 13: capacity-driven mitosis
+    ("C21_mitosis_democratic",   "PLANNER_SEVC", True, True, True, 0.1, True, True, "democratic", 1.0, 1.0, False, True),
+    ("C22_no_mitosis_democratic","PLANNER_SEVC", True, True, True, 0.1, True, True, "democratic", 1.0, 1.0, False, False),
 ]
 
 # Preset: 2-condition test (vanilla vs full stack) with 10 seeds
 TEST2_CONDITIONS = [
-    ("vanilla_sum",   "SUM_RAW",      False, True, False, 0.0, False, False, "authoritarian", 1.0, 0.0, False),
-    ("topo_sevc_hi",  "TOPO_X",       True,  True, True,  0.1, True,  True,  "democratic",    1.0, 0.0, False),
+    ("vanilla_sum",   "SUM_RAW",      False, True, False, 0.0, False, False, "authoritarian", 1.0, 0.0, False, True),
+    ("topo_sevc_hi",  "TOPO_X",       True,  True, True,  0.1, True,  True,  "democratic",    1.0, 0.0, False, True),
 ]
 TEST2_SEEDS = [7, 23, 59, 101, 233, 347, 461, 587, 719, 853]
 
 # Preset: C12-C15 responsiveness test with 8 new seeds
 RESP_CONDITIONS = [
-    ("C12_responsive_democratic",     "PLANNER_SEVC", True, True, True, 0.1, True, True, "democratic",    1.0, 2.0, False),
-    ("C13_responsive_demo_captured",  "PLANNER_SEVC", True, True, True, 0.1, True, True, "demo_captured", 1.0, 2.0, True),
-    ("C14_pure_technocrat_democratic", "PLANNER_SEVC", True, True, True, 0.1, True, True, "democratic",    1.0, 0.0, False),
-    ("C15_pure_technocrat_auth",       "PLANNER_SEVC", True, True, True, 0.1, True, True, "authoritarian", 1.0, 0.0, False),
+    ("C12_responsive_democratic",     "PLANNER_SEVC", True, True, True, 0.1, True, True, "democratic",    1.0, 2.0, False, True),
+    ("C13_responsive_demo_captured",  "PLANNER_SEVC", True, True, True, 0.1, True, True, "demo_captured", 1.0, 2.0, True,  True),
+    ("C14_pure_technocrat_democratic", "PLANNER_SEVC", True, True, True, 0.1, True, True, "democratic",    1.0, 0.0, False, True),
+    ("C15_pure_technocrat_auth",       "PLANNER_SEVC", True, True, True, 0.1, True, True, "authoritarian", 1.0, 0.0, False, True),
 ]
 RESP_SEEDS = [42, 137, 256, 389, 501, 623, 777, 888]
+
+# Preset: C21-C22 mitosis test with 8 seeds
+MITOSIS_CONDITIONS = [
+    ("C21_mitosis_democratic",   "PLANNER_SEVC", True, True, True, 0.1, True, True, "democratic", 1.0, 1.0, False, True),
+    ("C22_no_mitosis_democratic","PLANNER_SEVC", True, True, True, 0.1, True, True, "democratic", 1.0, 1.0, False, False),
+]
+MITOSIS_SEEDS = [42, 137, 256, 389, 501, 623, 777, 888]
 
 
 SCRIPT_TEMPLATE = r'''
@@ -152,6 +162,7 @@ GOV_TYPE = "@@GOV_TYPE@@"
 MIXED_SEVC_RATIO = @@MIXED_SEVC_RATIO@@
 ELECTION_WEIGHT = @@ELECTION_WEIGHT@@
 MEDIA_CAPTURED = @@MEDIA_CAPTURED@@
+USE_CAPACITY_MITOSIS = @@USE_CAPACITY_MITOSIS@@
 SEED = @@SEED@@
 N_STEPS = @@N_STEPS@@
 ANIMATE = @@ANIMATE@@
@@ -175,6 +186,7 @@ model.use_horizon_index = USE_HI
 model.use_firm_hi = USE_FIRM_HI
 model.gov_type = GOV_TYPE
 model.election_weight = ELECTION_WEIGHT
+model.use_capacity_mitosis = USE_CAPACITY_MITOSIS
 
 if not USE_SEVC:
     for firm in model.firms:
@@ -265,8 +277,8 @@ _SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 
 def make_script(name, objective, use_sevc, use_innovation, use_trust, trust_noise,
                 use_hi, use_firm_hi, gov_type, mixed_sevc_ratio,
-                election_weight, media_captured,
-                seed, n_steps,
+                election_weight, media_captured, use_capacity_mitosis=True,
+                seed=42, n_steps=500,
                 animate=False, anim_subsample=2, output_dir="results/architecture"):
     """Generate a self-contained run script with config injected."""
     s = SCRIPT_TEMPLATE
@@ -283,6 +295,7 @@ def make_script(name, objective, use_sevc, use_innovation, use_trust, trust_nois
     s = s.replace("@@MIXED_SEVC_RATIO@@", str(mixed_sevc_ratio))
     s = s.replace("@@ELECTION_WEIGHT@@", str(election_weight))
     s = s.replace("@@MEDIA_CAPTURED@@", str(media_captured))
+    s = s.replace("@@USE_CAPACITY_MITOSIS@@", str(use_capacity_mitosis))
     s = s.replace("@@SEED@@", str(seed))
     s = s.replace("@@N_STEPS@@", str(n_steps))
     s = s.replace("@@ANIMATE@@", str(animate))
@@ -295,13 +308,14 @@ def run_one(job):
     """Write script, run as subprocess, return result."""
     (name, objective, use_sevc, use_innovation, use_trust, trust_noise,
      use_hi, use_firm_hi, gov_type, mixed_sevc_ratio,
-     election_weight, media_captured,
+     election_weight, media_captured, use_capacity_mitosis,
      seed, n_steps, animate, anim_subsample, output_dir) = job
     label = name + "/seed" + str(seed)
 
     script = make_script(name, objective, use_sevc, use_innovation,
                          use_trust, trust_noise, use_hi, use_firm_hi, gov_type,
                          mixed_sevc_ratio, election_weight, media_captured,
+                         use_capacity_mitosis,
                          seed, n_steps,
                          animate=animate, anim_subsample=anim_subsample,
                          output_dir=output_dir)
@@ -350,8 +364,8 @@ def main():
     parser.add_argument("--subsample", type=int, default=2,
                         help="Animation frame subsample rate (default: 2)")
     parser.add_argument("--preset", type=str, default=None,
-                        choices=["full", "test2", "resp"],
-                        help="Preset: 'full' = all 15 conditions, 'test2' = vanilla vs topo (10 seeds), 'resp' = C12-C15 (8 seeds)")
+                        choices=["full", "test2", "resp", "mitosis"],
+                        help="Preset: 'full' = all conditions, 'test2' = vanilla vs topo (10 seeds), 'resp' = C12-C15 (8 seeds), 'mitosis' = C21-C22 (8 seeds)")
     args = parser.parse_args()
 
     # Select conditions and seeds based on preset
@@ -365,6 +379,11 @@ def main():
         seeds = RESP_SEEDS
         n_steps = args.steps if args.steps > 0 else N_STEPS
         output_dir = "results/responsiveness"
+    elif args.preset == "mitosis":
+        conditions = MITOSIS_CONDITIONS
+        seeds = MITOSIS_SEEDS
+        n_steps = args.steps if args.steps > 0 else N_STEPS
+        output_dir = "results/mitosis"
     else:
         conditions = CONDITIONS
         seeds = SEEDS

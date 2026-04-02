@@ -147,6 +147,15 @@ def sustainable_learn_from_outcome(firm: "FirmAgent", strategy: str, profit_chan
     if not hasattr(firm, '_prev_floor'):
         firm._prev_floor = current_floor
         firm._prev_scores = scores
+    # Headroom stability tracking (Task 13B): CV of S-floor gap over 30-step window
+    scores_raw_s = scores.get('S_raw', scores.get('S', 0.5))
+    headroom_gap = scores_raw_s - current_floor
+    firm.headroom_history.append(headroom_gap)
+    if len(firm.headroom_history) >= 10:
+        hh = np.array(firm.headroom_history)
+        mu = float(np.mean(hh)); sigma = float(np.std(hh))
+        cv = sigma / max(abs(mu), 0.01)
+        firm.headroom_stability = max(0.0, 1.0 - cv)  # 1.0 = perfectly stable
     floor_change = current_floor - firm._prev_floor
     # Firm HI modulates learning: declining firms get dampened signal
     use_firm_hi = getattr(firm.model, 'use_firm_hi', False)
@@ -188,6 +197,11 @@ def sustainable_choose_strategy(firm: "FirmAgent") -> str:
         # Innovation: profitable firms with capital and workers should innovate
         "innovate":        (0.5 if profitable else 0.1) * min(firm.wealth / 100, 1) * (0.8 if n_workers > 0 else 0.2),
     }
+
+    # Headroom stability bonus: stable firms are in optimal position to innovate (Task 13B)
+    hs = getattr(firm, 'headroom_stability', 0.0)
+    if hs > 0.5:
+        context["innovate"] *= 1.0 + (hs - 0.5) * 2.0  # up to 2x boost at stability=1.0
 
     # Bottleneck-driven strategy boosting
     if floor_dim == 'E':

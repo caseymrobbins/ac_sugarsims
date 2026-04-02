@@ -82,6 +82,9 @@ CONDITIONS = [
     Condition("C13_responsive_demo_captured",  "Responsive SEVC captured",    "PLANNER_SEVC", True, True, 0.1, True, True, "demo_captured", election_weight=2.0, media_captured=True),
     Condition("C14_pure_technocrat_democratic", "Technocrat SEVC democracy",   "PLANNER_SEVC", True, True, 0.1, True, True, "democratic",    election_weight=0.0),
     Condition("C15_pure_technocrat_auth",       "Technocrat SEVC auth",        "PLANNER_SEVC", True, True, 0.1, True, True, "authoritarian", election_weight=0.0),
+    # Task 13: Capacity-driven mitosis conditions
+    Condition("C21_mitosis_democratic",  "Capacity mitosis + democracy",  "PLANNER_SEVC", True, True, 0.1, True, True, "democratic",    election_weight=1.0),
+    Condition("C22_no_mitosis_democratic","No mitosis baseline + democracy","PLANNER_SEVC", True, True, 0.1, True, True, "democratic",   election_weight=1.0),
 ]
 
 SEEDS = [42, 137, 2024]
@@ -113,6 +116,8 @@ def configure_model(model, condition: Condition):
     model.gov_type = condition.gov_type
     model._trust_frozen = not condition.use_trust
     model.election_weight = getattr(condition, 'election_weight', 0.0)
+    # Task 13: capacity mitosis (disabled for C22 no-mitosis baseline)
+    model.use_capacity_mitosis = not condition.name.startswith("C22_no_mitosis")
 
     # If SEVC is disabled, reset all firms to vanilla behavior
     if not condition.use_sevc:
