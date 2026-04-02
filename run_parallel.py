@@ -33,9 +33,9 @@ N_STEPS = 2000
 #   mixed_sevc_ratio, election_weight, media_captured, production_aware_E, production_aware_S_pop,
 #   ceo_compensation_tied, ceo_base_equals_floor, ceo_equity_tied, capture_normalization)
 CONDITIONS = [
-    ("C16_production_aware_democratic",  "PLANNER_SEVC", True,  True, True, 0.1, True, True, "democratic",    1.0, 2.0, False, True,  True,  False, False, False, "fixed"),
-    ("C17_production_aware_no_sevc",     "PLANNER_SEVC", False, True, True, 0.1, True, True, "democratic",    1.0, 2.0, False, False, True,  False, False, False, "fixed"),
-    ("C18_production_aware_captured",    "PLANNER_SEVC", True,  True, True, 0.1, True, True, "demo_captured", 1.0, 2.0, True,  True,  True,  False, False, False, "fixed"),
+    # ("C16_production_aware_democratic",  "PLANNER_SEVC", True,  True, True, 0.1, True, True, "democratic",    1.0, 2.0, False, True,  True,  False, False, False, "fixed"),
+    # ("C17_production_aware_no_sevc",     "PLANNER_SEVC", False, True, True, 0.1, True, True, "democratic",    1.0, 2.0, False, False, True,  False, False, False, "fixed"),
+    # ("C18_production_aware_captured",    "PLANNER_SEVC", True,  True, True, 0.1, True, True, "demo_captured", 1.0, 2.0, True,  True,  True,  False, False, False, "fixed"),
     # Task 12: CEO compensation tied to SEVC floor
     ("C19_ceo_tied_democratic",          "PLANNER_SEVC", True,  True, True, 0.1, True, True, "democratic",    1.0, 2.0, False, True,  True,  True,  True,  True,  "ema"),
     ("C20_ceo_tied_captured",            "PLANNER_SEVC", True,  True, True, 0.1, True, True, "demo_captured", 1.0, 2.0, True,  True,  True,  True,  True,  True,  "ema"),
