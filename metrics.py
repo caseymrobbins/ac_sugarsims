@@ -325,6 +325,28 @@ def collect_step_metrics(model: "EconomicModel") -> Dict[str, Any]:
         m["sevc_mean_workers"] = 0.0
         m["vanilla_mean_workers"] = 0.0
 
+    # Production-capture ratio metrics (Task 11)
+    if active_firms_list:
+        capture_ratios = [getattr(f, 'capture_ratio', 0.5) for f in active_firms_list]
+        cr_arr = np.array(capture_ratios, dtype=np.float64)
+        m["mean_capture_ratio"]   = float(np.mean(cr_arr))
+        m["median_capture_ratio"] = float(np.median(cr_arr))
+        m["min_firm_capture_ratio"] = float(np.min(cr_arr))
+        cr_pos = cr_arr[cr_arr > 0]
+        if len(cr_pos) > 1 and cr_pos.sum() > 0:
+            n = len(cr_pos); cr_s = np.sort(cr_pos)
+            m["capture_gini"] = float((2*np.sum(np.arange(1,n+1)*cr_s)-(n+1)*cr_s.sum())/(n*cr_s.sum()))
+        else:
+            m["capture_gini"] = 0.0
+        total_wages_step = sum(getattr(f, 'wages_this_step', 0.0) for f in active_firms_list)
+        total_rev_step   = sum(f.revenue for f in active_firms_list)
+        m["total_wages_to_revenue"] = float(total_wages_step / max(total_rev_step, 1e-9))
+    else:
+        m["mean_capture_ratio"] = 0.0; m["median_capture_ratio"] = 0.0
+        m["min_firm_capture_ratio"] = 0.0; m["capture_gini"] = 0.0
+        m["total_wages_to_revenue"] = 0.0
+    m["planner_min_capture_ratio"] = float(model.planner.policy.get("min_capture_ratio", 0.0))
+
     # Government / election metrics (Task 8)
     m["gov_type"] = getattr(model, 'gov_type', 'authoritarian')
     planner = model.planner
@@ -743,6 +765,8 @@ def episode_summary(metrics_history: List[Dict]) -> Dict[str, Any]:
         "sevc_adoption_rate", "sevc_market_share",
         "sevc_mean_profit", "vanilla_mean_profit",
         "sevc_mean_workers", "vanilla_mean_workers",
+        "mean_capture_ratio", "median_capture_ratio", "min_firm_capture_ratio",
+        "capture_gini", "total_wages_to_revenue", "planner_min_capture_ratio",
         "mean_firm_hi", "min_firm_hi", "n_firms_declining", "n_firms_critical",
         "horizon_index",
         "election_winner", "voter_turnout_redistribution", "voter_turnout_growth",
@@ -780,6 +804,9 @@ def episode_summary(metrics_history: List[Dict]) -> Dict[str, Any]:
     summary["terminal_agency_floor"] = last("agency_floor")
     summary["terminal_horizon_index"] = last("horizon_index")
     summary["terminal_mean_firm_floor"] = last("mean_firm_floor")
+    summary["mean_capture_ratio"] = avg("mean_capture_ratio")
+    summary["terminal_capture_ratio"] = last("mean_capture_ratio")
+    summary["terminal_total_wages_to_revenue"] = last("total_wages_to_revenue")
     summary["terminal_trust_planner"] = last("trust_planner")
     summary["terminal_trust_institutional"] = last("trust_institutional")
 
@@ -789,17 +816,27 @@ def episode_summary(metrics_history: List[Dict]) -> Dict[str, Any]:
         "weight_polarization", "info_r0",
         "n_news_firms", "n_captured_news",
         "n_accurate_news", "n_captured_accurate",
-        "epistemic_health", "trust_gini", "pct_low_trust",
+        "trust_gini", "pct_low_trust",
+        # Four-variable EH decomposition
+        "system_M", "system_VE", "system_CI", "system_tau_c",
+        "epistemic_health_mean", "epistemic_health_floor",
+        "epistemic_health_median", "eh_gini", "pct_low_eh",
     ]
     for key in info_keys:
         summary[key] = avg(key)
 
-    summary["terminal_epistemic_health"] = last("epistemic_health")
+    summary["terminal_epistemic_health_mean"] = last("epistemic_health_mean")
+    summary["terminal_epistemic_health_floor"] = last("epistemic_health_floor")
     summary["terminal_authority_trust"] = last("mean_authority_trust")
     summary["terminal_polarization"] = last("weight_polarization")
     summary["terminal_info_r0"] = last("info_r0")
+    summary["terminal_system_M"] = last("system_M")
+    summary["terminal_system_VE"] = last("system_VE")
+    summary["terminal_system_CI"] = last("system_CI")
+    summary["terminal_system_tau_c"] = last("system_tau_c")
     summary["max_info_r0"] = max_val("info_r0")
     summary["max_captured_news"] = max_val("n_captured_news")
+    summary["max_system_M"] = max_val("system_M")
 
     # Banking metrics
     banking_keys = [

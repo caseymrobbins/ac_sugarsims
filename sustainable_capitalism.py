@@ -36,6 +36,7 @@ def compute_stakeholder_scores(firm: "FirmAgent") -> Dict[str, float]:
     n_workers = len(firm.workers)
     if n_workers == 0:
         E = 0.1
+        firm.capture_ratio = 0.0
     else:
         rev_per_worker = firm.revenue / max(n_workers, 1)
         if rev_per_worker > 0:
@@ -50,8 +51,24 @@ def compute_stakeholder_scores(firm: "FirmAgent") -> Dict[str, float]:
         min_worker_wealth = min(worker_wealths) if worker_wealths else 0
         wealth_floor = min(1.0, min_worker_wealth / 50.0)
         employment = min(1.0, n_workers / 5.0)
-        E = (wage_fairness * 0.35 + skill_health * 0.25
-             + wealth_floor * 0.25 + employment * 0.15)
+
+        # Production-capture ratio: what fraction of per-worker revenue goes to workers?
+        # Uses wages_this_step (actual cash paid this step) vs current-step revenue.
+        wages_paid = getattr(firm, 'wages_this_step', firm.offered_wage * n_workers)
+        total_rev = max(firm.revenue, 1e-9)
+        capture_ratio = wages_paid / total_rev
+        firm.capture_ratio = float(np.clip(capture_ratio, 0.0, 2.0))
+
+        # Gate: only include capture_score in E when production_aware_E flag is set
+        if getattr(firm.model, 'production_aware_E', False):
+            # Normalize: 0.3 = adequate (Costco benchmark), below 0.1 = severe
+            capture_score = min(capture_ratio / 0.3, 2.0)
+            # Geometric mean of four components (equal weight each)
+            E = (max(wage_fairness, 1e-6) * max(skill_health, 1e-6)
+                 * max(wealth_floor, 1e-6) * max(capture_score, 1e-6)) ** 0.25
+        else:
+            E = (wage_fairness * 0.35 + skill_health * 0.25
+                 + wealth_floor * 0.25 + employment * 0.15)
         E = max(0.01, min(1.0, E))
 
     # V: Environmental

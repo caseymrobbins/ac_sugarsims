@@ -111,7 +111,12 @@ COMPARISON_METRICS = [
     "terminal_horizon_index",
     "mean_firm_floor",
     "min_firm_floor",
-    "epistemic_health",
+    "epistemic_health_mean",
+    "epistemic_health_floor",
+    "system_M",
+    "system_VE",
+    "system_CI",
+    "system_tau_c",
     "mean_skill",
     "total_production",
     "mean_pollution",
@@ -274,7 +279,7 @@ def _print_summary(summary: pd.DataFrame, pairwise: pd.DataFrame):
     key_metrics = [
         "all_gini", "worker_min", "agency_floor",
         "frac_monopoly", "frac_poverty_trap", "unemployment_rate",
-        "horizon_index", "mean_firm_floor", "epistemic_health",
+        "horizon_index", "mean_firm_floor", "epistemic_health_mean",
         "trust_planner", "trust_institutional",
     ]
 
