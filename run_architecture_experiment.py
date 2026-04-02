@@ -66,6 +66,10 @@ class Condition:
     media_captured: bool = False    # force-capture a news firm at start
     production_aware_E: bool = False      # capture ratio as E component (Task 11)
     production_aware_S_pop: bool = False  # economy-wide capture ratio in S_pop (Task 11)
+    ceo_compensation_tied: bool = False   # CEO bonus = profit×10%×sevc_floor (Task 12)
+    ceo_base_equals_floor: bool = False   # CEO base = lowest worker wage (Task 12)
+    ceo_equity_tied: bool = False         # CEO equity mark-to-market at book×sevc_floor (Task 12)
+    capture_normalization: str = "fixed"  # "fixed" | "ema" for E capture_score reference (Task 12)
 
 
 CONDITIONS = [
@@ -91,6 +95,11 @@ CONDITIONS = [
     Condition("C17_production_aware_no_sevc",    "PA planner + vanilla firms",   "PLANNER_SEVC", False, True, 0.1, True, True, "democratic",  election_weight=2.0, production_aware_E=False, production_aware_S_pop=True),
     # C18: Production-aware SEVC under captured media — robustness to epistemic degradation
     Condition("C18_production_aware_captured",   "Production-aware + captured",  "PLANNER_SEVC", True, True, 0.1, True, True, "demo_captured", election_weight=2.0, media_captured=True, production_aware_E=True, production_aware_S_pop=True),
+    # Task 12: CEO Compensation Tied to SEVC Floor
+    # C19: CEO tied, clean democracy — does personal incentive alignment raise SEVC floor?
+    Condition("C19_ceo_tied_democratic", "CEO tied + clean democracy", "PLANNER_SEVC", True, True, 0.1, True, True, "democratic",    election_weight=2.0, production_aware_E=True, production_aware_S_pop=True, ceo_compensation_tied=True, ceo_base_equals_floor=True, ceo_equity_tied=True, capture_normalization="ema"),
+    # C20: CEO tied, captured media — does CEO alignment survive epistemic degradation?
+    Condition("C20_ceo_tied_captured",   "CEO tied + captured media",  "PLANNER_SEVC", True, True, 0.1, True, True, "demo_captured", election_weight=2.0, media_captured=True, production_aware_E=True, production_aware_S_pop=True, ceo_compensation_tied=True, ceo_base_equals_floor=True, ceo_equity_tied=True, capture_normalization="ema"),
 ]
 
 # Seeds for Task 11 production-aware conditions (8 seeds as specified)
@@ -128,6 +137,10 @@ def configure_model(model, condition: Condition):
     model.election_weight = getattr(condition, 'election_weight', 0.0)
     model.production_aware_E    = getattr(condition, 'production_aware_E', False)
     model.production_aware_S_pop = getattr(condition, 'production_aware_S_pop', False)
+    model.ceo_compensation_tied = getattr(condition, 'ceo_compensation_tied', False)
+    model.ceo_base_equals_floor = getattr(condition, 'ceo_base_equals_floor', False)
+    model.ceo_equity_tied       = getattr(condition, 'ceo_equity_tied', False)
+    model.capture_normalization = getattr(condition, 'capture_normalization', 'fixed')
 
     # If SEVC is disabled, reset all firms to vanilla behavior
     if not condition.use_sevc:

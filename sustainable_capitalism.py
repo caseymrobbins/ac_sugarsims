@@ -61,8 +61,17 @@ def compute_stakeholder_scores(firm: "FirmAgent") -> Dict[str, float]:
 
         # Gate: only include capture_score in E when production_aware_E flag is set
         if getattr(firm.model, 'production_aware_E', False):
-            # Normalize: 0.3 = adequate (Costco benchmark), below 0.1 = severe
-            capture_score = min(capture_ratio / 0.3, 2.0)
+            # Normalisation: fixed reference (0.3) or EMA-based adaptive reference
+            if getattr(firm.model, 'capture_normalization', 'fixed') == 'ema':
+                # Update EMA; score = ratio / own-history → rewards improvement trajectory
+                ema_alpha = 0.05
+                firm.capture_ratio_ema = float(
+                    ema_alpha * capture_ratio + (1.0 - ema_alpha) * firm.capture_ratio_ema)
+                ref = max(firm.capture_ratio_ema, 0.001)
+                capture_score = float(np.clip(capture_ratio / ref, 0.0, 2.0))
+            else:
+                # Fixed Costco benchmark: 0.3 = adequate
+                capture_score = min(capture_ratio / 0.3, 2.0)
             # Geometric mean of four components (equal weight each)
             E = (max(wage_fairness, 1e-6) * max(skill_health, 1e-6)
                  * max(wealth_floor, 1e-6) * max(capture_score, 1e-6)) ** 0.25
@@ -108,6 +117,9 @@ def compute_stakeholder_scores(firm: "FirmAgent") -> Dict[str, float]:
     S_n, E_n, V_n, C_n = normed['S'], normed['E'], normed['V'], normed['C']
     floor = min(S_n, E_n, V_n, C_n)
     binding = min(normed, key=normed.get)
+    # Write back to firm so CEO compensation and other systems can read without recomputing
+    firm.sevc_floor = float(floor)
+    firm.sevc_binding = binding
     result = {'S': S_n, 'E': E_n, 'V': V_n, 'C': C_n, 'floor': floor, 'binding': binding}
     result.update(raw)
     return result
@@ -242,6 +254,24 @@ def sustainable_choose_strategy(firm: "FirmAgent") -> str:
         context["cut_wages"] *= 0.3
         context["downsize"] *= 0.3
         context["pollute_more"] *= 0.3
+
+    # CEO compensation tied to SEVC floor (Task 12): CEO has personal financial stake in
+    # fixing the binding dimension — amplify the bottleneck boosts further.
+    if getattr(firm.model, 'ceo_compensation_tied', False):
+        ceo_floor = getattr(firm, 'sevc_floor', 1.0)
+        # Urgency inversely proportional to floor: lower floor = stronger CEO signal
+        urgency = max(0.0, 1.0 - ceo_floor)  # 0 at floor=1.0, 1.0 at floor=0.0
+        if floor_dim == 'E':
+            context["raise_wages"] *= (1.0 + 3.0 * urgency)
+            context["hire"] *= (1.0 + 1.5 * urgency)
+            context["cut_wages"] *= max(0.01, 1.0 - 2.0 * urgency)
+        elif floor_dim == 'V':
+            context["clean_up"] *= (1.0 + 3.0 * urgency)
+            context["pollute_more"] *= max(0.01, 1.0 - 3.0 * urgency)
+        elif floor_dim == 'C':
+            context["invest_capital"] *= (1.0 + 2.0 * urgency)
+        elif floor_dim == 'S':
+            context["innovate"] *= (1.0 + 1.5 * urgency)
 
     strategy_scores = {}
     for action, weight in firm.strategy_weights.items():

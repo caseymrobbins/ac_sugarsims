@@ -696,6 +696,7 @@ class FirmAgent(Agent):
         self.market_share = 0.0; self.total_wages_paid = 0.0; self.total_profit_accumulated = 0.0
         self.wages_this_step: float = 0.0  # per-step wage expenditure (reset each step)
         self.capture_ratio: float = 0.5    # wages_this_step / revenue; updated by SEVC scoring
+        self.capture_ratio_ema: float = 0.05  # EMA reference for adaptive normalization (Task 12)
         self.pollution_factor = float(rng.uniform(0.05, 0.30)); self.total_pollution_emitted = 0.0
         self._consecutive_losses = 0; self.total_dividends_paid = 0.0
         self.trust_score = 0.5
@@ -714,6 +715,17 @@ class FirmAgent(Agent):
         # Firm-level Horizon Index (Task 7): ring buffer of floor scores
         self.floor_history = deque(maxlen=100)
         self.horizon_index = 1.0
+        # CEO compensation (Task 12)
+        self.ceo_id: Optional[int] = None
+        self.ceo_equity_share: float = float(np.clip(rng.uniform(0.05, 0.20), 0.05, 0.20))
+        self.ceo_equity_value: float = 0.0
+        self._prev_ceo_equity_value: float = 0.0
+        self.ceo_compensation_this_step: float = 0.0
+        self.ceo_base_salary: float = 0.0
+        self.ceo_bonus: float = 0.0
+        self.ceo_potential_bonus: float = 0.0
+        self.sevc_floor: float = 0.5    # current SEVC floor (written by compute_stakeholder_scores)
+        self.sevc_binding: str = "S"    # current binding dimension
         # Innovation
         init_firm_tech(self)
 
@@ -741,9 +753,60 @@ class FirmAgent(Agent):
             if self.profit < 0: self._consecutive_losses += 1
             else: self._consecutive_losses = 0
         self.capital_stock *= 0.998
+        self._pay_ceo()
         if self.wealth < -200 and len(self.workers) == 0: self._go_bankrupt(); return
         self._consider_mitosis()
         self.model.planner.apply_tax(self)
+
+    def _get_ceo(self):
+        """Return the highest-skilled current worker as the acting CEO."""
+        if not self.workers:
+            return None
+        return max(self.workers.values(), key=lambda w: w.skill)
+
+    def _pay_ceo(self):
+        """
+        CEO compensation tied to SEVC floor (Task 12).
+
+        base_salary = lowest worker wage at this firm (floor-equalised base)
+        bonus       = potential_bonus * sevc_floor
+        equity      = book_value * ceo_equity_share * sevc_floor (mark-to-market)
+
+        Only active when model.ceo_compensation_tied is True.
+        """
+        if not getattr(self.model, 'ceo_compensation_tied', False):
+            return
+        ceo = self._get_ceo()
+        if ceo is None:
+            return
+        self.ceo_id = ceo.unique_id
+
+        # Base salary
+        if getattr(self.model, 'ceo_base_equals_floor', False) and self.workers:
+            self.ceo_base_salary = float(min(w.wage for w in self.workers.values()))
+        else:
+            self.ceo_base_salary = float(ceo.wage)
+
+        # Bonus: potential = 10% of positive profit; actual = potential * sevc_floor
+        self.ceo_potential_bonus = float(max(self.profit, 0.0) * 0.10)
+        sevc_fl = float(np.clip(self.sevc_floor, 0.0, 1.0))
+        self.ceo_bonus = self.ceo_potential_bonus * sevc_fl
+        self.ceo_compensation_this_step = self.ceo_base_salary + self.ceo_bonus
+
+        # Pay out from firm wealth
+        payment = float(min(self.ceo_compensation_this_step, max(0.0, self.wealth)))
+        self.wealth -= payment
+        ceo.wealth += payment
+        ceo.income_last_step += payment
+
+        # Equity mark-to-market: stock_price = book_value * sevc_floor
+        if getattr(self.model, 'ceo_equity_tied', False):
+            book_value = max(self.capital_stock + max(getattr(self, 'total_profit_accumulated', 0.0), 0.0), 0.0)
+            self._prev_ceo_equity_value = self.ceo_equity_value
+            self.ceo_equity_value = book_value * self.ceo_equity_share * min(sevc_fl * 2.0, 2.0)
+            # Smooth equity delta: only 5% materialises per step, capped at ±10 to avoid instability
+            equity_delta = float(np.clip((self.ceo_equity_value - self._prev_ceo_equity_value) * 0.05, -10.0, 10.0))
+            ceo.wealth += equity_delta
 
     def _execute_strategy(self, strategy):
         if strategy == "invest_capital":
