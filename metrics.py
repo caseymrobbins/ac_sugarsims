@@ -347,6 +347,27 @@ def collect_step_metrics(model: "EconomicModel") -> Dict[str, Any]:
         m["total_wages_to_revenue"] = 0.0
     m["planner_min_capture_ratio"] = float(model.planner.policy.get("min_capture_ratio", 0.0))
 
+    # CEO compensation metrics (Task 12)
+    if active_firms_list:
+        ceo_comps   = [getattr(f, 'ceo_compensation_this_step', 0.0) for f in active_firms_list]
+        ceo_bases   = [getattr(f, 'ceo_base_salary', 0.0) for f in active_firms_list]
+        ceo_bonuses = [getattr(f, 'ceo_bonus', 0.0) for f in active_firms_list]
+        ceo_pots    = [getattr(f, 'ceo_potential_bonus', 0.0) for f in active_firms_list]
+        ceo_equities= [getattr(f, 'ceo_equity_value', 0.0) for f in active_firms_list]
+        m["mean_ceo_compensation"] = float(np.mean(ceo_comps))
+        # Bonus realisation: actual/potential (how much of the possible bonus did CEO capture?)
+        total_pot = sum(ceo_pots)
+        m["mean_ceo_bonus_realisation"] = float(sum(ceo_bonuses) / total_pot) if total_pot > 0 else 0.0
+        # CEO/floor-worker ratio: ceo_total / ceo_base (1.0 = equal; 2.0 = 2× floor)
+        ratios = [(c / b) for c, b in zip(ceo_comps, ceo_bases) if b > 0]
+        m["mean_ceo_floor_ratio"] = float(np.mean(ratios)) if ratios else 1.0
+        m["mean_ceo_equity_value"] = float(np.mean(ceo_equities))
+    else:
+        m["mean_ceo_compensation"] = 0.0
+        m["mean_ceo_bonus_realisation"] = 0.0
+        m["mean_ceo_floor_ratio"] = 1.0
+        m["mean_ceo_equity_value"] = 0.0
+
     # Government / election metrics (Task 8)
     m["gov_type"] = getattr(model, 'gov_type', 'authoritarian')
     planner = model.planner
@@ -767,6 +788,8 @@ def episode_summary(metrics_history: List[Dict]) -> Dict[str, Any]:
         "sevc_mean_workers", "vanilla_mean_workers",
         "mean_capture_ratio", "median_capture_ratio", "min_firm_capture_ratio",
         "capture_gini", "total_wages_to_revenue", "planner_min_capture_ratio",
+        "mean_ceo_compensation", "mean_ceo_bonus_realisation",
+        "mean_ceo_floor_ratio", "mean_ceo_equity_value",
         "mean_firm_hi", "min_firm_hi", "n_firms_declining", "n_firms_critical",
         "horizon_index",
         "election_winner", "voter_turnout_redistribution", "voter_turnout_growth",
@@ -807,6 +830,12 @@ def episode_summary(metrics_history: List[Dict]) -> Dict[str, Any]:
     summary["mean_capture_ratio"] = avg("mean_capture_ratio")
     summary["terminal_capture_ratio"] = last("mean_capture_ratio")
     summary["terminal_total_wages_to_revenue"] = last("total_wages_to_revenue")
+    summary["mean_ceo_compensation"] = avg("mean_ceo_compensation")
+    summary["mean_ceo_bonus_realisation"] = avg("mean_ceo_bonus_realisation")
+    summary["mean_ceo_floor_ratio"] = avg("mean_ceo_floor_ratio")
+    summary["mean_ceo_equity_value"] = avg("mean_ceo_equity_value")
+    summary["terminal_ceo_compensation"] = last("mean_ceo_compensation")
+    summary["terminal_ceo_floor_ratio"] = last("mean_ceo_floor_ratio")
     summary["terminal_trust_planner"] = last("trust_planner")
     summary["terminal_trust_institutional"] = last("trust_institutional")
 

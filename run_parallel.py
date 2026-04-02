@@ -29,11 +29,16 @@ from concurrent.futures import ProcessPoolExecutor, as_completed
 SEEDS = [42, 101, 137, 202, 256, 303, 389, 404, 501, 505, 606, 623, 777, 888, 999]
 N_STEPS = 2000
 
-# (name, objective, use_sevc, use_innovation, use_trust, trust_noise, use_hi, use_firm_hi, gov_type, mixed_sevc_ratio, election_weight, media_captured, production_aware_E, production_aware_S_pop)
+# (name, objective, use_sevc, use_innovation, use_trust, trust_noise, use_hi, use_firm_hi, gov_type,
+#   mixed_sevc_ratio, election_weight, media_captured, production_aware_E, production_aware_S_pop,
+#   ceo_compensation_tied, ceo_base_equals_floor, ceo_equity_tied, capture_normalization)
 CONDITIONS = [
-    ("C16_production_aware_democratic",  "PLANNER_SEVC", True,  True, True, 0.1, True, True, "democratic",    1.0, 2.0, False, True,  True),
-    ("C17_production_aware_no_sevc",     "PLANNER_SEVC", False, True, True, 0.1, True, True, "democratic",    1.0, 2.0, False, False, True),
-    ("C18_production_aware_captured",    "PLANNER_SEVC", True,  True, True, 0.1, True, True, "demo_captured", 1.0, 2.0, True,  True,  True),
+    ("C16_production_aware_democratic",  "PLANNER_SEVC", True,  True, True, 0.1, True, True, "democratic",    1.0, 2.0, False, True,  True,  False, False, False, "fixed"),
+    ("C17_production_aware_no_sevc",     "PLANNER_SEVC", False, True, True, 0.1, True, True, "democratic",    1.0, 2.0, False, False, True,  False, False, False, "fixed"),
+    ("C18_production_aware_captured",    "PLANNER_SEVC", True,  True, True, 0.1, True, True, "demo_captured", 1.0, 2.0, True,  True,  True,  False, False, False, "fixed"),
+    # Task 12: CEO compensation tied to SEVC floor
+    ("C19_ceo_tied_democratic",          "PLANNER_SEVC", True,  True, True, 0.1, True, True, "democratic",    1.0, 2.0, False, True,  True,  True,  True,  True,  "ema"),
+    ("C20_ceo_tied_captured",            "PLANNER_SEVC", True,  True, True, 0.1, True, True, "demo_captured", 1.0, 2.0, True,  True,  True,  True,  True,  True,  "ema"),
 ]
 
 # Preset: 2-condition test (vanilla vs full stack) with 10 seeds
@@ -157,6 +162,10 @@ ELECTION_WEIGHT = @@ELECTION_WEIGHT@@
 MEDIA_CAPTURED = @@MEDIA_CAPTURED@@
 PRODUCTION_AWARE_E    = @@PRODUCTION_AWARE_E@@
 PRODUCTION_AWARE_S_POP = @@PRODUCTION_AWARE_S_POP@@
+CEO_COMPENSATION_TIED = @@CEO_COMPENSATION_TIED@@
+CEO_BASE_EQUALS_FLOOR = @@CEO_BASE_EQUALS_FLOOR@@
+CEO_EQUITY_TIED       = @@CEO_EQUITY_TIED@@
+CAPTURE_NORMALIZATION = "@@CAPTURE_NORMALIZATION@@"
 SEED = @@SEED@@
 N_STEPS = @@N_STEPS@@
 ANIMATE = @@ANIMATE@@
@@ -182,6 +191,10 @@ model.gov_type = GOV_TYPE
 model.election_weight = ELECTION_WEIGHT
 model.production_aware_E     = PRODUCTION_AWARE_E
 model.production_aware_S_pop = PRODUCTION_AWARE_S_POP
+model.ceo_compensation_tied  = CEO_COMPENSATION_TIED
+model.ceo_base_equals_floor  = CEO_BASE_EQUALS_FLOOR
+model.ceo_equity_tied        = CEO_EQUITY_TIED
+model.capture_normalization  = CAPTURE_NORMALIZATION
 
 if not USE_SEVC:
     for firm in model.firms:
@@ -275,7 +288,9 @@ def make_script(name, objective, use_sevc, use_innovation, use_trust, trust_nois
                 election_weight, media_captured,
                 seed, n_steps,
                 animate=False, anim_subsample=2, output_dir="results/architecture",
-                production_aware_E=False, production_aware_S_pop=False):
+                production_aware_E=False, production_aware_S_pop=False,
+                ceo_compensation_tied=False, ceo_base_equals_floor=False,
+                ceo_equity_tied=False, capture_normalization="fixed"):
     """Generate a self-contained run script with config injected."""
     s = SCRIPT_TEMPLATE
     s = s.replace("@@CWD@@", _SCRIPT_DIR)
@@ -293,6 +308,10 @@ def make_script(name, objective, use_sevc, use_innovation, use_trust, trust_nois
     s = s.replace("@@MEDIA_CAPTURED@@", str(media_captured))
     s = s.replace("@@PRODUCTION_AWARE_E@@", str(production_aware_E))
     s = s.replace("@@PRODUCTION_AWARE_S_POP@@", str(production_aware_S_pop))
+    s = s.replace("@@CEO_COMPENSATION_TIED@@", str(ceo_compensation_tied))
+    s = s.replace("@@CEO_BASE_EQUALS_FLOOR@@", str(ceo_base_equals_floor))
+    s = s.replace("@@CEO_EQUITY_TIED@@", str(ceo_equity_tied))
+    s = s.replace("@@CAPTURE_NORMALIZATION@@", str(capture_normalization))
     s = s.replace("@@SEED@@", str(seed))
     s = s.replace("@@N_STEPS@@", str(n_steps))
     s = s.replace("@@ANIMATE@@", str(animate))
@@ -306,6 +325,7 @@ def run_one(job):
     (name, objective, use_sevc, use_innovation, use_trust, trust_noise,
      use_hi, use_firm_hi, gov_type, mixed_sevc_ratio,
      election_weight, media_captured, production_aware_E, production_aware_S_pop,
+     ceo_compensation_tied, ceo_base_equals_floor, ceo_equity_tied, capture_normalization,
      seed, n_steps, animate, anim_subsample, output_dir) = job
     label = name + "/seed" + str(seed)
 
@@ -316,7 +336,11 @@ def run_one(job):
                          animate=animate, anim_subsample=anim_subsample,
                          output_dir=output_dir,
                          production_aware_E=production_aware_E,
-                         production_aware_S_pop=production_aware_S_pop)
+                         production_aware_S_pop=production_aware_S_pop,
+                         ceo_compensation_tied=ceo_compensation_tied,
+                         ceo_base_equals_floor=ceo_base_equals_floor,
+                         ceo_equity_tied=ceo_equity_tied,
+                         capture_normalization=capture_normalization)
 
     script_path = "/tmp/run_" + name + "_s" + str(seed) + ".py"
     with open(script_path, "w") as f:
@@ -399,8 +423,12 @@ def main():
         if args.only and name != args.only:
             continue
         for seed in seeds:
-            # Pad legacy 12-field tuples with production_aware_E=False, production_aware_S_pop=False
-            full_cond = cond if len(cond) >= 14 else cond + (False, False)
+            # Pad legacy tuples up to 18 fields
+            full_cond = cond
+            if len(full_cond) < 14:
+                full_cond = full_cond + (False, False)        # pad production_aware flags
+            if len(full_cond) < 18:
+                full_cond = full_cond + (False, False, False, "fixed")  # pad CEO flags
             jobs.append(full_cond + (seed, n_steps, args.animate, args.subsample, output_dir))
 
     print("=" * 70)
@@ -419,6 +447,8 @@ def main():
         name, obj, sevc, inno, trust, noise, hi, firm_hi, gov, mixed_ratio, elec_w, media_cap = cond[:12]
         pa_e   = cond[12] if len(cond) > 12 else False
         pa_s   = cond[13] if len(cond) > 13 else False
+        ceo_t  = cond[14] if len(cond) > 14 else False
+        cap_n  = cond[17] if len(cond) > 17 else "fixed"
         flags = []
         if sevc: flags.append("SEVC")
         if inno: flags.append("Inno")
@@ -430,6 +460,7 @@ def main():
         if elec_w > 0: flags.append("Resp(" + str(elec_w) + ")")
         if media_cap: flags.append("MediaCap")
         if pa_e or pa_s: flags.append("PA(E=" + str(pa_e) + ",S=" + str(pa_s) + ")")
+        if ceo_t: flags.append("CEO(norm=" + str(cap_n) + ")")
         print("  " + name + ": " + obj + " [" + ", ".join(flags) + "]")
     print()
 
