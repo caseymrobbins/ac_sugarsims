@@ -26,26 +26,14 @@ import time
 import argparse
 from concurrent.futures import ProcessPoolExecutor, as_completed
 
-SEEDS = [101, 202, 303, 404, 505, 606]
+SEEDS = [42, 101, 137, 202, 256, 303, 389, 404, 501, 505, 606, 623, 777, 888, 999]
 N_STEPS = 2000
 
-# (name, objective, use_sevc, use_innovation, use_trust, trust_noise, use_hi, use_firm_hi, gov_type, mixed_sevc_ratio, election_weight, media_captured)
+# (name, objective, use_sevc, use_innovation, use_trust, trust_noise, use_hi, use_firm_hi, gov_type, mixed_sevc_ratio, election_weight, media_captured, production_aware_E, production_aware_S_pop)
 CONDITIONS = [
-    # ("C1_baseline",       "SUM_RAW", False, True,  False, 0.0, False, False, "authoritarian",  1.0, 0.0, False),
-    # ("C2_sevc",           "SUM_RAW", True,  True,  False, 0.0, False, False, "authoritarian",  1.0, 0.0, False),
-    # ("C3_sevc_hi",        "SUM_RAW", True,  True,  False, 0.0, True,  True,  "authoritarian",  1.0, 0.0, False),
-    # ("C4_full_auth",      "SUM_RAW", True,  True,  True,  0.1, True,  True,  "authoritarian",  1.0, 0.0, False),
-    # ("C5_demo_captured",  "SUM_RAW", True,  True,  True,  0.1, True,  True,  "demo_captured",  1.0, 0.0, False),
-    # ("C6_auth_captured",  "SUM_RAW", True,  True,  True,  0.1, True,  True,  "auth_captured",  1.0, 0.0, False),
-    # ("C7_democratic",     "SUM_RAW", True,  True,  True,  0.1, True,  True,  "democratic",     1.0, 0.0, False),
-    # ("C8_mixed",          "SUM_RAW", True,  True,  True,  0.1, True,  True,  "democratic",     0.5, 0.0, False),
-    # ("C9_planner_sevc_democratic",    "PLANNER_SEVC", True, True, True, 0.1, True, True, "democratic",    1.0, 0.0, False),
-    # ("C10_planner_sevc_auth",         "PLANNER_SEVC", True, True, True, 0.1, True, True, "authoritarian", 1.0, 0.0, False),
-    # ("C11_planner_sevc_demo_captured","PLANNER_SEVC", True, True, True, 0.1, True, True, "demo_captured", 1.0, 0.0, False),
-    ("C12_responsive_democratic",     "PLANNER_SEVC", True, True, True, 0.1, True, True, "democratic",    1.0, 2.0, False),
-    ("C13_responsive_demo_captured",  "PLANNER_SEVC", True, True, True, 0.1, True, True, "demo_captured", 1.0, 2.0, True),
-    ("C14_pure_technocrat_democratic", "PLANNER_SEVC", True, True, True, 0.1, True, True, "democratic",    1.0, 0.0, False),
-    ("C15_pure_technocrat_auth",       "PLANNER_SEVC", True, True, True, 0.1, True, True, "authoritarian", 1.0, 0.0, False),
+    ("C16_production_aware_democratic",  "PLANNER_SEVC", True,  True, True, 0.1, True, True, "democratic",    1.0, 2.0, False, True,  True),
+    ("C17_production_aware_no_sevc",     "PLANNER_SEVC", False, True, True, 0.1, True, True, "democratic",    1.0, 2.0, False, False, True),
+    ("C18_production_aware_captured",    "PLANNER_SEVC", True,  True, True, 0.1, True, True, "demo_captured", 1.0, 2.0, True,  True,  True),
 ]
 
 # Preset: 2-condition test (vanilla vs full stack) with 10 seeds
