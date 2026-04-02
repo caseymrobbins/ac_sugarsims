@@ -206,7 +206,7 @@ def _print_comparison(df: pd.DataFrame):
         ("frac_poverty_trap", "% Poverty Trap", ".1%", "lower"),
         ("n_firms", "Active Firms", ".1f", "higher"),
         ("n_workers", "Population", ".0f", "higher"),
-        ("epistemic_health", "Epistemic Health", ".3f", "higher"),
+        ("epistemic_health_mean", "Epistemic Health (mean)", ".3f", "higher"),
         ("total_production", "Production", ".0f", "higher"),
     ]
 

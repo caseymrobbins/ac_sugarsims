@@ -789,17 +789,27 @@ def episode_summary(metrics_history: List[Dict]) -> Dict[str, Any]:
         "weight_polarization", "info_r0",
         "n_news_firms", "n_captured_news",
         "n_accurate_news", "n_captured_accurate",
-        "epistemic_health", "trust_gini", "pct_low_trust",
+        "trust_gini", "pct_low_trust",
+        # Four-variable EH decomposition
+        "system_M", "system_VE", "system_CI", "system_tau_c",
+        "epistemic_health_mean", "epistemic_health_floor",
+        "epistemic_health_median", "eh_gini", "pct_low_eh",
     ]
     for key in info_keys:
         summary[key] = avg(key)
 
-    summary["terminal_epistemic_health"] = last("epistemic_health")
+    summary["terminal_epistemic_health_mean"] = last("epistemic_health_mean")
+    summary["terminal_epistemic_health_floor"] = last("epistemic_health_floor")
     summary["terminal_authority_trust"] = last("mean_authority_trust")
     summary["terminal_polarization"] = last("weight_polarization")
     summary["terminal_info_r0"] = last("info_r0")
+    summary["terminal_system_M"] = last("system_M")
+    summary["terminal_system_VE"] = last("system_VE")
+    summary["terminal_system_CI"] = last("system_CI")
+    summary["terminal_system_tau_c"] = last("system_tau_c")
     summary["max_info_r0"] = max_val("info_r0")
     summary["max_captured_news"] = max_val("n_captured_news")
+    summary["max_system_M"] = max_val("system_M")
 
     # Banking metrics
     banking_keys = [

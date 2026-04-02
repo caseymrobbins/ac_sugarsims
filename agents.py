@@ -131,6 +131,15 @@ class WorkerAgent(Agent):
         self.aggression = float(rng.beta(2, 5))  # 0=content, 0.5=friction, 1.0=rebellion
         self._crime_events = 0  # per-step counter, reset each step
         self._riot_events = 0
+        # Per-agent epistemic health: rolling window of received signal metadata
+        # Each entry: (is_captured_source: bool, source_accuracy: float, source_id: int)
+        from information import SIGNAL_WINDOW_SIZE
+        self._signal_window: deque = deque(maxlen=SIGNAL_WINDOW_SIZE)
+        # EH four-variable attributes (updated in receive_information)
+        self.misinformation_exposure: float = 0.0   # M_i: fraction of signals from captured sources
+        self.viewpoint_entropy: float = 0.5          # VE_i: source diversity (HHI-based)
+        self.claim_integrity: float = 0.5            # CI_i: weighted mean source accuracy
+        self.contestation_quality: float = 0.5       # tau_c_i: experience vs captured signal ratio
 
     def step(self):
         self.age += 1
@@ -251,6 +260,58 @@ class WorkerAgent(Agent):
         if scapegoat is not None and _identity_similarity(self.identity, scapegoat) < 0.5:
             # Worker absorbs blame narrative: increase aggression toward scapegoat group
             self.aggression = min(1.0, self.aggression + effective_trust * 0.02)
+
+        # Record signal metadata in rolling window for per-agent EH computation
+        is_captured = getattr(signal, 'is_captured_source', False)
+        src_accuracy = getattr(signal, 'source_accuracy', 0.5)
+        self._signal_window.append((is_captured, src_accuracy, signal.source_id))
+        self._update_eh_attributes()
+
+    def _update_eh_attributes(self):
+        """Recompute M_i, VE_i, CI_i, tau_c_i from the rolling signal window."""
+        window = list(self._signal_window)
+        n = len(window)
+        if n == 0:
+            return
+
+        # --- M_i: misinformation exposure ---
+        # Fraction of signals that came from captured sources
+        n_captured = sum(1 for (cap, _, _) in window if cap)
+        self.misinformation_exposure = float(n_captured) / n
+
+        # --- VE_i: viewpoint entropy via HHI ---
+        # Count how many signals came from each distinct source
+        source_counts: Dict[int, int] = {}
+        for (_, _, sid) in window:
+            source_counts[sid] = source_counts.get(sid, 0) + 1
+        n_sources = len(source_counts)
+        if n_sources <= 1:
+            self.viewpoint_entropy = 0.0
+        else:
+            shares = [c / n for c in source_counts.values()]
+            hhi = sum(s * s for s in shares)
+            # VE = 1 - HHI, normalized to [0,1] via (1-HHI)/(1-1/n_sources)
+            max_diversity = 1.0 - 1.0 / n_sources
+            self.viewpoint_entropy = float(np.clip((1.0 - hhi) / max_diversity, 0.0, 1.0))
+
+        # --- CI_i: claim integrity (weighted mean source accuracy) ---
+        # Equal weight per signal; source_accuracy is effective_accuracy from producer
+        self.claim_integrity = float(np.mean([acc for (_, acc, _) in window]))
+
+        # --- tau_c_i: contestation quality ---
+        # Fraction of agent's information update driven by experience vs captured signals
+        # experience_correction_rate ≈ weight-update learning rate * |outcome|
+        experience_rate = 0.02 * (abs(self._last_action_outcome) + 1e-9)
+        captured_rate = self.misinformation_exposure * len(window) / max(n, 1)
+        denom = experience_rate + captured_rate
+        if denom > 0:
+            raw_tau = experience_rate / denom
+        else:
+            raw_tau = 0.5
+        # Weight correction by mean accuracy of non-captured sources in the window
+        non_captured_acc = [acc for (cap, acc, _) in window if not cap]
+        quality_weight = float(np.mean(non_captured_acc)) if non_captured_acc else 0.0
+        self.contestation_quality = float(np.clip(raw_tau * quality_weight, 0.0, 1.0))
 
     def _harvest(self):
         pos = self._safe_pos()
@@ -590,16 +651,36 @@ class WorkerAgent(Agent):
         super().remove()
 
     def compute_agency(self):
-        resources = max(self.wealth, 1e-9)
+        # Raw POLI dimensions
+        resources = max(self.wealth, 1e-9)                                  # P: material prerequisites
         if self.pos is not None:
             p = (int(self.pos[0]), int(self.pos[1]))
-            local_density = float(self.model.food_grid[p[0],p[1]]) + float(self.model.raw_grid[p[0],p[1]]) + float(self.model.capital_grid[p[0],p[1]])
-        else: local_density = 1.0
-        options = max(self.skill * (local_density + 1), 1e-9)
-        levers = 1.0 + float(self.employed) + float(self.debt < 100) + float(len(self.network_connections) > 0)
-        impact = max(abs(self.income_last_step - self.income_prev_step) + 1e-9, 1e-9)
-        raw_agency = (resources * options * levers * impact) ** 0.25
-        return float(raw_agency * (0.5 + 0.5 * self.authority_trust))
+            local_density = (float(self.model.food_grid[p[0],p[1]]) +
+                             float(self.model.raw_grid[p[0],p[1]]) +
+                             float(self.model.capital_grid[p[0],p[1]]))
+        else:
+            local_density = 1.0
+        options = max(self.skill * (local_density + 1), 1e-9)               # O: available options
+        levers = 1.0 + float(self.employed) + float(self.debt < 100) + float(len(self.network_connections) > 0)  # L: action levers
+        impact = max(abs(self.income_last_step - self.income_prev_step) + 1e-9, 1e-9)  # I: effective impact
+
+        # POLI-EH separation: each dimension filtered by its phase-specific epistemic variable
+        #   P-phase: M degrades perception of own prerequisites
+        #   O-phase: VE (viewpoint entropy) constrains which options are visible
+        #   L-phase: CI (claim integrity) determines quality of lever selection
+        #   I-phase: tau_c (contestation quality) determines if impact is read correctly
+        M       = getattr(self, 'misinformation_exposure', 0.0)
+        VE      = getattr(self, 'viewpoint_entropy', 0.5)
+        CI      = getattr(self, 'claim_integrity', 0.5)
+        tau_c   = getattr(self, 'contestation_quality', 0.5)
+
+        P_eff = resources / (1.0 + M)          # high M distorts P-perception
+        O_eff = max(options * VE, 1e-9)        # low VE shrinks visible option set
+        L_eff = levers * CI                    # low CI corrupts lever selection
+        I_eff = max(impact * tau_c, 1e-9)      # low tau_c mutes effective impact
+
+        agency = (P_eff * O_eff * L_eff * I_eff) ** 0.25
+        return float(agency)
 
 
 class FirmAgent(Agent):
