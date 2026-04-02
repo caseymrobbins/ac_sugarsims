@@ -815,7 +815,7 @@ class FirmAgent(Agent):
                 invest = min(self.wealth * rate, self.profit * 0.5); self.capital_stock += invest; self.wealth -= invest
         elif strategy == "raise_wages":
             n = max(len(self.workers), 1); rev_per = self.revenue / n if self.revenue > 0 else 0
-            self.offered_wage = max(self.offered_wage, min(20.0, rev_per * 0.65))
+            self.offered_wage = max(self.offered_wage, rev_per * 0.65)
         elif strategy == "cut_wages": self.offered_wage = max(1.0, self.offered_wage * 0.92)
         elif strategy == "downsize": self._manage_workforce()
         elif strategy == "acquire": self._consider_acquisition()
@@ -829,7 +829,7 @@ class FirmAgent(Agent):
     def _maintain_wages(self):
         n = max(len(self.workers), 1); rev_per = self.revenue / n if self.revenue > 0 else 0
         if rev_per > 0: self.offered_wage = min(self.offered_wage, rev_per * 0.85)
-        self.offered_wage = max(1.0, min(20.0, self.offered_wage))
+        self.offered_wage = max(1.0, self.offered_wage)
 
     def _attempt_media_capture(self):
         if self.wealth < 200: return
