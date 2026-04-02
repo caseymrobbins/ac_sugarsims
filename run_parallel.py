@@ -55,6 +55,21 @@ TEST2_CONDITIONS = [
 ]
 TEST2_SEEDS = [7, 23, 59, 101, 233, 347, 461, 587, 719, 853]
 
+# Task 11: Production-Aware Capital conditions (C16/C17/C18)
+# Tuple: (name, objective, use_sevc, use_innovation, use_trust, trust_noise,
+#          use_hi, use_firm_hi, gov_type, mixed_sevc_ratio, election_weight,
+#          media_captured, production_aware_E, production_aware_S_pop)
+PA_CONDITIONS = [
+    # C16: full production-aware SEVC, responsive democracy — primary test
+    ("C16_production_aware_democratic",  "PLANNER_SEVC", True,  True, True, 0.1, True, True, "democratic",    1.0, 2.0, False, True,  True),
+    # C17: vanilla firms + planner capture floor — planner-only baseline
+    ("C17_production_aware_no_sevc",     "PLANNER_SEVC", False, True, True, 0.1, True, True, "democratic",    1.0, 2.0, False, False, True),
+    # C18: production-aware SEVC + captured media — robustness test
+    ("C18_production_aware_captured",    "PLANNER_SEVC", True,  True, True, 0.1, True, True, "demo_captured", 1.0, 2.0, True,  True,  True),
+]
+PA_SEEDS  = [42, 137, 256, 389, 501, 623, 777, 888]
+PA_STEPS  = 2000
+
 # Preset: C12-C15 responsiveness test with 8 new seeds
 RESP_CONDITIONS = [
     ("C12_responsive_democratic",     "PLANNER_SEVC", True, True, True, 0.1, True, True, "democratic",    1.0, 2.0, False),
@@ -152,6 +167,8 @@ GOV_TYPE = "@@GOV_TYPE@@"
 MIXED_SEVC_RATIO = @@MIXED_SEVC_RATIO@@
 ELECTION_WEIGHT = @@ELECTION_WEIGHT@@
 MEDIA_CAPTURED = @@MEDIA_CAPTURED@@
+PRODUCTION_AWARE_E    = @@PRODUCTION_AWARE_E@@
+PRODUCTION_AWARE_S_POP = @@PRODUCTION_AWARE_S_POP@@
 SEED = @@SEED@@
 N_STEPS = @@N_STEPS@@
 ANIMATE = @@ANIMATE@@
@@ -175,6 +192,8 @@ model.use_horizon_index = USE_HI
 model.use_firm_hi = USE_FIRM_HI
 model.gov_type = GOV_TYPE
 model.election_weight = ELECTION_WEIGHT
+model.production_aware_E     = PRODUCTION_AWARE_E
+model.production_aware_S_pop = PRODUCTION_AWARE_S_POP
 
 if not USE_SEVC:
     for firm in model.firms:
@@ -267,7 +286,8 @@ def make_script(name, objective, use_sevc, use_innovation, use_trust, trust_nois
                 use_hi, use_firm_hi, gov_type, mixed_sevc_ratio,
                 election_weight, media_captured,
                 seed, n_steps,
-                animate=False, anim_subsample=2, output_dir="results/architecture"):
+                animate=False, anim_subsample=2, output_dir="results/architecture",
+                production_aware_E=False, production_aware_S_pop=False):
     """Generate a self-contained run script with config injected."""
     s = SCRIPT_TEMPLATE
     s = s.replace("@@CWD@@", _SCRIPT_DIR)
@@ -283,6 +303,8 @@ def make_script(name, objective, use_sevc, use_innovation, use_trust, trust_nois
     s = s.replace("@@MIXED_SEVC_RATIO@@", str(mixed_sevc_ratio))
     s = s.replace("@@ELECTION_WEIGHT@@", str(election_weight))
     s = s.replace("@@MEDIA_CAPTURED@@", str(media_captured))
+    s = s.replace("@@PRODUCTION_AWARE_E@@", str(production_aware_E))
+    s = s.replace("@@PRODUCTION_AWARE_S_POP@@", str(production_aware_S_pop))
     s = s.replace("@@SEED@@", str(seed))
     s = s.replace("@@N_STEPS@@", str(n_steps))
     s = s.replace("@@ANIMATE@@", str(animate))
@@ -295,7 +317,7 @@ def run_one(job):
     """Write script, run as subprocess, return result."""
     (name, objective, use_sevc, use_innovation, use_trust, trust_noise,
      use_hi, use_firm_hi, gov_type, mixed_sevc_ratio,
-     election_weight, media_captured,
+     election_weight, media_captured, production_aware_E, production_aware_S_pop,
      seed, n_steps, animate, anim_subsample, output_dir) = job
     label = name + "/seed" + str(seed)
 
@@ -304,7 +326,9 @@ def run_one(job):
                          mixed_sevc_ratio, election_weight, media_captured,
                          seed, n_steps,
                          animate=animate, anim_subsample=anim_subsample,
-                         output_dir=output_dir)
+                         output_dir=output_dir,
+                         production_aware_E=production_aware_E,
+                         production_aware_S_pop=production_aware_S_pop)
 
     script_path = "/tmp/run_" + name + "_s" + str(seed) + ".py"
     with open(script_path, "w") as f:
@@ -351,7 +375,7 @@ def main():
                         help="Animation frame subsample rate (default: 2)")
     parser.add_argument("--preset", type=str, default=None,
                         choices=["full", "test2", "resp"],
-                        help="Preset: 'full' = all 15 conditions, 'test2' = vanilla vs topo (10 seeds), 'resp' = C12-C15 (8 seeds)")
+                        help="Preset: 'full' = all 15 conditions, 'test2' = vanilla vs topo (10 seeds), 'resp' = C12-C15 (8 seeds), 'pa' = Task 11 C16-C18 (8 seeds)")
     args = parser.parse_args()
 
     # Select conditions and seeds based on preset
@@ -365,6 +389,11 @@ def main():
         seeds = RESP_SEEDS
         n_steps = args.steps if args.steps > 0 else N_STEPS
         output_dir = "results/responsiveness"
+    elif args.preset == "pa":
+        conditions = PA_CONDITIONS
+        seeds = PA_SEEDS
+        n_steps = args.steps if args.steps > 0 else PA_STEPS
+        output_dir = "results/production_aware"
     else:
         conditions = CONDITIONS
         seeds = SEEDS
@@ -382,7 +411,9 @@ def main():
         if args.only and name != args.only:
             continue
         for seed in seeds:
-            jobs.append(cond + (seed, n_steps, args.animate, args.subsample, output_dir))
+            # Pad legacy 12-field tuples with production_aware_E=False, production_aware_S_pop=False
+            full_cond = cond if len(cond) >= 14 else cond + (False, False)
+            jobs.append(full_cond + (seed, n_steps, args.animate, args.subsample, output_dir))
 
     print("=" * 70)
     print("  PARALLEL ARCHITECTURE EXPERIMENT")
@@ -397,7 +428,9 @@ def main():
     for cond in conditions:
         if args.only and cond[0] != args.only:
             continue
-        name, obj, sevc, inno, trust, noise, hi, firm_hi, gov, mixed_ratio, elec_w, media_cap = cond
+        name, obj, sevc, inno, trust, noise, hi, firm_hi, gov, mixed_ratio, elec_w, media_cap = cond[:12]
+        pa_e   = cond[12] if len(cond) > 12 else False
+        pa_s   = cond[13] if len(cond) > 13 else False
         flags = []
         if sevc: flags.append("SEVC")
         if inno: flags.append("Inno")
@@ -408,6 +441,7 @@ def main():
         if mixed_ratio < 1.0: flags.append("Mix(" + str(mixed_ratio) + ")")
         if elec_w > 0: flags.append("Resp(" + str(elec_w) + ")")
         if media_cap: flags.append("MediaCap")
+        if pa_e or pa_s: flags.append("PA(E=" + str(pa_e) + ",S=" + str(pa_s) + ")")
         print("  " + name + ": " + obj + " [" + ", ".join(flags) + "]")
     print()
 
