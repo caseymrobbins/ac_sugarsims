@@ -70,6 +70,9 @@ class Condition:
     ceo_base_equals_floor: bool = False   # CEO base = lowest worker wage (Task 12)
     ceo_equity_tied: bool = False         # CEO equity mark-to-market at book×sevc_floor (Task 12)
     capture_normalization: str = "fixed"  # "fixed" | "ema" for E capture_score reference (Task 12)
+    # Task 15: Epistemic Health Overhaul
+    government_broadcaster: bool = False  # public broadcaster with accuracy tracking gov type
+    eh_formula: str = "legacy"            # "legacy" (product) | "paper" (log+interaction)
 
 
 CONDITIONS = [
@@ -98,6 +101,17 @@ CONDITIONS = [
     # Task 13: Capacity-driven mitosis conditions
     Condition("C21_mitosis_democratic",  "Capacity mitosis + democracy",  "PLANNER_SEVC", True, True, 0.1, True, True, "democratic",    election_weight=1.0),
     Condition("C22_no_mitosis_democratic","No mitosis baseline + democracy","PLANNER_SEVC", True, True, 0.1, True, True, "democratic",   election_weight=1.0),
+    # Task 15: Epistemic Health Overhaul
+    Condition("C23_full_structural",  "EH overhaul, clean democracy", "PLANNER_SEVC", True, True, 0.1, True, True, "democratic",
+              election_weight=2.0, production_aware_E=True, production_aware_S_pop=True,
+              ceo_compensation_tied=True, ceo_base_equals_floor=True, ceo_equity_tied=True,
+              capture_normalization="ema", media_captured=False,
+              government_broadcaster=True, eh_formula="paper"),
+    Condition("C24_full_captured",    "EH overhaul, captured demo",   "PLANNER_SEVC", True, True, 0.1, True, True, "demo_captured",
+              election_weight=2.0, production_aware_E=True, production_aware_S_pop=True,
+              ceo_compensation_tied=True, ceo_base_equals_floor=True, ceo_equity_tied=True,
+              capture_normalization="ema", media_captured=True,
+              government_broadcaster=True, eh_formula="paper"),
 ]
 
 # Seeds for Task 11 production-aware conditions (8 seeds as specified)
@@ -141,6 +155,9 @@ def configure_model(model, condition: Condition):
     model.ceo_base_equals_floor = getattr(condition, 'ceo_base_equals_floor', False)
     model.ceo_equity_tied       = getattr(condition, 'ceo_equity_tied', False)
     model.capture_normalization = getattr(condition, 'capture_normalization', 'fixed')
+    # Task 15: Epistemic Health Overhaul flags
+    model.use_government_broadcaster = getattr(condition, 'government_broadcaster', False)
+    model.eh_formula = getattr(condition, 'eh_formula', 'legacy')
 
     # If SEVC is disabled, reset all firms to vanilla behavior
     if not condition.use_sevc:
@@ -425,6 +442,117 @@ def run_production_aware(parallel: int = 1):
     return results_df
 
 
+# ── Epistemic health experiment runner (Task 15) ──────────────────
+
+SEEDS_EH = [42, 137, 256, 389, 501, 623, 777, 888]
+N_STEPS_EH = 3000
+
+
+def run_epistemic_health(parallel: int = 1):
+    """
+    Run the Task 15 EH overhaul conditions (C23/C24) with 8 seeds and 3000 steps.
+
+    C23: full structural + government broadcaster + clean democracy
+    C24: full structural + government broadcaster + captured democracy
+
+    Primary question: does the EH overhaul produce meaningful differentiation
+    between healthy (C23, EH ≈ 0.65-0.80) and captured (C24, EH ≈ 0.25-0.40)
+    information environments?
+    """
+    eh_conditions = [c for c in CONDITIONS if c.name.startswith(("C23", "C24"))]
+    queue = [(cond, seed) for cond in eh_conditions for seed in SEEDS_EH]
+
+    os.makedirs(f"{OUTPUT_DIR}/raw_data", exist_ok=True)
+    os.makedirs(f"{OUTPUT_DIR}/summary", exist_ok=True)
+
+    print("=" * 70)
+    print("  TASK 15: EPISTEMIC HEALTH OVERHAUL EXPERIMENT")
+    print(f"  Conditions: {[c.name for c in eh_conditions]}")
+    print(f"  Seeds: {SEEDS_EH}")
+    print(f"  Steps: {N_STEPS_EH}")
+    print(f"  Total runs: {len(queue)}")
+    print("=" * 70)
+
+    apply_patches()
+
+    global N_STEPS
+    _orig_steps = N_STEPS
+    N_STEPS = N_STEPS_EH
+
+    results = []
+    if parallel > 1:
+        from multiprocessing import Pool
+        with Pool(parallel, initializer=apply_patches) as pool:
+            results = pool.map(run_single_args, queue)
+    else:
+        for args in queue:
+            results.append(run_single_args(args))
+
+    N_STEPS = _orig_steps
+
+    results_df = pd.DataFrame(results)
+    results_df.to_csv(f"{OUTPUT_DIR}/summary/run_log_eh.csv", index=False)
+
+    # Print EH-specific comparison table
+    try:
+        raw_files = [f for f in os.listdir(f"{OUTPUT_DIR}/raw_data")
+                     if f.endswith(".parquet") and any(
+                         c.name in f for c in eh_conditions)]
+        if raw_files:
+            all_raw = pd.concat([
+                pd.read_parquet(f"{OUTPUT_DIR}/raw_data/{f}") for f in raw_files
+            ], ignore_index=True)
+            _print_eh_comparison(all_raw)
+    except Exception as e:
+        print(f"  EH comparison table failed: {e}")
+
+    print(f"\nDone: {len(results)} runs. Results in {OUTPUT_DIR}/raw_data/")
+    return results_df
+
+
+def _print_eh_comparison(df: pd.DataFrame):
+    """Print EH-focused comparison table for C23 vs C24."""
+    late = df[df['step'] >= max(df['step'].max() - 500, df['step'].max() // 2)]
+    conditions = sorted(late['condition'].unique())
+
+    eh_metrics = [
+        ("epistemic_health_mean",   "EH Mean",          "higher"),
+        ("epistemic_health_floor",  "EH Floor",         "higher"),
+        ("epistemic_health_median", "EH Median",        "higher"),
+        ("eh_gini",                 "EH Gini",          "lower"),
+        ("pct_low_eh",              "Pct Low EH",       "lower"),
+        ("system_M",                "M (misinfo)",      "lower"),
+        ("system_VE",               "VE (diversity)",   "higher"),
+        ("system_CI",               "CI (integrity)",   "higher"),
+        ("system_tau_c",            "tau_c (contest.)", "higher"),
+        ("n_captured_news",         "Captured Media",   "lower"),
+        ("mean_authority_trust",    "Auth Trust",       "higher"),
+        ("agency_mean",             "Agency Mean",      "higher"),
+        ("agency_floor",            "Agency Floor",     "higher"),
+    ]
+
+    print(f"\n{'=' * 80}")
+    print("  TASK 15 EH COMPARISON (steady-state, mean across seeds)")
+    print(f"{'=' * 80}")
+    header = f"{'Metric':<22}"
+    for c in conditions:
+        header += f" {c:>18}"
+    print(header)
+    print("-" * len(header))
+    for key, label, direction in eh_metrics:
+        if key not in late.columns:
+            continue
+        row = f"{label:<22}"
+        vals = {c: late[late['condition'] == c][key].mean() for c in conditions}
+        best = min(vals.values()) if direction == "lower" else max(vals.values())
+        for c in conditions:
+            v = vals[c]
+            marker = "*" if abs(v - best) < abs(best) * 0.02 + 1e-9 else " "
+            row += f" {v:>17.4f}{marker}"
+        print(row)
+    print()
+
+
 # ── Main ─────────────────────────────────────────────────────────
 
 def main():
@@ -436,10 +564,16 @@ def main():
                         help="Steps per run")
     parser.add_argument("--production-aware", action="store_true",
                         help="Run only the Task 11 production-aware conditions (C16/C17/C18)")
+    parser.add_argument("--epistemic-health", action="store_true",
+                        help="Run only the Task 15 epistemic health conditions (C23/C24)")
     args = parser.parse_args()
 
     if args.production_aware:
         run_production_aware(parallel=args.parallel)
+        return
+
+    if args.epistemic_health:
+        run_epistemic_health(parallel=args.parallel)
         return
 
     n_steps = args.steps
