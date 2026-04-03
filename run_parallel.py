@@ -92,6 +92,21 @@ EH_CONDITIONS = [
 EH_SEEDS  = [42, 137, 256, 389, 501, 623, 777, 888]
 EH_STEPS  = 3000
 
+# Task 14: Structural fixes (C25/C26) — raw mitosis, innovation-gated entrepreneurship,
+# zombie cleanup, V measures total emissions
+# Tuple: 21 base fields + 3 new flags:
+#   entrepreneurship_requires_innovation, zombie_firm_cleanup, v_measures_total_emissions
+STRUCTURAL_CONDITIONS = [
+    # C25: full stack with all structural fixes
+    ("C25_structural_fixes",    "PLANNER_SEVC", True, True, True, 0.1, True, True, "democratic",
+     1.0, 1.0, False, True, True, True, True, True, "ema", True, True, "paper", True, True, True),
+    # C26: same but without CEO compensation
+    ("C26_structural_no_ceo",   "PLANNER_SEVC", True, True, True, 0.1, True, True, "democratic",
+     1.0, 1.0, False, True, True, False, False, False, "ema", True, True, "paper", True, True, True),
+]
+STRUCTURAL_SEEDS = [42, 137, 256, 389, 501, 623, 777, 888]
+STRUCTURAL_STEPS = 3000
+
 
 SCRIPT_TEMPLATE = r'''
 import sys, os, time
@@ -189,6 +204,9 @@ CAPTURE_NORMALIZATION = "@@CAPTURE_NORMALIZATION@@"
 USE_CAPACITY_MITOSIS = @@USE_CAPACITY_MITOSIS@@
 GOVERNMENT_BROADCASTER = @@GOVERNMENT_BROADCASTER@@
 EH_FORMULA = "@@EH_FORMULA@@"
+ENTREPRENEURSHIP_REQUIRES_INNOVATION = @@ENTREPRENEURSHIP_REQUIRES_INNOVATION@@
+ZOMBIE_FIRM_CLEANUP = @@ZOMBIE_FIRM_CLEANUP@@
+V_MEASURES_TOTAL_EMISSIONS = @@V_MEASURES_TOTAL_EMISSIONS@@
 SEED = @@SEED@@
 N_STEPS = @@N_STEPS@@
 ANIMATE = @@ANIMATE@@
@@ -221,6 +239,9 @@ model.capture_normalization  = CAPTURE_NORMALIZATION
 model.use_capacity_mitosis = USE_CAPACITY_MITOSIS
 model.use_government_broadcaster = GOVERNMENT_BROADCASTER
 model.eh_formula = EH_FORMULA
+model.entrepreneurship_requires_innovation = ENTREPRENEURSHIP_REQUIRES_INNOVATION
+model.zombie_firm_cleanup = ZOMBIE_FIRM_CLEANUP
+model.v_measures_total_emissions = V_MEASURES_TOTAL_EMISSIONS
 
 if not USE_SEVC:
     for firm in model.firms:
@@ -318,7 +339,10 @@ def make_script(name, objective, use_sevc, use_innovation, use_trust, trust_nois
                 ceo_compensation_tied=False, ceo_base_equals_floor=False,
                 ceo_equity_tied=False, capture_normalization="fixed",
                 use_capacity_mitosis=True,
-                government_broadcaster=False, eh_formula="legacy"):
+                government_broadcaster=False, eh_formula="legacy",
+                entrepreneurship_requires_innovation=False,
+                zombie_firm_cleanup=False,
+                v_measures_total_emissions=False):
     """Generate a self-contained run script with config injected."""
     s = SCRIPT_TEMPLATE
     s = s.replace("@@CWD@@", _SCRIPT_DIR)
@@ -343,6 +367,9 @@ def make_script(name, objective, use_sevc, use_innovation, use_trust, trust_nois
     s = s.replace("@@USE_CAPACITY_MITOSIS@@", str(use_capacity_mitosis))
     s = s.replace("@@GOVERNMENT_BROADCASTER@@", str(government_broadcaster))
     s = s.replace("@@EH_FORMULA@@", str(eh_formula))
+    s = s.replace("@@ENTREPRENEURSHIP_REQUIRES_INNOVATION@@", str(entrepreneurship_requires_innovation))
+    s = s.replace("@@ZOMBIE_FIRM_CLEANUP@@", str(zombie_firm_cleanup))
+    s = s.replace("@@V_MEASURES_TOTAL_EMISSIONS@@", str(v_measures_total_emissions))
     s = s.replace("@@SEED@@", str(seed))
     s = s.replace("@@N_STEPS@@", str(n_steps))
     s = s.replace("@@ANIMATE@@", str(animate))
@@ -358,6 +385,7 @@ def run_one(job):
      election_weight, media_captured, production_aware_E, production_aware_S_pop,
      ceo_compensation_tied, ceo_base_equals_floor, ceo_equity_tied, capture_normalization,
      use_capacity_mitosis, government_broadcaster, eh_formula,
+     entrepreneurship_requires_innovation, zombie_firm_cleanup, v_measures_total_emissions,
      seed, n_steps, animate, anim_subsample, output_dir) = job
     label = name + "/seed" + str(seed)
 
@@ -375,7 +403,10 @@ def run_one(job):
                          capture_normalization=capture_normalization,
                          use_capacity_mitosis=use_capacity_mitosis,
                          government_broadcaster=government_broadcaster,
-                         eh_formula=eh_formula)
+                         eh_formula=eh_formula,
+                         entrepreneurship_requires_innovation=entrepreneurship_requires_innovation,
+                         zombie_firm_cleanup=zombie_firm_cleanup,
+                         v_measures_total_emissions=v_measures_total_emissions)
 
     script_path = "/tmp/run_" + name + "_s" + str(seed) + ".py"
     with open(script_path, "w") as f:
@@ -421,8 +452,8 @@ def main():
     parser.add_argument("--subsample", type=int, default=2,
                         help="Animation frame subsample rate (default: 2)")
     parser.add_argument("--preset", type=str, default=None,
-                        choices=["full", "test2", "resp", "pa", "mitosis", "eh"],
-                        help="Preset: 'full' = all conditions, 'test2' = vanilla vs topo, 'resp' = C12-C15, 'pa' = C16-C18, 'mitosis' = C21-C22, 'eh' = C23-C24 EH overhaul")
+                        choices=["full", "test2", "resp", "pa", "mitosis", "eh", "structural"],
+                        help="Preset: 'full' = all conditions, 'test2' = vanilla vs topo, 'resp' = C12-C15, 'pa' = C16-C18, 'mitosis' = C21-C22, 'eh' = C23-C24 EH overhaul, 'structural' = C25-C26")
     args = parser.parse_args()
 
     # Select conditions and seeds based on preset
@@ -451,6 +482,11 @@ def main():
         seeds = EH_SEEDS
         n_steps = args.steps if args.steps > 0 else EH_STEPS
         output_dir = "results/epistemic_health"
+    elif args.preset == "structural":
+        conditions = STRUCTURAL_CONDITIONS
+        seeds = STRUCTURAL_SEEDS
+        n_steps = args.steps if args.steps > 0 else STRUCTURAL_STEPS
+        output_dir = "results/structural"
     else:
         conditions = CONDITIONS
         seeds = SEEDS
@@ -478,6 +514,8 @@ def main():
                 full_cond = full_cond + (True,)               # pad use_capacity_mitosis
             if len(full_cond) < 21:
                 full_cond = full_cond + (False, "legacy")     # pad government_broadcaster, eh_formula
+            if len(full_cond) < 24:
+                full_cond = full_cond + (False, False, False)  # pad Task 14 structural flags
             jobs.append(full_cond + (seed, n_steps, args.animate, args.subsample, output_dir))
 
     print("=" * 70)

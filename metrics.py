@@ -313,8 +313,12 @@ def collect_step_metrics(model: "EconomicModel") -> Dict[str, Any]:
                 accels.append(lg - eg)
             sc = getattr(f, '_prev_scores', None)
             if sc:
-                s_raw = sc.get('S_raw', sc.get('S', 0.5))
-                gaps.append(s_raw - sc.get('floor', 0.5))
+                s_raw = sc.get('S_raw', 0.5)
+                e_raw = sc.get('E_raw', 0.5)
+                v_raw = sc.get('V_raw', 0.5)
+                c_raw = sc.get('C_raw', 0.5)
+                raw_floor = min(e_raw, v_raw, c_raw)
+                gaps.append(s_raw - raw_floor)
         m["mean_profit_acceleration"] = float(np.mean(accels)) if accels else 0.0
         m["mean_headroom_gap"] = float(np.mean(gaps)) if gaps else 0.0
     else:

@@ -73,6 +73,10 @@ class Condition:
     # Task 15: Epistemic Health Overhaul
     government_broadcaster: bool = False  # public broadcaster with accuracy tracking gov type
     eh_formula: str = "legacy"            # "legacy" (product) | "paper" (log+interaction)
+    # Task 14: Structural fixes for firm dynamics
+    entrepreneurship_requires_innovation: bool = False  # new firms need tech from parent
+    zombie_firm_cleanup: bool = False                   # idle firms die in 15 steps
+    v_measures_total_emissions: bool = False             # V penalizes absolute emissions per worker
 
 
 CONDITIONS = [
@@ -112,6 +116,18 @@ CONDITIONS = [
               ceo_compensation_tied=True, ceo_base_equals_floor=True, ceo_equity_tied=True,
               capture_normalization="ema", media_captured=True,
               government_broadcaster=True, eh_formula="paper"),
+    # Task 14: Structural fixes for firm dynamics
+    Condition("C25_structural_fixes",  "Structural fixes, full stack", "PLANNER_SEVC", True, True, 0.1, True, True, "democratic",
+              election_weight=1.0, production_aware_E=True, production_aware_S_pop=True,
+              ceo_compensation_tied=True, ceo_base_equals_floor=True, ceo_equity_tied=True,
+              capture_normalization="ema",
+              government_broadcaster=True, eh_formula="paper",
+              entrepreneurship_requires_innovation=True, zombie_firm_cleanup=True, v_measures_total_emissions=True),
+    Condition("C26_structural_no_ceo", "Structural fixes, no CEO",    "PLANNER_SEVC", True, True, 0.1, True, True, "democratic",
+              election_weight=1.0, production_aware_E=True, production_aware_S_pop=True,
+              capture_normalization="ema",
+              government_broadcaster=True, eh_formula="paper",
+              entrepreneurship_requires_innovation=True, zombie_firm_cleanup=True, v_measures_total_emissions=True),
 ]
 
 # Seeds for Task 11 production-aware conditions (8 seeds as specified)
@@ -158,6 +174,10 @@ def configure_model(model, condition: Condition):
     # Task 15: Epistemic Health Overhaul flags
     model.use_government_broadcaster = getattr(condition, 'government_broadcaster', False)
     model.eh_formula = getattr(condition, 'eh_formula', 'legacy')
+    # Task 14: Structural fixes for firm dynamics
+    model.entrepreneurship_requires_innovation = getattr(condition, 'entrepreneurship_requires_innovation', False)
+    model.zombie_firm_cleanup = getattr(condition, 'zombie_firm_cleanup', False)
+    model.v_measures_total_emissions = getattr(condition, 'v_measures_total_emissions', False)
 
     # If SEVC is disabled, reset all firms to vanilla behavior
     if not condition.use_sevc:
