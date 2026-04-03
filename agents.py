@@ -304,19 +304,17 @@ class WorkerAgent(Agent):
         self.claim_integrity = float(np.mean([acc for (_, acc, _) in window]))
 
         # --- tau_c_i: contestation quality ---
-        # Fraction of agent's information update driven by experience vs captured signals
-        # experience_correction_rate ≈ weight-update learning rate * |outcome|
-        experience_rate = 0.02 * (abs(self._last_action_outcome) + 1e-9)
-        captured_rate = self.misinformation_exposure * len(window) / max(n, 1)
-        denom = experience_rate + captured_rate
-        if denom > 0:
-            raw_tau = experience_rate / denom
+        # Fraction of signals from accurate, uncaptured sources vs total signals.
+        # High tau_c = agent mostly gets reliable information that could correct
+        # misinformation. Low tau_c = agent is swimming in propaganda with no
+        # corrective signal available.
+        accurate_signals = sum(1 for (cap, acc, _) in window if not cap and acc > 0.5)
+        inaccurate_signals = sum(1 for (cap, acc, _) in window if cap or acc <= 0.5)
+        total_classified = accurate_signals + inaccurate_signals
+        if total_classified > 0:
+            self.contestation_quality = float(accurate_signals / total_classified)
         else:
-            raw_tau = 0.5
-        # Weight correction by mean accuracy of non-captured sources in the window
-        non_captured_acc = [acc for (cap, acc, _) in window if not cap]
-        quality_weight = float(np.mean(non_captured_acc)) if non_captured_acc else 0.0
-        self.contestation_quality = float(np.clip(raw_tau * quality_weight, 0.0, 1.0))
+            self.contestation_quality = 0.5
 
     def _harvest(self):
         pos = self._safe_pos()
@@ -843,10 +841,16 @@ class FirmAgent(Agent):
         self.offered_wage = max(1.0, self.offered_wage)
 
     def _attempt_media_capture(self):
-        if self.wealth < 200: return
+        if self.wealth < 100: return  # lowered from 200 so capture actually fires
         news_firms = getattr(self.model, 'news_firms', [])
-        targets = [nf for nf in news_firms if not nf.defunct and nf.captured_by_cartel is None and nf.wealth < 100]
-        if not targets or self.model.rng.random() > 0.05: return
+        # Relative wealth threshold: target must be less wealthy than 30% of attacker
+        targets = [nf for nf in news_firms if not nf.defunct
+                   and nf.captured_by_cartel is None
+                   and nf.wealth < self.wealth * 0.3]
+        if not targets: return
+        # Cartel members are more aggressive (8% vs 3%)
+        attempt_prob = 0.08 if self.cartel_id is not None else 0.03
+        if self.model.rng.random() > attempt_prob: return
         target = self.model.rng.choice(targets); inv = min(self.wealth * 0.05, 100)
         self.wealth -= inv; target.wealth += inv; target.captured_by_cartel = self.cartel_id or -self.unique_id
         target.bias_direction = {"harvest":0.0,"seek_work":-0.03,"trade":0.0,"migrate":-0.02,"save":0.02,"invest":-0.02,"found_firm":-0.04}

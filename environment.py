@@ -20,7 +20,8 @@ from mesa.space import MultiGrid
 from agents import WorkerAgent, FirmAgent, LandownerAgent, EnforcerAgent
 from economy import Economy
 from planner import PlannerAgent
-from information import NewsFirm, propagate_peer_information, compute_information_metrics
+from information import (NewsFirm, GovernmentBroadcaster,
+                         propagate_peer_information, compute_information_metrics)
 from banking import BankAgent, compute_banking_metrics
 from hardware import (auto_configure, build_regen_fn, AccelConfig,
                       FOOD_CAP, WATER_CAP, RAW_CAP, LAND_CAP,
@@ -112,6 +113,13 @@ class EconomicModel(Model):
         self._create_news_firms(3)  # start with 3 news firms
         self._create_banks(2)      # start with 2 banks
         self._create_enforcers(5)  # start with 5 enforcement agents
+
+        # Government broadcaster: public media funded by the planner.
+        # Enabled by setting use_government_broadcaster = True (done in configure_model).
+        # Accuracy tracks governance type and democratic health.
+        self.government_broadcaster = GovernmentBroadcaster(self)
+        self.use_government_broadcaster: bool = False  # off by default; enabled per-condition
+        self.eh_formula: str = 'legacy'               # 'legacy' | 'paper'
 
         # Seed initial social network connections (fixes trade deadlock)
         self._seed_network_connections()
@@ -293,6 +301,11 @@ class EconomicModel(Model):
 
         # Planner first (sets bonuses, runs elections, redistributes)
         self.planner.step()
+
+        # Government broadcaster: reaches ALL workers before commercial news.
+        # In healthy democracies accuracy is 0.8-0.9; in captured / authoritarian
+        # conditions it degrades to 0.4-0.5 / 0.3-0.4.
+        self.government_broadcaster.broadcast()
 
         # Shuffle-step all agents (including news firms and banks)
         agent_list = (list(self.workers) + list(self.firms)

@@ -361,10 +361,13 @@ class NewsFirm(Agent):
                 scapegoat_identity = IDENTITY_TYPES[rng.integers(len(IDENTITY_TYPES))]
                 blame_target = rng.choice(["workers", "immigrants", "government"])
 
-        # Effective accuracy: capture degrades it proportional to cartel bias strength
+        # Effective accuracy: capture sharply degrades signal quality so that
+        # agents who receive captured signals get genuinely higher M and lower CI.
+        # Using 0.4× multiplier (vs 0.7× with CARTEL_BIAS_STRENGTH) creates the
+        # separation needed for EH to differentiate captured vs uncaptured conditions.
         is_captured = self.captured_by_cartel is not None
         effective_accuracy = (
-            self.accuracy * (1.0 - CARTEL_BIAS_STRENGTH)
+            max(0.2, self.accuracy * 0.4)
             if is_captured else self.accuracy
         )
 
@@ -500,6 +503,153 @@ class NewsFirm(Agent):
 
 
 # ---------------------------------------------------------------------------
+# Government Broadcaster
+# ---------------------------------------------------------------------------
+
+class GovernmentBroadcaster:
+    """
+    Public broadcaster funded by the planner.
+
+    Accuracy depends on governance type and institutional health:
+      - Healthy democracy: high accuracy (0.8-0.95)
+      - Captured democracy: accuracy degrades with elite distortion
+      - Authoritarian: accuracy reflects state propaganda (0.3-0.5)
+
+    The government broadcaster reaches ALL workers each step (universal reach),
+    unlike commercial news firms which build subscriber audiences gradually.
+    This ensures every worker always has at least one signal in their window.
+
+    The broadcaster has a fixed source_id of -1 so it is distinguishable
+    from commercial news firms in per-agent EH tracking.
+    """
+
+    SOURCE_ID = -1  # sentinel: not a real agent unique_id
+
+    def __init__(self, model: "EconomicModel"):
+        self.model = model
+        self.base_accuracy: float = 0.9
+        self.trust_score: float = 0.7      # moderate public trust at start
+        self._effective_accuracy: float = 0.9  # cached, updated each step
+
+    # ── Accuracy computation ─────────────────────────────────────────
+
+    def compute_effective_accuracy(self) -> float:
+        """
+        Accuracy = f(governance_type, legitimacy, elite_distortion, funding).
+
+        Authoritarian: state propaganda (0.3-0.4).
+        Captured democracy: accuracy degrades with elite distortion.
+        Healthy democracy: high accuracy modulated by legitimacy and funding.
+        """
+        gov_type = getattr(self.model, 'gov_type', 'democratic')
+
+        if gov_type in ('authoritarian', 'auth_captured'):
+            # State propaganda: accuracy reflects planner's bias, not truth
+            return 0.3 + 0.1 * self._funding_quality()
+
+        # Democratic conditions
+        legitimacy = float(np.mean(self.model.legitimacy_grid)) \
+            if hasattr(self.model, 'legitimacy_grid') else 0.9
+        elite_distortion = getattr(self.model, '_elite_distortion', 0.0)
+
+        if gov_type == 'demo_captured':
+            # Captured democracy: government broadcaster becomes captured too
+            capture_penalty = 0.3 + 0.2 * float(elite_distortion)
+            accuracy = self.base_accuracy * legitimacy * (1.0 - capture_penalty)
+        else:
+            # Healthy democracy: high accuracy, modulated by legitimacy
+            accuracy = self.base_accuracy * (0.5 + 0.5 * legitimacy)
+
+        # Funding quality: underfunded public media is less accurate
+        funding_mod = 0.7 + 0.3 * self._funding_quality()
+
+        return float(np.clip(accuracy * funding_mod, 0.1, 0.95))
+
+    def _funding_quality(self) -> float:
+        """Normalised public-media funding level (0=unfunded, 1=well-funded)."""
+        media_funding = self.model.planner.policy.get('media_funding', 0.0) \
+            if hasattr(self.model, 'planner') else 0.0
+        return float(np.clip(media_funding / 0.5, 0.0, 1.0))
+
+    # ── Broadcasting ─────────────────────────────────────────────────
+
+    def broadcast(self):
+        """
+        Produce one signal and deliver it to ALL workers (universal reach).
+
+        Called each step before the commercial news firm shuffle so the
+        government signal forms the baseline that commercial signals layer on.
+        """
+        if not getattr(self.model, 'use_government_broadcaster', False):
+            return
+
+        self._effective_accuracy = self.compute_effective_accuracy()
+        signal = self._create_signal(self._effective_accuracy)
+
+        for worker in self.model.workers:
+            if hasattr(worker, 'receive_information'):
+                worker.receive_information(signal)
+
+    def _create_signal(self, accuracy: float) -> InfoSignal:
+        """
+        Create a broadcast signal.
+
+        High accuracy (> 0.5): signal reflects actual economic conditions,
+        marked as NOT captured.
+        Low accuracy (≤ 0.5): signal is effectively state propaganda,
+        marked as a captured source so M_i increases for recipients.
+        """
+        is_captured = accuracy < 0.5
+        weight_deltas = self._compute_weight_deltas(accuracy)
+
+        return InfoSignal(
+            weight_deltas=weight_deltas,
+            trust=self.trust_score,
+            source_id=self.SOURCE_ID,
+            hops=0,
+            is_captured_source=is_captured,
+            source_accuracy=float(np.clip(accuracy, 0.0, 1.0)),
+        )
+
+    def _compute_weight_deltas(self, accuracy: float) -> Dict[str, float]:
+        """
+        Blend ground-truth deltas (high accuracy) with propaganda deltas (low accuracy).
+        """
+        unemp = 1.0 - sum(1 for w in self.model.workers if w.employed) \
+            / max(len(self.model.workers), 1)
+
+        truth_deltas = {
+            "harvest":    0.02 if float(np.mean(self.model.food_grid)) > 20 else -0.01,
+            "seek_work":  0.02 if unemp > 0.3 else -0.01,
+            "trade":      0.01,
+            "migrate":    0.01 if unemp > 0.4 else 0.0,
+            "save":       0.0,
+            "invest":     0.0,
+            "found_firm": 0.01 if unemp > 0.5 else 0.0,
+        }
+        propaganda_deltas = {
+            "harvest":    0.0,
+            "seek_work":  -0.01,   # "everything is fine, no need to seek work"
+            "trade":      0.0,
+            "migrate":    -0.02,   # "don't leave"
+            "save":       0.0,
+            "invest":     0.02,    # "invest in the regime's economy"
+            "found_firm": -0.02,   # "don't compete with state enterprises"
+        }
+        blended = {}
+        for action in ACTIONS:
+            t = truth_deltas.get(action, 0.0)
+            p = propaganda_deltas.get(action, 0.0)
+            blended[action] = accuracy * t + (1.0 - accuracy) * p
+        return blended
+
+    @property
+    def effective_accuracy(self) -> float:
+        """Last computed effective accuracy (used by metrics)."""
+        return self._effective_accuracy
+
+
+# ---------------------------------------------------------------------------
 # Network propagation (called from environment.step)
 # ---------------------------------------------------------------------------
 
@@ -547,27 +697,47 @@ def propagate_peer_information(model: "EconomicModel"):
 
 def compute_agent_eh(worker) -> float:
     """
-    Compute per-agent epistemic health using the four-variable model:
+    Compute per-agent epistemic health.
 
-        EH_i = (VE_i * CI_i) / (1 + M_i) * g(tau_c_i)
+    When model.eh_formula == 'paper', uses the paper's refined formula:
 
-    where:
-      M_i   -- misinformation exposure: fraction of recent signals from captured sources
-      VE_i  -- viewpoint entropy: source diversity (HHI-based), in [0,1]
-      CI_i  -- claim integrity: mean effective accuracy of consumed signals, in [0,1]
-      tau_c_i -- contestation quality: experience-correction fraction weighted by source accuracy
+        EH_i = β₀ - w_M·log(1+5M) - w_VE·(1-VE)² - w_CI·(1-CI)
+                   - w_τc·(1-τc) - w_inter·M·(1-VE)
 
-    EH_i is clipped to [0, 1].
+    This avoids the multiplicative collapse of the legacy formula when any
+    single variable is near zero (e.g., when tau_c collapses to ~0.02).
+
+    Legacy formula (default, for backward-compatibility):
+
+        EH_i = (VE_i * CI_i) / (1 + M_i) * tau_c_i
     """
     M_i     = getattr(worker, 'misinformation_exposure', 0.0)
     VE_i    = getattr(worker, 'viewpoint_entropy', 0.5)
     CI_i    = getattr(worker, 'claim_integrity', 0.5)
     tau_c_i = getattr(worker, 'contestation_quality', 0.5)
 
-    # g(tau_c) = identity (simplest monotone increasing, g(0)=0, g(1)=1)
-    g_tau = tau_c_i
+    eh_formula = getattr(getattr(worker, 'model', None), 'eh_formula', 'legacy')
 
-    eh = (VE_i * CI_i) / (1.0 + M_i) * g_tau
+    if eh_formula == 'paper':
+        # Paper's refined formula with log(M), squared VE, and interaction term.
+        # Weights sum to 1.05 so perfect conditions (M=0, VE=1, CI=1, tau=1)
+        # yields β₀ - 0 - 0 - 0 - 0 - 0 = 1.0.
+        beta_0  = 1.0
+        w_M     = 0.30
+        w_VE    = 0.25
+        w_CI    = 0.25
+        w_tau   = 0.15
+        w_inter = 0.15
+        eh = (beta_0
+              - w_M    * np.log1p(M_i * 5)           # log(1+5M): scaled so M=0.5 has large effect
+              - w_VE   * (1.0 - VE_i) ** 2            # squared: accelerating harm at low diversity
+              - w_CI   * (1.0 - CI_i)                 # linear: declining integrity = proportional harm
+              - w_tau  * (1.0 - tau_c_i)              # linear: less correction capacity = harm
+              - w_inter * M_i * (1.0 - VE_i))         # interaction: misinfo in echo chambers is worst
+    else:
+        # Legacy multiplicative formula (kept for existing conditions)
+        eh = (VE_i * CI_i) / (1.0 + M_i) * tau_c_i
+
     return float(np.clip(eh, 0.0, 1.0))
 
 
@@ -585,8 +755,12 @@ def compute_system_eh(model: "EconomicModel") -> Dict[str, float]:
     """
     System-level epistemic health decomposition.
 
-    Returns mean, floor (min), median, Gini, and per-variable system averages.
-    Uses per-agent EH so captured-media conditions correctly show LOWER EH.
+    When model.eh_formula == 'paper', the headline EH is computed from
+    population MEANS of the four per-agent variables (matching the paper's
+    ecosystem-level formulation), and per-agent EH is used only for the
+    distributional statistics (floor, median, Gini).
+
+    For the legacy formula the headline EH is simply the mean of per-agent EHs.
     """
     workers = [w for w in model.workers if getattr(w, 'alive', True)]
     if not workers:
@@ -602,17 +776,46 @@ def compute_system_eh(model: "EconomicModel") -> Dict[str, float]:
             'system_tau_c':            0.0,
         }
 
+    M_pop     = float(np.mean([getattr(w, 'misinformation_exposure', 0.0) for w in workers]))
+    VE_pop    = float(np.mean([getattr(w, 'viewpoint_entropy', 0.5)       for w in workers]))
+    CI_pop    = float(np.mean([getattr(w, 'claim_integrity', 0.5)         for w in workers]))
+    tau_c_pop = float(np.mean([getattr(w, 'contestation_quality', 0.5)   for w in workers]))
+
+    eh_formula = getattr(model, 'eh_formula', 'legacy')
+
+    # Per-agent EH for distributional statistics
     agent_ehs = [compute_agent_eh(w) for w in workers]
+
+    if eh_formula == 'paper':
+        # Headline EH from population aggregates (paper's ecosystem formula)
+        beta_0  = 1.0
+        w_M     = 0.30
+        w_VE    = 0.25
+        w_CI    = 0.25
+        w_tau   = 0.15
+        w_inter = 0.15
+        eh_mean = float(np.clip(
+            beta_0
+            - w_M    * np.log1p(M_pop * 5)
+            - w_VE   * (1.0 - VE_pop) ** 2
+            - w_CI   * (1.0 - CI_pop)
+            - w_tau  * (1.0 - tau_c_pop)
+            - w_inter * M_pop * (1.0 - VE_pop),
+            0.0, 1.0))
+    else:
+        # Legacy: headline EH = mean of per-agent EHs
+        eh_mean = float(np.mean(agent_ehs))
+
     return {
-        'epistemic_health_mean':   float(np.mean(agent_ehs)),
+        'epistemic_health_mean':   eh_mean,
         'epistemic_health_floor':  float(np.min(agent_ehs)),
         'epistemic_health_median': float(np.median(agent_ehs)),
         'eh_gini':                 _gini(agent_ehs),
         'pct_low_eh':              float(np.mean([e < 0.2 for e in agent_ehs])),
-        'system_M':    float(np.mean([getattr(w, 'misinformation_exposure', 0.0) for w in workers])),
-        'system_VE':   float(np.mean([getattr(w, 'viewpoint_entropy', 0.5)       for w in workers])),
-        'system_CI':   float(np.mean([getattr(w, 'claim_integrity', 0.5)          for w in workers])),
-        'system_tau_c':float(np.mean([getattr(w, 'contestation_quality', 0.5)    for w in workers])),
+        'system_M':     M_pop,
+        'system_VE':    VE_pop,
+        'system_CI':    CI_pop,
+        'system_tau_c': tau_c_pop,
     }
 
 
