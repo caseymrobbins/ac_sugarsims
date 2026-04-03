@@ -83,6 +83,15 @@ MITOSIS_CONDITIONS = [
 ]
 MITOSIS_SEEDS = [42, 137, 256, 389, 501, 623, 777, 888]
 
+# Task 15: Epistemic Health Overhaul conditions (C23/C24)
+# Full tuple: same 19 fields as CONDITIONS above, plus government_broadcaster and eh_formula
+EH_CONDITIONS = [
+    ("C23_full_structural", "PLANNER_SEVC", True, True, True, 0.1, True, True, "democratic",    1.0, 2.0, False, True, True, True, True, True, "ema", True, True,  "paper"),
+    ("C24_full_captured",   "PLANNER_SEVC", True, True, True, 0.1, True, True, "demo_captured", 1.0, 2.0, True,  True, True, True, True, True, "ema", True, True,  "paper"),
+]
+EH_SEEDS  = [42, 137, 256, 389, 501, 623, 777, 888]
+EH_STEPS  = 3000
+
 
 SCRIPT_TEMPLATE = r'''
 import sys, os, time
@@ -178,6 +187,8 @@ CEO_BASE_EQUALS_FLOOR = @@CEO_BASE_EQUALS_FLOOR@@
 CEO_EQUITY_TIED       = @@CEO_EQUITY_TIED@@
 CAPTURE_NORMALIZATION = "@@CAPTURE_NORMALIZATION@@"
 USE_CAPACITY_MITOSIS = @@USE_CAPACITY_MITOSIS@@
+GOVERNMENT_BROADCASTER = @@GOVERNMENT_BROADCASTER@@
+EH_FORMULA = "@@EH_FORMULA@@"
 SEED = @@SEED@@
 N_STEPS = @@N_STEPS@@
 ANIMATE = @@ANIMATE@@
@@ -208,6 +219,8 @@ model.ceo_base_equals_floor  = CEO_BASE_EQUALS_FLOOR
 model.ceo_equity_tied        = CEO_EQUITY_TIED
 model.capture_normalization  = CAPTURE_NORMALIZATION
 model.use_capacity_mitosis = USE_CAPACITY_MITOSIS
+model.use_government_broadcaster = GOVERNMENT_BROADCASTER
+model.eh_formula = EH_FORMULA
 
 if not USE_SEVC:
     for firm in model.firms:
@@ -304,7 +317,8 @@ def make_script(name, objective, use_sevc, use_innovation, use_trust, trust_nois
                 production_aware_E=False, production_aware_S_pop=False,
                 ceo_compensation_tied=False, ceo_base_equals_floor=False,
                 ceo_equity_tied=False, capture_normalization="fixed",
-                use_capacity_mitosis=True):
+                use_capacity_mitosis=True,
+                government_broadcaster=False, eh_formula="legacy"):
     """Generate a self-contained run script with config injected."""
     s = SCRIPT_TEMPLATE
     s = s.replace("@@CWD@@", _SCRIPT_DIR)
@@ -327,6 +341,8 @@ def make_script(name, objective, use_sevc, use_innovation, use_trust, trust_nois
     s = s.replace("@@CEO_EQUITY_TIED@@", str(ceo_equity_tied))
     s = s.replace("@@CAPTURE_NORMALIZATION@@", str(capture_normalization))
     s = s.replace("@@USE_CAPACITY_MITOSIS@@", str(use_capacity_mitosis))
+    s = s.replace("@@GOVERNMENT_BROADCASTER@@", str(government_broadcaster))
+    s = s.replace("@@EH_FORMULA@@", str(eh_formula))
     s = s.replace("@@SEED@@", str(seed))
     s = s.replace("@@N_STEPS@@", str(n_steps))
     s = s.replace("@@ANIMATE@@", str(animate))
@@ -341,7 +357,7 @@ def run_one(job):
      use_hi, use_firm_hi, gov_type, mixed_sevc_ratio,
      election_weight, media_captured, production_aware_E, production_aware_S_pop,
      ceo_compensation_tied, ceo_base_equals_floor, ceo_equity_tied, capture_normalization,
-     use_capacity_mitosis,
+     use_capacity_mitosis, government_broadcaster, eh_formula,
      seed, n_steps, animate, anim_subsample, output_dir) = job
     label = name + "/seed" + str(seed)
 
@@ -357,7 +373,9 @@ def run_one(job):
                          ceo_base_equals_floor=ceo_base_equals_floor,
                          ceo_equity_tied=ceo_equity_tied,
                          capture_normalization=capture_normalization,
-                         use_capacity_mitosis=use_capacity_mitosis)
+                         use_capacity_mitosis=use_capacity_mitosis,
+                         government_broadcaster=government_broadcaster,
+                         eh_formula=eh_formula)
 
     script_path = "/tmp/run_" + name + "_s" + str(seed) + ".py"
     with open(script_path, "w") as f:
@@ -403,8 +421,8 @@ def main():
     parser.add_argument("--subsample", type=int, default=2,
                         help="Animation frame subsample rate (default: 2)")
     parser.add_argument("--preset", type=str, default=None,
-                        choices=["full", "test2", "resp", "pa", "mitosis"],
-                        help="Preset: 'full' = all conditions, 'test2' = vanilla vs topo, 'resp' = C12-C15, 'pa' = C16-C18, 'mitosis' = C21-C22")
+                        choices=["full", "test2", "resp", "pa", "mitosis", "eh"],
+                        help="Preset: 'full' = all conditions, 'test2' = vanilla vs topo, 'resp' = C12-C15, 'pa' = C16-C18, 'mitosis' = C21-C22, 'eh' = C23-C24 EH overhaul")
     args = parser.parse_args()
 
     # Select conditions and seeds based on preset
@@ -428,6 +446,11 @@ def main():
         seeds = MITOSIS_SEEDS
         n_steps = args.steps if args.steps > 0 else N_STEPS
         output_dir = "results/mitosis"
+    elif args.preset == "eh":
+        conditions = EH_CONDITIONS
+        seeds = EH_SEEDS
+        n_steps = args.steps if args.steps > 0 else EH_STEPS
+        output_dir = "results/epistemic_health"
     else:
         conditions = CONDITIONS
         seeds = SEEDS
@@ -445,7 +468,7 @@ def main():
         if args.only and name != args.only:
             continue
         for seed in seeds:
-            # Pad legacy tuples up to 18 fields
+            # Pad legacy tuples to full 21-field spec
             full_cond = cond
             if len(full_cond) < 14:
                 full_cond = full_cond + (False, False)        # pad production_aware flags
@@ -453,6 +476,8 @@ def main():
                 full_cond = full_cond + (False, False, False, "fixed")  # pad CEO flags
             if len(full_cond) < 19:
                 full_cond = full_cond + (True,)               # pad use_capacity_mitosis
+            if len(full_cond) < 21:
+                full_cond = full_cond + (False, "legacy")     # pad government_broadcaster, eh_formula
             jobs.append(full_cond + (seed, n_steps, args.animate, args.subsample, output_dir))
 
     print("=" * 70)
@@ -473,6 +498,8 @@ def main():
         pa_s   = cond[13] if len(cond) > 13 else False
         ceo_t  = cond[14] if len(cond) > 14 else False
         cap_n  = cond[17] if len(cond) > 17 else "fixed"
+        gov_bc = cond[19] if len(cond) > 19 else False
+        eh_fmt = cond[20] if len(cond) > 20 else "legacy"
         flags = []
         if sevc: flags.append("SEVC")
         if inno: flags.append("Inno")
@@ -485,6 +512,8 @@ def main():
         if media_cap: flags.append("MediaCap")
         if pa_e or pa_s: flags.append("PA(E=" + str(pa_e) + ",S=" + str(pa_s) + ")")
         if ceo_t: flags.append("CEO(norm=" + str(cap_n) + ")")
+        if gov_bc: flags.append("GovBC")
+        if eh_fmt != "legacy": flags.append("EH=" + eh_fmt)
         print("  " + name + ": " + obj + " [" + ", ".join(flags) + "]")
     print()
 
