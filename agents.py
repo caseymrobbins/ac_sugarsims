@@ -612,12 +612,40 @@ class WorkerAgent(Agent):
         return bool(self.model.rng.random() < sevc_prob)
 
     def _found_firm(self):
+        """
+        Found a firm only if the worker has an innovation to build on.
+
+        When entrepreneurship_requires_innovation is set:
+        - Worker must have prior employer with tech_level > 1.2
+        - New firm inherits parent's tech with specialization bonus
+        - No more clone firms at baseline tech_level 1.0
+        """
+        # Innovation gate: require prior employer with tech capability
+        if getattr(self.model, 'entrepreneurship_requires_innovation', False):
+            prev_firm = None
+            if self.employer_id is not None:
+                prev_firm = self.model.get_agent_by_id(self.employer_id)
+            if prev_firm is None and hasattr(self, '_prev_employer_id') and self._prev_employer_id is not None:
+                prev_firm = self.model.get_agent_by_id(self._prev_employer_id)
+            if prev_firm is None or not hasattr(prev_firm, 'tech_level'):
+                return  # no prior employer = no innovation to build on
+            if prev_firm.tech_level < 1.2:
+                return  # parent firm wasn't innovative enough to learn from
+
         capital = self.wealth * 0.4; self.wealth -= capital
         firm = FirmAgent(model=self.model, capital=capital)
         firm.is_sevc = self._choose_governance()
         if not firm.is_sevc:
             for k in firm.strategy_weights:
                 firm.strategy_weights[k] = 0.2
+
+        # Innovation transfer: new firm starts with parent's tech + specialization
+        if getattr(self.model, 'entrepreneurship_requires_innovation', False):
+            # prev_firm guaranteed to exist here due to guard above
+            specialization = 1.0 + self.skill * 0.2  # skilled workers specialize better
+            firm.tech_level = prev_firm.tech_level * specialization
+            firm.pollution_factor = min(firm.pollution_factor, prev_firm.pollution_factor)
+
         pos = self._safe_pos()
         if pos is None: return
         neighbourhood = self.model.grid.get_neighborhood(pos, moore=True, include_center=True, radius=2)
@@ -724,6 +752,9 @@ class FirmAgent(Agent):
         # Headroom stability (Task 13): tracks S-floor gap variance
         self.headroom_history = deque(maxlen=30)
         self.headroom_stability = 0.0
+        # Zombie firm cleanup (Task 14): consecutive steps without workers or revenue
+        self._steps_without_workers = 0
+        self._steps_without_revenue = 0
         # CEO compensation (Task 12)
         self.ceo_id: Optional[int] = None
         self.ceo_equity_share: float = float(np.clip(rng.uniform(0.05, 0.20), 0.05, 0.20))
@@ -763,6 +794,22 @@ class FirmAgent(Agent):
             else: self._consecutive_losses = 0
         self.capital_stock *= 0.998
         self._pay_ceo()
+        # Zombie firm cleanup (Task 14): track idle firms and apply operating costs
+        if getattr(self.model, 'zombie_firm_cleanup', False):
+            if len(self.workers) == 0:
+                self._steps_without_workers += 1
+            else:
+                self._steps_without_workers = 0
+            if self.revenue <= 0:
+                self._steps_without_revenue += 1
+            else:
+                self._steps_without_revenue = 0
+            # Operating costs: rent, equipment maintenance, etc.
+            operating_cost = max(1.0, self.capital_stock * 0.01)
+            self.wealth -= operating_cost
+            # No workers AND no revenue for 15 steps = bankrupt
+            if self._steps_without_workers >= 15 and self._steps_without_revenue >= 15:
+                self._go_bankrupt(); return
         if self.wealth < -200 and len(self.workers) == 0: self._go_bankrupt(); return
         self._consider_mitosis()
         self.model.planner.apply_tax(self)
@@ -952,7 +999,12 @@ class FirmAgent(Agent):
         self.wealth -= wage; self.total_wages_paid += wage; self.wages_this_step += wage; return wage
 
     def _consider_mitosis(self):
-        """Capacity-driven mitosis: split when growth outpaces institutional capacity."""
+        """
+        Capacity-driven mitosis: split when growth outruns structure.
+
+        Uses RAW SEVC scores (not EMA-normalized) because the question
+        is absolute: is S pulling away from E/V/C in real terms?
+        """
         self._mitosis_events = 0
         self._profit_history.append(self.profit)
         if not getattr(self.model, 'use_capacity_mitosis', True): return
@@ -967,12 +1019,15 @@ class FirmAgent(Agent):
         late_g = (late[-1] - late[0]) / max(abs(late[0]) + 1, 1)
         acceleration = late_g - early_g
         if acceleration < 0.05: return
-        # 2. S pulling away from floor: headroom gap
+        # 2. Headroom gap using RAW scores (not normalized)
         scores = getattr(self, '_prev_scores', None)
         if scores is None: return
-        s_score = scores.get('S_raw', scores.get('S', 0.5))
-        floor_score = scores.get('floor', 0.5)
-        headroom_gap = s_score - floor_score
+        s_raw = scores.get('S_raw', 0.5)
+        e_raw = scores.get('E_raw', 0.5)
+        v_raw = scores.get('V_raw', 0.5)
+        c_raw = scores.get('C_raw', 0.5)
+        raw_floor = min(e_raw, v_raw, c_raw)
+        headroom_gap = s_raw - raw_floor
         if headroom_gap < 0.15: return
         # 3. Probabilistic: higher acceleration + wider gap = more likely
         split_prob = min(0.15, acceleration * headroom_gap * 0.5)

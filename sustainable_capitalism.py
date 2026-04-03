@@ -81,7 +81,17 @@ def compute_stakeholder_scores(firm: "FirmAgent") -> Dict[str, float]:
         E = max(0.01, min(1.0, E))
 
     # V: Environmental
-    pollution_score = max(0.01, 1.0 - firm.pollution_factor * 2.0)
+    if getattr(model, 'v_measures_total_emissions', False) and n_workers > 0 and firm.production_this_step > 0:
+        # Two components: intensity (per-unit rate) and scale (total emissions per worker)
+        intensity_score = max(0.01, 1.0 - firm.pollution_factor * 2.0)
+        emissions_this_step = firm.production_this_step * firm.pollution_factor
+        emissions_per_worker = emissions_this_step / max(n_workers, 1)
+        # 10 emissions/worker = adequate, above = bad; 50 = zero score
+        scale_score = max(0.01, 1.0 - emissions_per_worker / 50.0)
+        # Geometric mean: both must be healthy for V to be healthy
+        pollution_score = max(0.01, (intensity_score * scale_score) ** 0.5)
+    else:
+        pollution_score = max(0.01, 1.0 - firm.pollution_factor * 2.0)
     if firm.cartel_id is not None:
         pollution_score *= 0.7
     V = max(0.01, min(1.0, pollution_score))
@@ -177,8 +187,10 @@ def sustainable_learn_from_outcome(firm: "FirmAgent", strategy: str, profit_chan
         firm._prev_floor = current_floor
         firm._prev_scores = scores
     # Headroom stability tracking (Task 13B): CV of S-floor gap over 30-step window
-    scores_raw_s = scores.get('S_raw', scores.get('S', 0.5))
-    headroom_gap = scores_raw_s - current_floor
+    # Use raw scores so the gap reflects absolute divergence, not normalized trajectory
+    scores_raw_s = scores.get('S_raw', 0.5)
+    raw_floor = min(scores.get('E_raw', 0.5), scores.get('V_raw', 0.5), scores.get('C_raw', 0.5))
+    headroom_gap = scores_raw_s - raw_floor
     firm.headroom_history.append(headroom_gap)
     if len(firm.headroom_history) >= 10:
         hh = np.array(firm.headroom_history)
