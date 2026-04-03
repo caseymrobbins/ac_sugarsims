@@ -41,8 +41,15 @@ CONDITIONS = [
     # ("C19_ceo_tied_democratic",          "PLANNER_SEVC", True,  True, True, 0.1, True, True, "democratic",    1.0, 2.0, False, True,  True,  True,  True,  True,  "ema"),
     # ("C20_ceo_tied_captured",            "PLANNER_SEVC", True,  True, True, 0.1, True, True, "demo_captured", 1.0, 2.0, True,  True,  True,  True,  True,  True,  "ema"),
     # # Task 13: capacity-driven mitosis
-    ("C21_mitosis_democratic",   "PLANNER_SEVC", True, True, True, 0.1, True, True, "democratic", 1.0, 1.0, False, False, False, False, False, False, "fixed", True),
-    ("C22_no_mitosis_democratic","PLANNER_SEVC", True, True, True, 0.1, True, True, "democratic", 1.0, 1.0, False, False, False, False, False, False, "fixed", False),
+    # ("C21_mitosis_democratic",   "PLANNER_SEVC", True, True, True, 0.1, True, True, "democratic", 1.0, 1.0, False, False, False, False, False, False, "fixed", True),
+    # ("C22_no_mitosis_democratic","PLANNER_SEVC", True, True, True, 0.1, True, True, "democratic", 1.0, 1.0, False, False, False, False, False, False, "fixed", False),
+    ("C23_full_structural", "PLANNER_SEVC", True, True, True, 0.1, True, True, "democratic",    1.0, 2.0, False, True, True, True, True, True, "ema", True, True,  "paper"),
+    ("C24_full_captured",   "PLANNER_SEVC", True, True, True, 0.1, True, True, "demo_captured", 1.0, 2.0, True,  True, True, True, True, True, "ema", True, True,  "paper"),
+    ("C25_structural_fixes",    "PLANNER_SEVC", True, True, True, 0.1, True, True, "democratic",
+     1.0, 1.0, False, True, True, True, True, True, "ema", True, True, "paper", True, True, True),
+    # C26: same but without CEO compensation
+    ("C26_structural_no_ceo",   "PLANNER_SEVC", True, True, True, 0.1, True, True, "democratic",
+     1.0, 1.0, False, True, True, False, False, False, "ema", True, True, "paper", True, True, True),
 ]
 
 # Preset: 2-condition test (vanilla vs full stack) with 10 seeds
