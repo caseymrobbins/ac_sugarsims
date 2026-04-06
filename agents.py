@@ -251,15 +251,18 @@ class WorkerAgent(Agent):
             delta = signal.weight_deltas.get(action, 0.0)
             current = self.decision_weights.get(action, 0.5)
             self.decision_weights[action] = float(np.clip(current + NEWS_ABSORPTION_RATE * effective_trust * delta, 0.01, 0.99))
-        signal_avg = np.mean(list(signal.weight_deltas.values()))
-        ed = np.sign(self._last_action_outcome)
-        sd = np.sign(signal_avg)
-        if ed != 0 and sd != 0:
-            if ed == sd:
-                self.authority_trust = min(0.95, self.authority_trust + 0.005)
-            else:
-                self.authority_trust = max(0.05, self.authority_trust - 0.01)
-        self._last_action_outcome = self.income_last_step - self.income_prev_step
+        # Government broadcasts inform but don't advise, so they should not
+        # trigger the "did your advice match my experience?" trust update.
+        if not getattr(signal, 'is_government_broadcast', False):
+            signal_avg = np.mean(list(signal.weight_deltas.values()))
+            ed = np.sign(self._last_action_outcome)
+            sd = np.sign(signal_avg)
+            if ed != 0 and sd != 0:
+                if ed == sd:
+                    self.authority_trust = min(0.95, self.authority_trust + 0.005)
+                else:
+                    self.authority_trust = max(0.05, self.authority_trust - 0.01)
+            self._last_action_outcome = self.income_last_step - self.income_prev_step
         # Process scapegoating: if signal blames a different identity, increase hostility
         scapegoat = getattr(signal, 'scapegoat_identity', None)
         if scapegoat is not None and _identity_similarity(self.identity, scapegoat) < 0.5:
@@ -613,24 +616,23 @@ class WorkerAgent(Agent):
 
     def _found_firm(self):
         """
-        Found a firm only if the worker has an innovation to build on.
+        Found a firm, optionally gated by innovation from prior employer.
 
         When entrepreneurship_requires_innovation is set:
-        - Worker must have prior employer with tech_level > 1.2
+        - First 200 steps: anyone can found (bootstrapping phase)
+        - After step 200: must have prior employer with tech_level > 1.0
         - New firm inherits parent's tech with specialization bonus
-        - No more clone firms at baseline tech_level 1.0
         """
-        # Innovation gate: require prior employer with tech capability
+        prev_firm = self._get_prev_employer()
+
+        # Innovation gate (after bootstrap phase)
         if getattr(self.model, 'entrepreneurship_requires_innovation', False):
-            prev_firm = None
-            if self.employer_id is not None:
-                prev_firm = self.model.get_agent_by_id(self.employer_id)
-            if prev_firm is None and hasattr(self, '_prev_employer_id') and self._prev_employer_id is not None:
-                prev_firm = self.model.get_agent_by_id(self._prev_employer_id)
-            if prev_firm is None or not hasattr(prev_firm, 'tech_level'):
-                return  # no prior employer = no innovation to build on
-            if prev_firm.tech_level < 1.2:
-                return  # parent firm wasn't innovative enough to learn from
+            bootstrap = getattr(self.model, 'current_step', 0) < 200
+            if not bootstrap:
+                if prev_firm is None or not hasattr(prev_firm, 'tech_level'):
+                    return  # no prior employer = no innovation to build on
+                if prev_firm.tech_level < 1.0:
+                    return  # parent firm at baseline, nothing to innovate on
 
         capital = self.wealth * 0.4; self.wealth -= capital
         firm = FirmAgent(model=self.model, capital=capital)
@@ -640,12 +642,27 @@ class WorkerAgent(Agent):
                 firm.strategy_weights[k] = 0.2
 
         # Innovation transfer: new firm starts with parent's tech + specialization
-        if getattr(self.model, 'entrepreneurship_requires_innovation', False):
-            # prev_firm guaranteed to exist here due to guard above
+        if prev_firm and hasattr(prev_firm, 'tech_level'):
             specialization = 1.0 + self.skill * 0.2  # skilled workers specialize better
             firm.tech_level = prev_firm.tech_level * specialization
             firm.pollution_factor = min(firm.pollution_factor, prev_firm.pollution_factor)
 
+        self._place_and_register_firm(firm)
+
+    def _get_prev_employer(self):
+        """Get previous or current employer for tech transfer."""
+        if self.employer_id is not None:
+            firm = self.model.get_agent_by_id(self.employer_id)
+            if firm and hasattr(firm, 'tech_level'):
+                return firm
+        if hasattr(self, '_prev_employer_id') and self._prev_employer_id is not None:
+            firm = self.model.get_agent_by_id(self._prev_employer_id)
+            if firm and hasattr(firm, 'tech_level'):
+                return firm
+        return None
+
+    def _place_and_register_firm(self, firm):
+        """Place a newly founded firm on the grid and register it."""
         pos = self._safe_pos()
         if pos is None: return
         neighbourhood = self.model.grid.get_neighborhood(pos, moore=True, include_center=True, radius=2)
