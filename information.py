@@ -187,12 +187,14 @@ class InfoSignal:
     """
     __slots__ = ['weight_deltas', 'trust', 'source_id', 'hops',
                  'scapegoat_identity', 'blame_target',
-                 'is_captured_source', 'source_accuracy']
+                 'is_captured_source', 'source_accuracy',
+                 'is_government_broadcast']
 
     def __init__(self, weight_deltas: Dict[str, float], trust: float,
                  source_id: int, hops: int = 0,
                  scapegoat_identity=None, blame_target: Optional[str] = None,
-                 is_captured_source: bool = False, source_accuracy: float = 0.5):
+                 is_captured_source: bool = False, source_accuracy: float = 0.5,
+                 is_government_broadcast: bool = False):
         self.weight_deltas = weight_deltas   # {action: delta} to apply to weights
         self.trust = trust                    # 0-1, decays with distance
         self.source_id = source_id
@@ -201,6 +203,7 @@ class InfoSignal:
         self.blame_target = blame_target  # "workers", "firms", "government", etc.
         self.is_captured_source = is_captured_source  # True if cartel-captured origin
         self.source_accuracy = source_accuracy        # effective accuracy at origin
+        self.is_government_broadcast = is_government_broadcast  # True for gov broadcaster signals
 
     def decay(self) -> 'InfoSignal':
         """Return a copy with decayed trust for next hop."""
@@ -609,6 +612,7 @@ class GovernmentBroadcaster:
             hops=0,
             is_captured_source=is_captured,
             source_accuracy=float(np.clip(accuracy, 0.0, 1.0)),
+            is_government_broadcast=True,
         )
 
     def _compute_weight_deltas(self, accuracy: float) -> Dict[str, float]:
