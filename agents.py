@@ -1020,9 +1020,10 @@ class FirmAgent(Agent):
             dilution = current_per_worker - new_per_worker
             marginal_gain = mp - self.offered_wage
             if marginal_gain < dilution * 0.5:
-                self._dilution_rejections += 1
+                # Flag dilution block for this step; _consider_mitosis converts to step count
+                self._dilution_blocked_this_step = True
                 return
-        self._dilution_rejections = 0
+        self._dilution_blocked_this_step = False
         # Record previous employer for tech transfer
         worker._prev_employer_id = worker.employer_id
         self.workers[worker.unique_id] = worker; worker.employed = True; worker.employer_id = self.unique_id; worker.wage = self.offered_wage
@@ -1085,9 +1086,19 @@ class FirmAgent(Agent):
         # Dilution-pressure mitosis path (worker-owned firms only)
         mitosis_trigger = getattr(self.model, 'mitosis_trigger', 'standard')
         if mitosis_trigger == 'dilution' and self.worker_ownership_share >= 0.51:
-            if self._dilution_rejections >= 10 and self.profit > 0:
+            # Convert per-step flag into a step count (max one increment per step)
+            if getattr(self, '_dilution_blocked_this_step', False):
+                self._dilution_rejections += 1
+            else:
+                self._dilution_rejections = max(0, self._dilution_rejections - 1)
+            self._dilution_blocked_this_step = False
+            # Check mitosis cooldown: don't split again within 30 steps
+            last_mitosis_age = getattr(self, '_last_mitosis_age', -999)
+            cooldown_clear = (self.age - last_mitosis_age) >= 30
+            if self._dilution_rejections >= 10 and self.profit > 0 and cooldown_clear:
                 self._execute_mitosis()
                 self._dilution_rejections = 0
+                self._last_mitosis_age = self.age
                 return
 
         # Standard profit-acceleration + headroom-gap path
@@ -1124,6 +1135,7 @@ class FirmAgent(Agent):
         # Inherit worker-ownership structure (Task 17)
         daughter.worker_ownership_share = self.worker_ownership_share
         daughter.investor_ownership_share = self.investor_ownership_share
+        daughter._last_mitosis_age = 0  # cooldown: daughter can't split for 30 steps
         daughter.age = 0
         # Place daughter near parent
         if self.pos is not None:
