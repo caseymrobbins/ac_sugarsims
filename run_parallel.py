@@ -1,119 +1,311 @@
 """
 run_parallel.py
 ---------------
-Launches architecture experiment runs as parallel subprocesses.
-Each run is a separate Python process for genuine multi-core usage.
+Unified experiment runner for the multi-agent economic simulation.
 
-11 conditions testing SEVC layers, governance types, mixed populations,
-and planner SEVC objectives:
-  C1-C3: Feature staircase (baseline -> SEVC -> HI)
-  C4-C7: Governance comparison (auth, demo_captured, auth_captured, democratic)
-  C8: Mixed 50/50 SEVC/Vanilla competition
-  C9-C11: Planner SEVC objective (democratic, authoritarian, captured demo)
+Launches each run as a separate subprocess for genuine process isolation
+and multi-core parallelism. Supports all experiment presets via the
+Condition dataclass.
 
 Usage:
-    python run_parallel.py              # auto-detect cores
-    python run_parallel.py --workers 6  # explicit
-    python run_parallel.py --only C1_baseline  # single condition
-    python run_parallel.py --animate    # generate HTML animations for each run
-    python run_parallel.py --preset test2  # run 2-condition test with 10 seeds
+    python run_parallel.py                          # default conditions
+    python run_parallel.py --preset test2            # vanilla vs topo
+    python run_parallel.py --preset arch             # architecture staircase C1-C8
+    python run_parallel.py --preset resp             # C12-C15 responsiveness
+    python run_parallel.py --preset pa               # C16-C18 production-aware
+    python run_parallel.py --preset mitosis          # C21-C22 mitosis
+    python run_parallel.py --preset eh               # C23-C24 epistemic health
+    python run_parallel.py --preset structural       # C25-C26 structural fixes
+    python run_parallel.py --preset comparison       # SUM/NASH/TOPO objective comparison
+    python run_parallel.py --workers 6               # explicit worker count
+    python run_parallel.py --only C1_baseline        # single condition
+    python run_parallel.py --animate                 # generate HTML animations
 """
+
+from __future__ import annotations
 
 import subprocess
 import sys
 import os
 import time
 import argparse
+import multiprocessing
 from concurrent.futures import ProcessPoolExecutor, as_completed
+from dataclasses import dataclass, fields
 
-SEEDS = [42, 101, 137, 202, 256, 303, 404, 505]
-N_STEPS = 2000
+import numpy as np
 
-# (name, objective, use_sevc, use_innovation, use_trust, trust_noise, use_hi, use_firm_hi, gov_type,
-#   mixed_sevc_ratio, election_weight, media_captured, production_aware_E, production_aware_S_pop,
-#   ceo_compensation_tied, ceo_base_equals_floor, ceo_equity_tied, capture_normalization,
-#   use_capacity_mitosis)
-CONDITIONS = [
-    # ("C16_production_aware_democratic",  "PLANNER_SEVC", True,  True, True, 0.1, True, True, "democratic",    1.0, 2.0, False, True,  True,  False, False, False, "fixed"),
-    # ("C17_production_aware_no_sevc",     "PLANNER_SEVC", False, True, True, 0.1, True, True, "democratic",    1.0, 2.0, False, False, True,  False, False, False, "fixed"),
-    # ("C18_production_aware_captured",    "PLANNER_SEVC", True,  True, True, 0.1, True, True, "demo_captured", 1.0, 2.0, True,  True,  True,  False, False, False, "fixed"),
-    # # Task 12: CEO compensation tied to SEVC floor
-    # ("C19_ceo_tied_democratic",          "PLANNER_SEVC", True,  True, True, 0.1, True, True, "democratic",    1.0, 2.0, False, True,  True,  True,  True,  True,  "ema"),
-    # ("C20_ceo_tied_captured",            "PLANNER_SEVC", True,  True, True, 0.1, True, True, "demo_captured", 1.0, 2.0, True,  True,  True,  True,  True,  True,  "ema"),
-    # # Task 13: capacity-driven mitosis
-    # ("C21_mitosis_democratic",   "PLANNER_SEVC", True, True, True, 0.1, True, True, "democratic", 1.0, 1.0, False, False, False, False, False, False, "fixed", True),
-    # ("C22_no_mitosis_democratic","PLANNER_SEVC", True, True, True, 0.1, True, True, "democratic", 1.0, 1.0, False, False, False, False, False, False, "fixed", False),
-    ("C23_full_structural", "PLANNER_SEVC", True, True, True, 0.1, True, True, "democratic",    1.0, 2.0, False, True, True, True, True, True, "ema", True, True,  "paper"),
-    ("C24_full_captured",   "PLANNER_SEVC", True, True, True, 0.1, True, True, "demo_captured", 1.0, 2.0, True,  True, True, True, True, True, "ema", True, True,  "paper"),
-    ("C25_structural_fixes",    "PLANNER_SEVC", True, True, True, 0.1, True, True, "democratic",
-     1.0, 1.0, False, True, True, True, True, True, "ema", True, True, "paper", True, True, True),
-    # C26: same but without CEO compensation
-    ("C26_structural_no_ceo",   "PLANNER_SEVC", True, True, True, 0.1, True, True, "democratic",
-     1.0, 1.0, False, True, True, False, False, False, "ema", True, True, "paper", True, True, True),
-]
 
-# Preset: 2-condition test (vanilla vs full stack) with 10 seeds
+# ── Condition dataclass ─────────────────────────────────────────
+
+@dataclass
+class Condition:
+    """A single experimental condition with all feature flags."""
+    name: str
+    label: str
+    objective: str
+    use_sevc: bool           # sustainable capitalism (SEVC scoring, innovation)
+    use_trust: bool          # trust system active
+    trust_noise: float       # noise on trust reads (0 = perfect, 0.1 = fuzzy)
+    use_horizon_index: bool  # HI coupled to planner objective
+    use_firm_hi: bool        # per-firm horizon index tracking
+    gov_type: str            # authoritarian | auth_captured | democratic | demo_captured
+    mixed_sevc_ratio: float = 1.0  # fraction of firms that are SEVC (1.0 = all)
+    election_weight: float = 0.0   # democratic responsiveness weight
+    media_captured: bool = False
+    production_aware_E: bool = False
+    production_aware_S_pop: bool = False
+    ceo_compensation_tied: bool = False
+    ceo_base_equals_floor: bool = False
+    ceo_equity_tied: bool = False
+    capture_normalization: str = "fixed"  # "fixed" | "ema"
+    use_capacity_mitosis: bool = True
+    government_broadcaster: bool = False
+    eh_formula: str = "legacy"            # "legacy" | "paper"
+    entrepreneurship_requires_innovation: bool = False
+    zombie_firm_cleanup: bool = False
+    v_measures_total_emissions: bool = False
+
+
+# ── All conditions ──────────────────────────────────────────────
+
+# Architecture staircase (C1-C8)
+C1  = Condition("C1_baseline",       "Vanilla baseline",        "SUM_RAW", False, False, 0.0, False, False, "authoritarian")
+C2  = Condition("C2_sevc",           "SEVC only",               "SUM_RAW", True,  False, 0.0, False, False, "authoritarian")
+C3  = Condition("C3_sevc_hi",        "SEVC + HI + FirmHI",      "SUM_RAW", True,  False, 0.0, True,  True,  "authoritarian")
+C4  = Condition("C4_full_auth",      "Full stack, auth gov",    "SUM_RAW", True,  True,  0.1, True,  True,  "authoritarian")
+C5  = Condition("C5_demo_captured",  "Full + captured demo",    "SUM_RAW", True,  True,  0.1, True,  True,  "demo_captured")
+C6  = Condition("C6_auth_captured",  "Full + captured auth",    "SUM_RAW", True,  True,  0.1, True,  True,  "auth_captured")
+C7  = Condition("C7_democratic",     "Full + clean democracy",  "SUM_RAW", True,  True,  0.1, True,  True,  "democratic")
+C8  = Condition("C8_mixed",          "Mixed 50/50 + democracy", "SUM_RAW", True,  True,  0.1, True,  True,  "democratic", mixed_sevc_ratio=0.5)
+ARCH_CONDITIONS = [C1, C2, C3, C4, C5, C6, C7, C8]
+
+# Planner SEVC objectives (C9-C11)
+C9  = Condition("C9_planner_sevc_democratic",    "Planner SEVC + democracy",     "PLANNER_SEVC", True, True, 0.1, True, True, "democratic")
+C10 = Condition("C10_planner_sevc_auth",         "Planner SEVC + authoritarian", "PLANNER_SEVC", True, True, 0.1, True, True, "authoritarian")
+C11 = Condition("C11_planner_sevc_demo_captured","Planner SEVC + captured demo", "PLANNER_SEVC", True, True, 0.1, True, True, "demo_captured")
+
+# Responsiveness (C12-C15)
+C12 = Condition("C12_responsive_democratic",      "Responsive SEVC democracy",  "PLANNER_SEVC", True, True, 0.1, True, True, "democratic",    election_weight=2.0)
+C13 = Condition("C13_responsive_demo_captured",   "Responsive SEVC captured",   "PLANNER_SEVC", True, True, 0.1, True, True, "demo_captured", election_weight=2.0, media_captured=True)
+C14 = Condition("C14_pure_technocrat_democratic",  "Technocrat SEVC democracy",  "PLANNER_SEVC", True, True, 0.1, True, True, "democratic",    election_weight=0.0)
+C15 = Condition("C15_pure_technocrat_auth",        "Technocrat SEVC auth",       "PLANNER_SEVC", True, True, 0.1, True, True, "authoritarian", election_weight=0.0)
+RESP_CONDITIONS = [C12, C13, C14, C15]
+
+# Production-Aware Capital (C16-C18)
+C16 = Condition("C16_production_aware_democratic", "Production-aware SEVC + demo", "PLANNER_SEVC", True, True, 0.1, True, True, "democratic",    election_weight=2.0, production_aware_E=True, production_aware_S_pop=True)
+C17 = Condition("C17_production_aware_no_sevc",    "PA planner + vanilla firms",   "PLANNER_SEVC", False, True, 0.1, True, True, "democratic",   election_weight=2.0, production_aware_S_pop=True)
+C18 = Condition("C18_production_aware_captured",   "Production-aware + captured",  "PLANNER_SEVC", True, True, 0.1, True, True, "demo_captured", election_weight=2.0, media_captured=True, production_aware_E=True, production_aware_S_pop=True)
+PA_CONDITIONS = [C16, C17, C18]
+
+# CEO Compensation (C19-C20)
+C19 = Condition("C19_ceo_tied_democratic", "CEO tied + clean democracy", "PLANNER_SEVC", True, True, 0.1, True, True, "democratic",    election_weight=2.0, production_aware_E=True, production_aware_S_pop=True, ceo_compensation_tied=True, ceo_base_equals_floor=True, ceo_equity_tied=True, capture_normalization="ema")
+C20 = Condition("C20_ceo_tied_captured",   "CEO tied + captured media",  "PLANNER_SEVC", True, True, 0.1, True, True, "demo_captured", election_weight=2.0, media_captured=True, production_aware_E=True, production_aware_S_pop=True, ceo_compensation_tied=True, ceo_base_equals_floor=True, ceo_equity_tied=True, capture_normalization="ema")
+
+# Mitosis (C21-C22)
+C21 = Condition("C21_mitosis_democratic",   "Capacity mitosis + democracy",   "PLANNER_SEVC", True, True, 0.1, True, True, "democratic", election_weight=1.0)
+C22 = Condition("C22_no_mitosis_democratic","No mitosis baseline + democracy", "PLANNER_SEVC", True, True, 0.1, True, True, "democratic", election_weight=1.0, use_capacity_mitosis=False)
+MITOSIS_CONDITIONS = [C21, C22]
+
+# Epistemic Health (C23-C24)
+C23 = Condition("C23_full_structural", "EH overhaul, clean democracy", "PLANNER_SEVC", True, True, 0.1, True, True, "democratic",
+                election_weight=2.0, production_aware_E=True, production_aware_S_pop=True,
+                ceo_compensation_tied=True, ceo_base_equals_floor=True, ceo_equity_tied=True,
+                capture_normalization="ema", government_broadcaster=True, eh_formula="paper")
+C24 = Condition("C24_full_captured", "EH overhaul, captured demo", "PLANNER_SEVC", True, True, 0.1, True, True, "demo_captured",
+                election_weight=2.0, media_captured=True, production_aware_E=True, production_aware_S_pop=True,
+                ceo_compensation_tied=True, ceo_base_equals_floor=True, ceo_equity_tied=True,
+                capture_normalization="ema", government_broadcaster=True, eh_formula="paper")
+EH_CONDITIONS = [C23, C24]
+
+# Structural Fixes (C25-C26)
+C25 = Condition("C25_structural_fixes", "Structural fixes, full stack", "PLANNER_SEVC", True, True, 0.1, True, True, "democratic",
+                election_weight=1.0, production_aware_E=True, production_aware_S_pop=True,
+                ceo_compensation_tied=True, ceo_base_equals_floor=True, ceo_equity_tied=True,
+                capture_normalization="ema", government_broadcaster=True, eh_formula="paper",
+                entrepreneurship_requires_innovation=True, zombie_firm_cleanup=True, v_measures_total_emissions=True)
+C26 = Condition("C26_structural_no_ceo", "Structural fixes, no CEO", "PLANNER_SEVC", True, True, 0.1, True, True, "democratic",
+                election_weight=1.0, production_aware_E=True, production_aware_S_pop=True,
+                capture_normalization="ema", government_broadcaster=True, eh_formula="paper",
+                entrepreneurship_requires_innovation=True, zombie_firm_cleanup=True, v_measures_total_emissions=True)
+STRUCTURAL_CONDITIONS = [C25, C26]
+
+# Full default set (latest structural conditions)
+DEFAULT_CONDITIONS = [C23, C24, C25, C26]
+
+# All conditions combined
+ALL_CONDITIONS = ARCH_CONDITIONS + [C9, C10, C11] + RESP_CONDITIONS + PA_CONDITIONS + [C19, C20] + MITOSIS_CONDITIONS + EH_CONDITIONS + STRUCTURAL_CONDITIONS
+
+# Test2: vanilla vs full stack
 TEST2_CONDITIONS = [
-    ("vanilla_sum",   "SUM_RAW",      False, True, False, 0.0, False, False, "authoritarian", 1.0, 0.0, False, True),
-    ("topo_sevc_hi",  "TOPO_X",       True,  True, True,  0.1, True,  True,  "democratic",    1.0, 0.0, False, True),
+    Condition("vanilla_sum",  "Vanilla SUM (no features)", "SUM_RAW", False, True, 0.15, False, False, "democratic"),
+    Condition("topo_sevc_hi", "TOPO + SEVC + HI + FirmHI", "TOPO_X",  True,  True, 0.1,  True,  True,  "democratic"),
 ]
-TEST2_SEEDS = [7, 23, 59, 101, 233, 347, 461, 587, 719, 853]
 
-# Task 11: Production-Aware Capital conditions (C16/C17/C18)
-# Tuple: (name, objective, use_sevc, use_innovation, use_trust, trust_noise,
-#          use_hi, use_firm_hi, gov_type, mixed_sevc_ratio, election_weight,
-#          media_captured, production_aware_E, production_aware_S_pop)
-PA_CONDITIONS = [
-    # C16: full production-aware SEVC, responsive democracy — primary test
-    ("C16_production_aware_democratic",  "PLANNER_SEVC", True,  True, True, 0.1, True, True, "democratic",    1.0, 2.0, False, True,  True),
-    # C17: vanilla firms + planner capture floor — planner-only baseline
-    ("C17_production_aware_no_sevc",     "PLANNER_SEVC", False, True, True, 0.1, True, True, "democratic",    1.0, 2.0, False, False, True),
-    # C18: production-aware SEVC + captured media — robustness test
-    ("C18_production_aware_captured",    "PLANNER_SEVC", True,  True, True, 0.1, True, True, "demo_captured", 1.0, 2.0, True,  True,  True),
+# Comparison: objective functions
+COMPARISON_CONDITIONS = [
+    Condition("SUM_RAW",  "Pure aggregate sum",           "SUM_RAW",  True, True, 0.1, False, False, "democratic"),
+    Condition("NASH_MIN", "Nash welfare + min-gate HI",   "NASH_MIN", True, True, 0.1, True,  True,  "democratic"),
+    Condition("TOPO_X",   "Topology + HI multiplier",     "TOPO_X",   True, True, 0.1, True,  True,  "democratic"),
+    Condition("TOPO_MIN", "Topology + min-gate HI",       "TOPO_MIN", True, True, 0.1, True,  True,  "democratic"),
 ]
-PA_SEEDS  = [42, 137, 256, 389, 501, 623, 777, 888]
-PA_STEPS  = 2000
 
-# Preset: C12-C15 responsiveness test with 8 new seeds
-RESP_CONDITIONS = [
-    ("C12_responsive_democratic",     "PLANNER_SEVC", True, True, True, 0.1, True, True, "democratic",    1.0, 2.0, False, True),
-    ("C13_responsive_demo_captured",  "PLANNER_SEVC", True, True, True, 0.1, True, True, "demo_captured", 1.0, 2.0, True,  True),
-    ("C14_pure_technocrat_democratic", "PLANNER_SEVC", True, True, True, 0.1, True, True, "democratic",    1.0, 0.0, False, True),
-    ("C15_pure_technocrat_auth",       "PLANNER_SEVC", True, True, True, 0.1, True, True, "authoritarian", 1.0, 0.0, False, True),
-]
-RESP_SEEDS = [42, 137, 256, 389, 501, 623, 777, 888]
 
-# Preset: C21-C22 mitosis test with 8 seeds
-MITOSIS_CONDITIONS = [
-    ("C21_mitosis_democratic",   "PLANNER_SEVC", True, True, True, 0.1, True, True, "democratic", 1.0, 1.0, False, False, False, False, False, False, "fixed", True),
-    ("C22_no_mitosis_democratic","PLANNER_SEVC", True, True, True, 0.1, True, True, "democratic", 1.0, 1.0, False, False, False, False, False, False, "fixed", False),
-]
-MITOSIS_SEEDS = [42, 137, 256, 389, 501, 623, 777, 888]
+# ── Preset definitions ──────────────────────────────────────────
 
-# Task 15: Epistemic Health Overhaul conditions (C23/C24)
-# Full tuple: same 19 fields as CONDITIONS above, plus government_broadcaster and eh_formula
-EH_CONDITIONS = [
-    ("C23_full_structural", "PLANNER_SEVC", True, True, True, 0.1, True, True, "democratic",    1.0, 2.0, False, True, True, True, True, True, "ema", True, True,  "paper"),
-    ("C24_full_captured",   "PLANNER_SEVC", True, True, True, 0.1, True, True, "demo_captured", 1.0, 2.0, True,  True, True, True, True, True, "ema", True, True,  "paper"),
-]
-EH_SEEDS  = [42, 137, 256, 389, 501, 623, 777, 888]
-EH_STEPS  = 3000
+PRESETS = {
+    "full":        {"conditions": DEFAULT_CONDITIONS,     "seeds": [42, 101, 137, 202, 256, 303, 404, 505], "steps": 2000, "output_dir": "results/architecture"},
+    "all":         {"conditions": ALL_CONDITIONS,         "seeds": [42, 137, 2024],                         "steps": 3000, "output_dir": "results/architecture"},
+    "arch":        {"conditions": ARCH_CONDITIONS,        "seeds": [42, 137, 2024],                         "steps": 3000, "output_dir": "results/architecture"},
+    "test2":       {"conditions": TEST2_CONDITIONS,       "seeds": [7, 23, 59, 101, 233, 347, 461, 587, 719, 853], "steps": 500,  "output_dir": "results/test_conditions"},
+    "resp":        {"conditions": RESP_CONDITIONS,        "seeds": [42, 137, 256, 389, 501, 623, 777, 888], "steps": 2000, "output_dir": "results/responsiveness"},
+    "pa":          {"conditions": PA_CONDITIONS,          "seeds": [42, 137, 256, 389, 501, 623, 777, 888], "steps": 2000, "output_dir": "results/production_aware"},
+    "mitosis":     {"conditions": MITOSIS_CONDITIONS,     "seeds": [42, 137, 256, 389, 501, 623, 777, 888], "steps": 2000, "output_dir": "results/mitosis"},
+    "eh":          {"conditions": EH_CONDITIONS,          "seeds": [42, 137, 256, 389, 501, 623, 777, 888], "steps": 3000, "output_dir": "results/epistemic_health"},
+    "structural":  {"conditions": STRUCTURAL_CONDITIONS,  "seeds": [42, 137, 256, 389, 501, 623, 777, 888], "steps": 3000, "output_dir": "results/structural"},
+    "comparison":  {"conditions": COMPARISON_CONDITIONS,  "seeds": [42, 137, 2024],                         "steps": 3000, "output_dir": "results/comparison"},
+}
 
-# Task 14: Structural fixes (C25/C26) — raw mitosis, innovation-gated entrepreneurship,
-# zombie cleanup, V measures total emissions
-# Tuple: 21 base fields + 3 new flags:
-#   entrepreneurship_requires_innovation, zombie_firm_cleanup, v_measures_total_emissions
-STRUCTURAL_CONDITIONS = [
-    # C25: full stack with all structural fixes
-    ("C25_structural_fixes",    "PLANNER_SEVC", True, True, True, 0.1, True, True, "democratic",
-     1.0, 1.0, False, True, True, True, True, True, "ema", True, True, "paper", True, True, True),
-    # C26: same but without CEO compensation
-    ("C26_structural_no_ceo",   "PLANNER_SEVC", True, True, True, 0.1, True, True, "democratic",
-     1.0, 1.0, False, True, True, False, False, False, "ema", True, True, "paper", True, True, True),
-]
-STRUCTURAL_SEEDS = [42, 137, 256, 389, 501, 623, 777, 888]
-STRUCTURAL_STEPS = 3000
 
+# ── Feature flag injection (for notebook / in-process use) ──────
+
+def configure_model(model, condition: Condition):
+    """Inject feature flags into the model after construction."""
+    model.use_sevc = condition.use_sevc
+    model.use_trust = condition.use_trust
+    model.trust_noise = condition.trust_noise
+    model.use_horizon_index = condition.use_horizon_index
+    model.use_firm_hi = condition.use_firm_hi
+    model.gov_type = condition.gov_type
+    model._trust_frozen = not condition.use_trust
+    model.election_weight = condition.election_weight
+    model.use_capacity_mitosis = condition.use_capacity_mitosis
+    model.production_aware_E = condition.production_aware_E
+    model.production_aware_S_pop = condition.production_aware_S_pop
+    model.ceo_compensation_tied = condition.ceo_compensation_tied
+    model.ceo_base_equals_floor = condition.ceo_base_equals_floor
+    model.ceo_equity_tied = condition.ceo_equity_tied
+    model.capture_normalization = condition.capture_normalization
+    model.use_government_broadcaster = condition.government_broadcaster
+    model.eh_formula = condition.eh_formula
+    model.entrepreneurship_requires_innovation = condition.entrepreneurship_requires_innovation
+    model.zombie_firm_cleanup = condition.zombie_firm_cleanup
+    model.v_measures_total_emissions = condition.v_measures_total_emissions
+
+    if not condition.use_sevc:
+        for firm in model.firms:
+            firm.is_sevc = False
+            if hasattr(firm, 'strategy_weights'):
+                for k in firm.strategy_weights:
+                    firm.strategy_weights[k] = 0.2
+                if 'innovate' in firm.strategy_weights:
+                    del firm.strategy_weights['innovate']
+            if hasattr(firm, 'tech_level'):
+                firm.tech_level = 1.0
+    else:
+        for firm in model.firms:
+            if not hasattr(firm, 'floor_history'):
+                from collections import deque
+                firm.floor_history = deque(maxlen=100)
+                firm.horizon_index = 1.0
+
+    if condition.mixed_sevc_ratio < 1.0 and condition.use_sevc:
+        n_vanilla = int(len(model.firms) * (1.0 - condition.mixed_sevc_ratio))
+        if n_vanilla > 0:
+            indices = list(range(len(model.firms)))
+            model.rng.shuffle(indices)
+            for i in indices[:n_vanilla]:
+                firm = model.firms[i]
+                firm.is_sevc = False
+                if hasattr(firm, 'strategy_weights'):
+                    for k in firm.strategy_weights:
+                        firm.strategy_weights[k] = 0.2
+
+    if condition.gov_type == 'demo_captured' or condition.media_captured:
+        if hasattr(model, 'news_firms'):
+            for nf in model.news_firms:
+                if hasattr(nf, 'accuracy') and nf.accuracy > 0.5:
+                    nf.accuracy = 0.3
+                    nf.audience_capture = 0.6
+                    break
+
+    if not condition.use_trust:
+        for agent in (model.schedule.agents if hasattr(model, 'schedule') else []):
+            if hasattr(agent, 'trust_score'):
+                agent.trust_score = 0.5
+
+    return model
+
+
+_patches_applied = False
+
+def apply_patches():
+    """Apply runtime patches that check model feature flags."""
+    global _patches_applied
+    if _patches_applied:
+        return
+    _patches_applied = True
+
+    try:
+        import sustainable_capitalism as sc_module
+        _original_choose = sc_module.sustainable_choose_strategy
+        _original_learn = sc_module.sustainable_learn_from_outcome
+
+        def patched_choose(firm):
+            if not getattr(firm, 'is_sevc', True) or not getattr(firm.model, 'use_sevc', True):
+                strategies = list(firm.strategy_weights.keys())
+                if strategies:
+                    rng = firm.model.rng if hasattr(firm.model, 'rng') else np.random.default_rng()
+                    return strategies[rng.integers(len(strategies))]
+                return "expand"
+            return _original_choose(firm)
+
+        def patched_learn(firm, strategy, reward):
+            if not getattr(firm, 'is_sevc', True) or not getattr(firm.model, 'use_sevc', True):
+                return
+            return _original_learn(firm, strategy, reward)
+
+        sc_module.sustainable_choose_strategy = patched_choose
+        sc_module.sustainable_learn_from_outcome = patched_learn
+    except ImportError:
+        pass
+
+    try:
+        import innovation as inno_module
+        _original_rd = inno_module.firm_rd_invest
+        _original_diffuse = inno_module.diffuse_technology
+
+        def patched_rd(firm):
+            if not getattr(firm.model, 'use_sevc', True) and not getattr(firm, 'is_sevc', True):
+                return
+            return _original_rd(firm)
+
+        def patched_diffuse(model):
+            if not getattr(model, 'use_sevc', True):
+                return
+            return _original_diffuse(model)
+
+        inno_module.firm_rd_invest = patched_rd
+        inno_module.diffuse_technology = patched_diffuse
+    except ImportError:
+        pass
+
+    try:
+        import planner as planner_module
+        if hasattr(planner_module, '_get_horizon_index'):
+            _original_hi = planner_module._get_horizon_index
+
+            def patched_hi(model):
+                if not getattr(model, 'use_horizon_index', True):
+                    return 1.0
+                return _original_hi(model)
+
+            planner_module._get_horizon_index = patched_hi
+    except ImportError:
+        pass
+
+
+# ── Subprocess script template ──────────────────────────────────
 
 SCRIPT_TEMPLATE = r'''
 import sys, os, time
@@ -219,12 +411,16 @@ N_STEPS = @@N_STEPS@@
 ANIMATE = @@ANIMATE@@
 ANIM_SUBSAMPLE = @@ANIM_SUBSAMPLE@@
 OUTPUT_DIR = "@@OUTPUT_DIR@@"
+GRID_SIZE = @@GRID_SIZE@@
+N_WORKERS_SIM = @@N_WORKERS_SIM@@
+N_FIRMS = @@N_FIRMS@@
+N_LANDOWNERS = @@N_LANDOWNERS@@
 
 # -- Run --
 
 model = EconomicModel(
-    seed=SEED, grid_width=80, grid_height=80,
-    n_workers=400, n_firms=20, n_landowners=15,
+    seed=SEED, grid_width=GRID_SIZE, grid_height=GRID_SIZE,
+    n_workers=N_WORKERS_SIM, n_firms=N_FIRMS, n_landowners=N_LANDOWNERS,
     objective=OBJECTIVE,
 )
 
@@ -324,7 +520,7 @@ if ANIMATE and model.animation_frames:
         generate_animation_html(
             model.animation_frames,
             output_path=anim_path,
-            grid_size=80,
+            grid_size=GRID_SIZE,
             title=COND_NAME + " (seed=" + str(SEED) + ")",
             subsample=ANIM_SUBSAMPLE,
         )
@@ -337,85 +533,63 @@ if ANIMATE and model.animation_frames:
 
 _SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 
-def make_script(name, objective, use_sevc, use_innovation, use_trust, trust_noise,
-                use_hi, use_firm_hi, gov_type, mixed_sevc_ratio,
-                election_weight, media_captured,
-                seed, n_steps,
-                animate=False, anim_subsample=2, output_dir="results/architecture",
-                production_aware_E=False, production_aware_S_pop=False,
-                ceo_compensation_tied=False, ceo_base_equals_floor=False,
-                ceo_equity_tied=False, capture_normalization="fixed",
-                use_capacity_mitosis=True,
-                government_broadcaster=False, eh_formula="legacy",
-                entrepreneurship_requires_innovation=False,
-                zombie_firm_cleanup=False,
-                v_measures_total_emissions=False):
-    """Generate a self-contained run script with config injected."""
+
+def make_script(condition: Condition, seed: int, n_steps: int,
+                animate: bool = False, anim_subsample: int = 2,
+                output_dir: str = "results/architecture",
+                grid_size: int = 80, n_workers_sim: int = 400,
+                n_firms: int = 20, n_landowners: int = 15) -> str:
+    """Generate a self-contained run script from a Condition object."""
     s = SCRIPT_TEMPLATE
     s = s.replace("@@CWD@@", _SCRIPT_DIR)
-    s = s.replace("@@NAME@@", name)
-    s = s.replace("@@OBJECTIVE@@", objective)
-    s = s.replace("@@USE_SEVC@@", str(use_sevc))
-    s = s.replace("@@USE_INNOVATION@@", str(use_innovation))
-    s = s.replace("@@USE_TRUST@@", str(use_trust))
-    s = s.replace("@@TRUST_NOISE@@", str(trust_noise))
-    s = s.replace("@@USE_HI@@", str(use_hi))
-    s = s.replace("@@USE_FIRM_HI@@", str(use_firm_hi))
-    s = s.replace("@@GOV_TYPE@@", str(gov_type))
-    s = s.replace("@@MIXED_SEVC_RATIO@@", str(mixed_sevc_ratio))
-    s = s.replace("@@ELECTION_WEIGHT@@", str(election_weight))
-    s = s.replace("@@MEDIA_CAPTURED@@", str(media_captured))
-    s = s.replace("@@PRODUCTION_AWARE_E@@", str(production_aware_E))
-    s = s.replace("@@PRODUCTION_AWARE_S_POP@@", str(production_aware_S_pop))
-    s = s.replace("@@CEO_COMPENSATION_TIED@@", str(ceo_compensation_tied))
-    s = s.replace("@@CEO_BASE_EQUALS_FLOOR@@", str(ceo_base_equals_floor))
-    s = s.replace("@@CEO_EQUITY_TIED@@", str(ceo_equity_tied))
-    s = s.replace("@@CAPTURE_NORMALIZATION@@", str(capture_normalization))
-    s = s.replace("@@USE_CAPACITY_MITOSIS@@", str(use_capacity_mitosis))
-    s = s.replace("@@GOVERNMENT_BROADCASTER@@", str(government_broadcaster))
-    s = s.replace("@@EH_FORMULA@@", str(eh_formula))
-    s = s.replace("@@ENTREPRENEURSHIP_REQUIRES_INNOVATION@@", str(entrepreneurship_requires_innovation))
-    s = s.replace("@@ZOMBIE_FIRM_CLEANUP@@", str(zombie_firm_cleanup))
-    s = s.replace("@@V_MEASURES_TOTAL_EMISSIONS@@", str(v_measures_total_emissions))
+    s = s.replace("@@NAME@@", condition.name)
+    s = s.replace("@@OBJECTIVE@@", condition.objective)
+    s = s.replace("@@USE_SEVC@@", str(condition.use_sevc))
+    s = s.replace("@@USE_INNOVATION@@", str(condition.use_sevc))  # innovation tracks SEVC
+    s = s.replace("@@USE_TRUST@@", str(condition.use_trust))
+    s = s.replace("@@TRUST_NOISE@@", str(condition.trust_noise))
+    s = s.replace("@@USE_HI@@", str(condition.use_horizon_index))
+    s = s.replace("@@USE_FIRM_HI@@", str(condition.use_firm_hi))
+    s = s.replace("@@GOV_TYPE@@", condition.gov_type)
+    s = s.replace("@@MIXED_SEVC_RATIO@@", str(condition.mixed_sevc_ratio))
+    s = s.replace("@@ELECTION_WEIGHT@@", str(condition.election_weight))
+    s = s.replace("@@MEDIA_CAPTURED@@", str(condition.media_captured))
+    s = s.replace("@@PRODUCTION_AWARE_E@@", str(condition.production_aware_E))
+    s = s.replace("@@PRODUCTION_AWARE_S_POP@@", str(condition.production_aware_S_pop))
+    s = s.replace("@@CEO_COMPENSATION_TIED@@", str(condition.ceo_compensation_tied))
+    s = s.replace("@@CEO_BASE_EQUALS_FLOOR@@", str(condition.ceo_base_equals_floor))
+    s = s.replace("@@CEO_EQUITY_TIED@@", str(condition.ceo_equity_tied))
+    s = s.replace("@@CAPTURE_NORMALIZATION@@", condition.capture_normalization)
+    s = s.replace("@@USE_CAPACITY_MITOSIS@@", str(condition.use_capacity_mitosis))
+    s = s.replace("@@GOVERNMENT_BROADCASTER@@", str(condition.government_broadcaster))
+    s = s.replace("@@EH_FORMULA@@", condition.eh_formula)
+    s = s.replace("@@ENTREPRENEURSHIP_REQUIRES_INNOVATION@@", str(condition.entrepreneurship_requires_innovation))
+    s = s.replace("@@ZOMBIE_FIRM_CLEANUP@@", str(condition.zombie_firm_cleanup))
+    s = s.replace("@@V_MEASURES_TOTAL_EMISSIONS@@", str(condition.v_measures_total_emissions))
     s = s.replace("@@SEED@@", str(seed))
     s = s.replace("@@N_STEPS@@", str(n_steps))
     s = s.replace("@@ANIMATE@@", str(animate))
     s = s.replace("@@ANIM_SUBSAMPLE@@", str(anim_subsample))
     s = s.replace("@@OUTPUT_DIR@@", output_dir)
+    s = s.replace("@@GRID_SIZE@@", str(grid_size))
+    s = s.replace("@@N_WORKERS_SIM@@", str(n_workers_sim))
+    s = s.replace("@@N_FIRMS@@", str(n_firms))
+    s = s.replace("@@N_LANDOWNERS@@", str(n_landowners))
     return s
 
 
 def run_one(job):
     """Write script, run as subprocess, return result."""
-    (name, objective, use_sevc, use_innovation, use_trust, trust_noise,
-     use_hi, use_firm_hi, gov_type, mixed_sevc_ratio,
-     election_weight, media_captured, production_aware_E, production_aware_S_pop,
-     ceo_compensation_tied, ceo_base_equals_floor, ceo_equity_tied, capture_normalization,
-     use_capacity_mitosis, government_broadcaster, eh_formula,
-     entrepreneurship_requires_innovation, zombie_firm_cleanup, v_measures_total_emissions,
-     seed, n_steps, animate, anim_subsample, output_dir) = job
-    label = name + "/seed" + str(seed)
+    condition, seed, n_steps, animate, anim_subsample, output_dir, grid_size, n_workers_sim, n_firms, n_landowners = job
+    label = condition.name + "/seed" + str(seed)
 
-    script = make_script(name, objective, use_sevc, use_innovation,
-                         use_trust, trust_noise, use_hi, use_firm_hi, gov_type,
-                         mixed_sevc_ratio, election_weight, media_captured,
-                         seed, n_steps,
+    script = make_script(condition, seed, n_steps,
                          animate=animate, anim_subsample=anim_subsample,
-                         output_dir=output_dir,
-                         production_aware_E=production_aware_E,
-                         production_aware_S_pop=production_aware_S_pop,
-                         ceo_compensation_tied=ceo_compensation_tied,
-                         ceo_base_equals_floor=ceo_base_equals_floor,
-                         ceo_equity_tied=ceo_equity_tied,
-                         capture_normalization=capture_normalization,
-                         use_capacity_mitosis=use_capacity_mitosis,
-                         government_broadcaster=government_broadcaster,
-                         eh_formula=eh_formula,
-                         entrepreneurship_requires_innovation=entrepreneurship_requires_innovation,
-                         zombie_firm_cleanup=zombie_firm_cleanup,
-                         v_measures_total_emissions=v_measures_total_emissions)
+                         output_dir=output_dir, grid_size=grid_size,
+                         n_workers_sim=n_workers_sim, n_firms=n_firms,
+                         n_landowners=n_landowners)
 
-    script_path = "/tmp/run_" + name + "_s" + str(seed) + ".py"
+    script_path = "/tmp/run_" + condition.name + "_s" + str(seed) + ".py"
     with open(script_path, "w") as f:
         f.write(script)
 
@@ -435,170 +609,25 @@ def run_one(job):
             err_lines = result.stderr.strip().split("\n")
             for line in err_lines[-5:]:
                 print("    " + line)
-            return {"name": name, "seed": seed, "status": "FAIL",
+            return {"name": condition.name, "seed": seed, "status": "FAIL",
                     "elapsed": elapsed, "error": result.stderr[-300:]}
         else:
             print("  DONE:  " + label + " (" + str(int(elapsed)) + "s)")
-            return {"name": name, "seed": seed, "status": "OK",
+            return {"name": condition.name, "seed": seed, "status": "OK",
                     "elapsed": elapsed}
     except subprocess.TimeoutExpired:
         print("  TIMEOUT: " + label)
-        return {"name": name, "seed": seed, "status": "TIMEOUT", "elapsed": 7200}
+        return {"name": condition.name, "seed": seed, "status": "TIMEOUT", "elapsed": 7200}
 
 
-def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--workers", type=int, default=0,
-                        help="Parallel workers (0 = auto)")
-    parser.add_argument("--only", type=str, default=None,
-                        help="Run only this condition")
-    parser.add_argument("--steps", type=int, default=0,
-                        help="Steps per run (0 = use preset default)")
-    parser.add_argument("--animate", action="store_true",
-                        help="Generate HTML animation for each run")
-    parser.add_argument("--subsample", type=int, default=2,
-                        help="Animation frame subsample rate (default: 2)")
-    parser.add_argument("--preset", type=str, default=None,
-                        choices=["full", "test2", "resp", "pa", "mitosis", "eh", "structural"],
-                        help="Preset: 'full' = all conditions, 'test2' = vanilla vs topo, 'resp' = C12-C15, 'pa' = C16-C18, 'mitosis' = C21-C22, 'eh' = C23-C24 EH overhaul, 'structural' = C25-C26")
-    args = parser.parse_args()
+# ── Comparison reporting ────────────────────────────────────────
 
-    # Select conditions and seeds based on preset
-    if args.preset == "test2":
-        conditions = TEST2_CONDITIONS
-        seeds = TEST2_SEEDS
-        n_steps = args.steps if args.steps > 0 else 500
-        output_dir = "results/test_conditions"
-    elif args.preset == "resp":
-        conditions = RESP_CONDITIONS
-        seeds = RESP_SEEDS
-        n_steps = args.steps if args.steps > 0 else N_STEPS
-        output_dir = "results/responsiveness"
-    elif args.preset == "pa":
-        conditions = PA_CONDITIONS
-        seeds = PA_SEEDS
-        n_steps = args.steps if args.steps > 0 else PA_STEPS
-        output_dir = "results/production_aware"
-    elif args.preset == "mitosis":
-        conditions = MITOSIS_CONDITIONS
-        seeds = MITOSIS_SEEDS
-        n_steps = args.steps if args.steps > 0 else N_STEPS
-        output_dir = "results/mitosis"
-    elif args.preset == "eh":
-        conditions = EH_CONDITIONS
-        seeds = EH_SEEDS
-        n_steps = args.steps if args.steps > 0 else EH_STEPS
-        output_dir = "results/epistemic_health"
-    elif args.preset == "structural":
-        conditions = STRUCTURAL_CONDITIONS
-        seeds = STRUCTURAL_SEEDS
-        n_steps = args.steps if args.steps > 0 else STRUCTURAL_STEPS
-        output_dir = "results/structural"
-    else:
-        conditions = CONDITIONS
-        seeds = SEEDS
-        n_steps = args.steps if args.steps > 0 else N_STEPS
-        output_dir = "results/architecture"
-
-    n_workers = args.workers
-    if n_workers <= 0:
-        import multiprocessing
-        n_workers = max(1, multiprocessing.cpu_count() - 1)
-
-    jobs = []
-    for cond in conditions:
-        name = cond[0]
-        if args.only and name != args.only:
-            continue
-        for seed in seeds:
-            # Pad legacy tuples to full 21-field spec
-            full_cond = cond
-            if len(full_cond) < 14:
-                full_cond = full_cond + (False, False)        # pad production_aware flags
-            if len(full_cond) < 18:
-                full_cond = full_cond + (False, False, False, "fixed")  # pad CEO flags
-            if len(full_cond) < 19:
-                full_cond = full_cond + (True,)               # pad use_capacity_mitosis
-            if len(full_cond) < 21:
-                full_cond = full_cond + (False, "legacy")     # pad government_broadcaster, eh_formula
-            if len(full_cond) < 24:
-                full_cond = full_cond + (False, False, False)  # pad Task 14 structural flags
-            jobs.append(full_cond + (seed, n_steps, args.animate, args.subsample, output_dir))
-
-    print("=" * 70)
-    print("  PARALLEL ARCHITECTURE EXPERIMENT")
-    if args.preset:
-        print("  Preset: " + args.preset)
-    print("  Jobs: " + str(len(jobs)))
-    print("  Workers: " + str(n_workers))
-    print("  Steps: " + str(n_steps))
-    print("  Animate: " + str(args.animate))
-    print("  Output: " + output_dir)
-    print("=" * 70)
-    for cond in conditions:
-        if args.only and cond[0] != args.only:
-            continue
-        name, obj, sevc, inno, trust, noise, hi, firm_hi, gov, mixed_ratio, elec_w, media_cap = cond[:12]
-        pa_e   = cond[12] if len(cond) > 12 else False
-        pa_s   = cond[13] if len(cond) > 13 else False
-        ceo_t  = cond[14] if len(cond) > 14 else False
-        cap_n  = cond[17] if len(cond) > 17 else "fixed"
-        gov_bc = cond[19] if len(cond) > 19 else False
-        eh_fmt = cond[20] if len(cond) > 20 else "legacy"
-        flags = []
-        if sevc: flags.append("SEVC")
-        if inno: flags.append("Inno")
-        if trust: flags.append("Trust(" + str(noise) + ")")
-        if hi: flags.append("HI")
-        if firm_hi: flags.append("FirmHI")
-        flags.append("gov=" + gov)
-        if mixed_ratio < 1.0: flags.append("Mix(" + str(mixed_ratio) + ")")
-        if elec_w > 0: flags.append("Resp(" + str(elec_w) + ")")
-        if media_cap: flags.append("MediaCap")
-        if pa_e or pa_s: flags.append("PA(E=" + str(pa_e) + ",S=" + str(pa_s) + ")")
-        if ceo_t: flags.append("CEO(norm=" + str(cap_n) + ")")
-        if gov_bc: flags.append("GovBC")
-        if eh_fmt != "legacy": flags.append("EH=" + eh_fmt)
-        print("  " + name + ": " + obj + " [" + ", ".join(flags) + "]")
-    print()
-
-    os.makedirs(output_dir + "/raw_data", exist_ok=True)
-
-    t0 = time.time()
-
-    with ProcessPoolExecutor(max_workers=n_workers) as executor:
-        futures = {executor.submit(run_one, job): job for job in jobs}
-        results = []
-        for future in as_completed(futures):
-            try:
-                results.append(future.result())
-            except Exception as e:
-                job = futures[future]
-                print("  EXCEPTION: " + str(job[0]) + "/" + str(job[-4]) + ": " + str(e))
-
-    elapsed = time.time() - t0
-    ok = sum(1 for r in results if r.get("status") == "OK")
-    fail = len(results) - ok
-
-    print()
-    print("=" * 70)
-    print("  Complete: " + str(len(results)) + " runs in " +
-          str(int(elapsed)) + "s (" + "{:.1f}".format(elapsed/60) + " min)")
-    print("  OK: " + str(ok) + "  FAIL: " + str(fail))
-    print("=" * 70)
-
-    import pandas as pd
-    pd.DataFrame(results).to_csv(output_dir + "/run_log.csv", index=False)
-
-    # Print comparison summary if test2 preset
-    if args.preset == "test2":
-        _print_comparison(output_dir)
-
-
-def _print_comparison(output_dir):
+def print_comparison(output_dir):
     """Load raw data and print head-to-head comparison."""
     import pandas as pd
     raw_dir = output_dir + "/raw_data"
+    if not os.path.isdir(raw_dir):
+        return
     files = sorted(f for f in os.listdir(raw_dir) if f.endswith(".parquet"))
     if not files:
         return
@@ -630,17 +659,13 @@ def _print_comparison(output_dir):
         ("planner_E_pop",         "Planner E",        ".3f",  "higher"),
         ("planner_V_pop",         "Planner V",        ".3f",  "higher"),
         ("planner_C_pop",         "Planner C",        ".3f",  "higher"),
-        ("mean_firm_binding_S",   "Binding S frac",   ".2f",  "info"),
-        ("mean_firm_binding_E",   "Binding E frac",   ".2f",  "info"),
-        ("mean_firm_binding_V",   "Binding V frac",   ".2f",  "info"),
-        ("mean_firm_binding_C",   "Binding C frac",   ".2f",  "info"),
-        ("election_planner_aligned", "Elec-Plan Align", ".2f",  "higher"),
+        ("epistemic_health_mean", "EH Mean",          ".3f",  "higher"),
+        ("epistemic_health_floor","EH Floor",         ".3f",  "higher"),
         ("trust_planner",         "Planner Trust",    ".3f",  "higher"),
         ("trust_institutional",   "Inst. Trust",      ".3f",  "higher"),
         ("crime_events",          "Crime/step",       ".1f",  "lower"),
     ]
 
-    import numpy as np
     print("\n" + "=" * 80)
     print("  HEAD-TO-HEAD COMPARISON (steady-state mean +/- std across seeds)")
     print("=" * 80)
@@ -657,7 +682,8 @@ def _print_comparison(output_dir):
         row = "{:<20}".format(label)
         for c in conditions:
             subset = tail[tail["condition"] == c][key]
-            mean_v = subset.mean(); std_v = subset.std()
+            mean_v = subset.mean()
+            std_v = subset.std()
             row += "  {:>12{fmt}} +/- {:>7{fmt}}".format(mean_v, std_v, fmt=fmt)
         print(row)
 
@@ -666,6 +692,118 @@ def _print_comparison(output_dir):
     os.makedirs(summary_dir, exist_ok=True)
     all_data.to_parquet(summary_dir + "/all_data.parquet", index=False)
     print("Saved: " + summary_dir + "/all_data.parquet")
+
+
+# ── Main ────────────────────────────────────────────────────────
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Unified parallel experiment runner for the economic simulation.")
+    parser.add_argument("--workers", type=int, default=0,
+                        help="Parallel workers (0 = auto)")
+    parser.add_argument("--only", type=str, default=None,
+                        help="Run only this condition name")
+    parser.add_argument("--steps", type=int, default=0,
+                        help="Steps per run (0 = use preset default)")
+    parser.add_argument("--animate", action="store_true",
+                        help="Generate HTML animation for each run")
+    parser.add_argument("--subsample", type=int, default=2,
+                        help="Animation frame subsample rate (default: 2)")
+    parser.add_argument("--preset", type=str, default=None,
+                        choices=list(PRESETS.keys()),
+                        help="Experiment preset (default: 'full')")
+    parser.add_argument("--grid-size", type=int, default=80,
+                        help="Grid dimension (default: 80)")
+    parser.add_argument("--n-workers-sim", type=int, default=400,
+                        help="Number of worker agents (default: 400)")
+    parser.add_argument("--n-firms", type=int, default=20,
+                        help="Number of firms (default: 20)")
+    parser.add_argument("--n-landowners", type=int, default=15,
+                        help="Number of landowners (default: 15)")
+    args = parser.parse_args()
+
+    preset_name = args.preset or "full"
+    preset = PRESETS[preset_name]
+    conditions = preset["conditions"]
+    seeds = preset["seeds"]
+    n_steps = args.steps if args.steps > 0 else preset["steps"]
+    output_dir = preset["output_dir"]
+
+    n_workers = args.workers
+    if n_workers <= 0:
+        n_workers = max(1, multiprocessing.cpu_count() - 1)
+
+    # Build jobs
+    jobs = []
+    for cond in conditions:
+        if args.only and cond.name != args.only:
+            continue
+        for seed in seeds:
+            jobs.append((cond, seed, n_steps, args.animate, args.subsample,
+                         output_dir, args.grid_size, args.n_workers_sim,
+                         args.n_firms, args.n_landowners))
+
+    print("=" * 70)
+    print("  PARALLEL EXPERIMENT RUNNER")
+    print("  Preset: " + preset_name)
+    print("  Jobs: " + str(len(jobs)))
+    print("  Workers: " + str(n_workers))
+    print("  Steps: " + str(n_steps))
+    print("  Grid: " + str(args.grid_size) + "x" + str(args.grid_size))
+    print("  Animate: " + str(args.animate))
+    print("  Output: " + output_dir)
+    print("=" * 70)
+    for cond in conditions:
+        if args.only and cond.name != args.only:
+            continue
+        flags = []
+        if cond.use_sevc: flags.append("SEVC")
+        if cond.use_trust: flags.append("Trust(" + str(cond.trust_noise) + ")")
+        if cond.use_horizon_index: flags.append("HI")
+        if cond.use_firm_hi: flags.append("FirmHI")
+        flags.append("gov=" + cond.gov_type)
+        if cond.mixed_sevc_ratio < 1.0: flags.append("Mix(" + str(cond.mixed_sevc_ratio) + ")")
+        if cond.election_weight > 0: flags.append("Resp(" + str(cond.election_weight) + ")")
+        if cond.media_captured: flags.append("MediaCap")
+        if cond.production_aware_E or cond.production_aware_S_pop: flags.append("PA")
+        if cond.ceo_compensation_tied: flags.append("CEO(norm=" + cond.capture_normalization + ")")
+        if cond.government_broadcaster: flags.append("GovBC")
+        if cond.eh_formula != "legacy": flags.append("EH=" + cond.eh_formula)
+        if cond.entrepreneurship_requires_innovation: flags.append("InnoReq")
+        if cond.zombie_firm_cleanup: flags.append("Zombie")
+        if cond.v_measures_total_emissions: flags.append("VTotal")
+        print("  " + cond.name + ": " + cond.objective + " [" + ", ".join(flags) + "]")
+    print()
+
+    os.makedirs(output_dir + "/raw_data", exist_ok=True)
+
+    t0 = time.time()
+
+    with ProcessPoolExecutor(max_workers=n_workers) as executor:
+        futures = {executor.submit(run_one, job): job for job in jobs}
+        results = []
+        for future in as_completed(futures):
+            try:
+                results.append(future.result())
+            except Exception as e:
+                job = futures[future]
+                print("  EXCEPTION: " + str(job[0].name) + "/seed" + str(job[1]) + ": " + str(e))
+
+    elapsed = time.time() - t0
+    ok = sum(1 for r in results if r.get("status") == "OK")
+    fail = len(results) - ok
+
+    print()
+    print("=" * 70)
+    print("  Complete: " + str(len(results)) + " runs in " +
+          str(int(elapsed)) + "s (" + "{:.1f}".format(elapsed / 60) + " min)")
+    print("  OK: " + str(ok) + "  FAIL: " + str(fail))
+    print("=" * 70)
+
+    import pandas as pd
+    pd.DataFrame(results).to_csv(output_dir + "/run_log.csv", index=False)
+
+    print_comparison(output_dir)
 
 
 if __name__ == "__main__":
