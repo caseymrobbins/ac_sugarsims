@@ -647,6 +647,11 @@ class WorkerAgent(Agent):
             firm.tech_level = prev_firm.tech_level * specialization
             firm.pollution_factor = min(firm.pollution_factor, prev_firm.pollution_factor)
 
+        # Worker-ownership inheritance (Task 17): new firms in worker-owned economies start worker-owned
+        if getattr(self.model, 'worker_ownership', False):
+            firm.worker_ownership_share = getattr(self.model, 'worker_ownership_share', 0.51)
+            firm.investor_ownership_share = 1.0 - firm.worker_ownership_share
+
         self._place_and_register_firm(firm)
 
     def _get_prev_employer(self):
@@ -783,6 +788,12 @@ class FirmAgent(Agent):
         self.ceo_potential_bonus: float = 0.0
         self.sevc_floor: float = 0.5    # current SEVC floor (written by compute_stakeholder_scores)
         self.sevc_binding: str = "S"    # current binding dimension
+        # Worker-majority ownership (Task 17): 51/49 model
+        self.worker_ownership_share: float = 0.0    # set by configure_model; 0 = conventional
+        self.investor_ownership_share: float = 1.0
+        self.worker_dividend_pool: float = 0.0      # cumulative worker dividends paid
+        self.investor_dividend_pool: float = 0.0    # cumulative investor dividends paid
+        self._dilution_rejections: int = 0          # consecutive steps where hire was dilution-blocked
         # Innovation
         init_firm_tech(self)
 
@@ -811,6 +822,7 @@ class FirmAgent(Agent):
             else: self._consecutive_losses = 0
         self.capital_stock *= 0.998
         self._pay_ceo()
+        self.distribute_profits()
         # Zombie firm cleanup (Task 14): track idle firms and apply operating costs
         if getattr(self.model, 'zombie_firm_cleanup', False):
             if len(self.workers) == 0:
@@ -1000,6 +1012,17 @@ class FirmAgent(Agent):
         L = max(sum(w.skill for w in self.workers.values()) + worker.skill, 0.01)
         mp = A * 0.65 * (K ** 0.35) * (L ** -0.35) * self.model.economy.prices.get("goods", 1.0)
         if mp < self.offered_wage * 0.5: return
+        # Worker-ownership dilution check (Task 17): workers vote to hire only if
+        # the production gain exceeds the dilution of their ownership dividend.
+        if self.worker_ownership_share >= 0.51 and self.workers and self.profit > 0:
+            current_per_worker = self.profit * 0.5 * self.worker_ownership_share / len(self.workers)
+            new_per_worker = self.profit * 0.5 * self.worker_ownership_share / (len(self.workers) + 1)
+            dilution = current_per_worker - new_per_worker
+            marginal_gain = mp - self.offered_wage
+            if marginal_gain < dilution * 0.5:
+                self._dilution_rejections += 1
+                return
+        self._dilution_rejections = 0
         # Record previous employer for tech transfer
         worker._prev_employer_id = worker.employer_id
         self.workers[worker.unique_id] = worker; worker.employed = True; worker.employer_id = self.unique_id; worker.wage = self.offered_wage
@@ -1015,12 +1038,42 @@ class FirmAgent(Agent):
         if self.wealth < wage: wage = max(0, self.wealth * 0.5)
         self.wealth -= wage; self.total_wages_paid += wage; self.wages_this_step += wage; return wage
 
+    def distribute_profits(self):
+        """
+        Worker-majority ownership profit distribution (Task 17).
+
+        50% of positive profit is retained for reinvestment. Of the remaining
+        50%: 51% flows to workers as ownership dividends, 49% flows to the
+        investor pool (retained in firm wealth as reserve).
+
+        Workers receive equal shares proportional to headcount.
+        """
+        if self.worker_ownership_share <= 0.0 or self.profit <= 0:
+            return
+        distributable = self.profit * 0.5
+        worker_share = distributable * self.worker_ownership_share
+        investor_share = distributable * self.investor_ownership_share
+
+        if self.workers:
+            per_worker = worker_share / len(self.workers)
+            for w in self.workers.values():
+                w.wealth += per_worker
+                w.income_last_step += per_worker
+
+        # Investor share stays in firm as retained capital; track cumulative
+        self.investor_dividend_pool += investor_share
+        self.worker_dividend_pool += worker_share
+
     def _consider_mitosis(self):
         """
         Capacity-driven mitosis: split when growth outruns structure.
 
         Uses RAW SEVC scores (not EMA-normalized) because the question
         is absolute: is S pulling away from E/V/C in real terms?
+
+        For worker-owned firms (Task 17): also triggers via dilution pressure.
+        When existing workers have blocked hiring for 10+ steps due to
+        dilution cost, the firm splits rather than stagnating.
         """
         self._mitosis_events = 0
         self._profit_history.append(self.profit)
@@ -1028,6 +1081,16 @@ class FirmAgent(Agent):
         # Minimum scale and maturity
         if len(self.workers) < 8: return
         if self.age < 30: return
+
+        # Dilution-pressure mitosis path (worker-owned firms only)
+        mitosis_trigger = getattr(self.model, 'mitosis_trigger', 'standard')
+        if mitosis_trigger == 'dilution' and self.worker_ownership_share >= 0.51:
+            if self._dilution_rejections >= 10 and self.profit > 0:
+                self._execute_mitosis()
+                self._dilution_rejections = 0
+                return
+
+        # Standard profit-acceleration + headroom-gap path
         if len(self._profit_history) < 20: return
         history = list(self._profit_history)
         # 1. Profit acceleration: compare recent growth to earlier growth
@@ -1058,6 +1121,9 @@ class FirmAgent(Agent):
         daughter.tech_level = self.tech_level; daughter.pollution_factor = self.pollution_factor
         daughter.green_rd_priority = self.green_rd_priority; daughter.trust_score = self.trust_score
         daughter.strategy_weights = dict(self.strategy_weights); daughter.is_sevc = self.is_sevc
+        # Inherit worker-ownership structure (Task 17)
+        daughter.worker_ownership_share = self.worker_ownership_share
+        daughter.investor_ownership_share = self.investor_ownership_share
         daughter.age = 0
         # Place daughter near parent
         if self.pos is not None:

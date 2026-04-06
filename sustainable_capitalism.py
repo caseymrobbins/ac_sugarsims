@@ -24,16 +24,23 @@ def compute_stakeholder_scores(firm: "FirmAgent") -> Dict[str, float]:
     model = firm.model
 
     # S: Shareholder
+    n_workers = len(firm.workers)
     profit_delta = firm.profit - firm.prev_profit
     profit_signal = math.tanh(profit_delta / max(abs(firm.profit) + 1, 1))
     capital_health = min(1.0, firm.capital_stock / max(firm.wealth * 0.3 + 1, 1))
     # Tech bonus: innovative firms have higher shareholder potential
     tech_bonus = min(0.1, (getattr(firm, 'tech_level', 1.0) - 1.0) * 0.1)
-    S = 0.5 + 0.3 * profit_signal + 0.2 * capital_health + tech_bonus
+    # Worker-ownership dividend signal (Task 17): S reflects per-worker ownership return
+    worker_ownership_share = getattr(firm, 'worker_ownership_share', 0.0)
+    if worker_ownership_share >= 0.51 and n_workers > 0 and firm.profit > 0:
+        per_worker_dividend = firm.profit * 0.5 * worker_ownership_share / n_workers
+        dividend_signal = min(1.0, per_worker_dividend / 5.0)
+        S = 0.3 + 0.2 * profit_signal + 0.2 * capital_health + 0.2 * dividend_signal + tech_bonus
+    else:
+        S = 0.5 + 0.3 * profit_signal + 0.2 * capital_health + tech_bonus
     S = max(0.01, min(1.0, S))
 
     # E: Employee
-    n_workers = len(firm.workers)
     if n_workers == 0:
         E = 0.1
         firm.capture_ratio = 0.0
@@ -298,6 +305,22 @@ def sustainable_choose_strategy(firm: "FirmAgent") -> str:
             context["invest_capital"] *= (1.0 + 2.0 * urgency)
         elif floor_dim == 'S':
             context["innovate"] *= (1.0 + 1.5 * urgency)
+
+    # Worker-controlled strategy overrides (Task 17): in 51%+ worker-owned firms,
+    # workers suppress extractive strategies and boost growth/welfare strategies.
+    if getattr(firm, 'worker_ownership_share', 0.0) >= 0.51:
+        # Suppress strategies that harm workers
+        context["cut_wages"] = min(context.get("cut_wages", 0.1), 0.01)
+        context["downsize"] = min(context.get("downsize", 0.1), 0.05)
+        context["capture_media"] = min(context.get("capture_media", 0.1), 0.01)
+        context["form_cartel"] = min(context.get("form_cartel", 0.3), 0.05)
+        context["pollute_more"] = min(context.get("pollute_more", 0.3), 0.05)
+        # Boost strategies that benefit workers as co-owners
+        context["raise_wages"] *= 2.0
+        context["invest_capital"] *= 1.5
+        context["innovate"] *= 2.0
+        context["hire"] *= 1.5
+        context["clean_up"] *= 1.5
 
     strategy_scores = {}
     for action, weight in firm.strategy_weights.items():
