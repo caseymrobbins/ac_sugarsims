@@ -175,7 +175,7 @@ C33 = Condition("C33_nash_uncapped_planner", "Uncapped planner instruments + def
                 election_weight=1.0, instrument_caps="uncapped", deficit_spending=True, **_SHARED_PLANNER_KWARGS)
 C34 = Condition("C34_topo_uncapped_planner", "Uncapped planner instruments + deficit", "TOPO", True, True, 0.1, True, True, "democratic",
                 election_weight=1.0, instrument_caps="uncapped", deficit_spending=True, **_SHARED_PLANNER_KWARGS)
-UNCAPPED_CONDITIONS = [C31, C32, C33, C34]
+UNCAPPED_CONDITIONS = [C33, C34]
 
 # Full default set (latest structural conditions)
 DEFAULT_CONDITIONS = [C23, C24, C25, C26]
