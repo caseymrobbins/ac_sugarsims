@@ -68,6 +68,8 @@ class Condition:
     worker_ownership: bool = False        # Task 17: 51/49 worker-majority ownership
     worker_ownership_share: float = 0.51  # fraction owned by workers
     mitosis_trigger: str = "standard"     # "standard" | "dilution"
+    instrument_caps: str = "standard"     # Task 19: "standard" | "uncapped"
+    deficit_spending: bool = False        # Task 19: allow debt-financed planner spending
 
 
 # ── All conditions ──────────────────────────────────────────────
@@ -163,11 +165,23 @@ C30 = Condition("C30_worker_owned_75_democratic", "Worker-owned 75% supermajorit
                 mitosis_trigger="dilution")
 DOSE_RESPONSE_CONDITIONS = [C29, C27, C30]  # ordered 25% → 51% → 75% for dose-response
 
+# Uncapped Planner Instruments (C31-C32)
+_SHARED_PLANNER_KWARGS = dict(
+    election_weight=1.0, production_aware_S_pop=True,
+    capture_normalization="ema", government_broadcaster=True, eh_formula="paper",
+    entrepreneurship_requires_innovation=True, zombie_firm_cleanup=True, v_measures_total_emissions=True,
+)
+C31 = Condition("C31_capped_planner", "Capped planner instruments (baseline)", "PLANNER_SEVC", True, True, 0.1, True, True, "democratic",
+                instrument_caps="standard", deficit_spending=False, **_SHARED_PLANNER_KWARGS)
+C32 = Condition("C32_uncapped_planner", "Uncapped planner instruments + deficit", "PLANNER_SEVC", True, True, 0.1, True, True, "democratic",
+                instrument_caps="uncapped", deficit_spending=True, **_SHARED_PLANNER_KWARGS)
+UNCAPPED_CONDITIONS = [C31, C32]
+
 # Full default set (latest structural conditions)
 DEFAULT_CONDITIONS = [C23, C24, C25, C26]
 
 # All conditions combined
-ALL_CONDITIONS = ARCH_CONDITIONS + [C9, C10, C11] + RESP_CONDITIONS + PA_CONDITIONS + [C19, C20] + MITOSIS_CONDITIONS + EH_CONDITIONS + STRUCTURAL_CONDITIONS + WORKER_OWNED_CONDITIONS + [C29, C30]
+ALL_CONDITIONS = ARCH_CONDITIONS + [C9, C10, C11] + RESP_CONDITIONS + PA_CONDITIONS + [C19, C20] + MITOSIS_CONDITIONS + EH_CONDITIONS + STRUCTURAL_CONDITIONS + WORKER_OWNED_CONDITIONS + [C29, C30] + UNCAPPED_CONDITIONS
 
 # Test2: vanilla vs full stack
 TEST2_CONDITIONS = [
@@ -198,6 +212,7 @@ PRESETS = {
     "structural":  {"conditions": STRUCTURAL_CONDITIONS,  "seeds": [42, 137, 256, 389, 501, 623, 777, 888], "steps": 3000, "output_dir": "results/structural"},
     "worker_owned": {"conditions": WORKER_OWNED_CONDITIONS, "seeds": [42, 137, 256, 389, 501, 623, 777, 888], "steps": 3000, "output_dir": "results/worker_owned"},
     "dose_response": {"conditions": DOSE_RESPONSE_CONDITIONS, "seeds": [42, 137, 256, 389, 501, 623, 777, 888], "steps": 3000, "output_dir": "results/dose_response"},
+    "uncapped":    {"conditions": UNCAPPED_CONDITIONS,    "seeds": [42, 137, 256, 389, 501, 623, 777, 888], "steps": 3000, "output_dir": "results/uncapped"},
     "comparison":  {"conditions": COMPARISON_CONDITIONS,  "seeds": [42, 137, 2024],                         "steps": 3000, "output_dir": "results/comparison"},
 }
 
@@ -229,6 +244,8 @@ def configure_model(model, condition: Condition):
     model.worker_ownership = condition.worker_ownership
     model.worker_ownership_share = condition.worker_ownership_share
     model.mitosis_trigger = condition.mitosis_trigger
+    model.instrument_caps = condition.instrument_caps
+    model.deficit_spending = condition.deficit_spending
 
     # Apply worker ownership to all existing firms
     if condition.worker_ownership:
@@ -453,6 +470,8 @@ V_MEASURES_TOTAL_EMISSIONS = @@V_MEASURES_TOTAL_EMISSIONS@@
 WORKER_OWNERSHIP = @@WORKER_OWNERSHIP@@
 WORKER_OWNERSHIP_SHARE = @@WORKER_OWNERSHIP_SHARE@@
 MITOSIS_TRIGGER = "@@MITOSIS_TRIGGER@@"
+INSTRUMENT_CAPS = "@@INSTRUMENT_CAPS@@"
+DEFICIT_SPENDING = @@DEFICIT_SPENDING@@
 SEED = @@SEED@@
 N_STEPS = @@N_STEPS@@
 ANIMATE = @@ANIMATE@@
@@ -495,6 +514,8 @@ model.v_measures_total_emissions = V_MEASURES_TOTAL_EMISSIONS
 model.worker_ownership = WORKER_OWNERSHIP
 model.worker_ownership_share = WORKER_OWNERSHIP_SHARE
 model.mitosis_trigger = MITOSIS_TRIGGER
+model.instrument_caps = INSTRUMENT_CAPS
+model.deficit_spending = DEFICIT_SPENDING
 
 if WORKER_OWNERSHIP:
     for firm in model.firms:
@@ -624,6 +645,8 @@ def make_script(condition: Condition, seed: int, n_steps: int,
     s = s.replace("@@WORKER_OWNERSHIP@@", str(condition.worker_ownership))
     s = s.replace("@@WORKER_OWNERSHIP_SHARE@@", str(condition.worker_ownership_share))
     s = s.replace("@@MITOSIS_TRIGGER@@", condition.mitosis_trigger)
+    s = s.replace("@@INSTRUMENT_CAPS@@", condition.instrument_caps)
+    s = s.replace("@@DEFICIT_SPENDING@@", str(condition.deficit_spending))
     s = s.replace("@@SEED@@", str(seed))
     s = s.replace("@@N_STEPS@@", str(n_steps))
     s = s.replace("@@ANIMATE@@", str(animate))

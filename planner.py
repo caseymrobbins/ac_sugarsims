@@ -155,6 +155,28 @@ def _get_horizon_index(model: "EconomicModel") -> float:
 
 
 class PlannerAgent(Agent):
+    # Uncapped upper bounds (Task 19): ~10-50x current limits so the ES can
+    # discover whether aggressive floor-raising actually moves S_pop.
+    # Tax rates capped at 0.95; ratios (capture, inheritance) at 0.99.
+    _UNCAPPED_HI = {
+        "ubi_payment":               100.0,
+        "min_wage":                  150.0,
+        "agriculture_investment":     50.0,
+        "infrastructure_investment":  50.0,
+        "healthcare_investment":      30.0,
+        "education_investment":       30.0,
+        "pollution_tax":              20.0,
+        "cleanup_investment":         50.0,
+        "inheritance_tax":             0.99,
+        "media_funding":              50.0,
+        "antitrust_enforcement":      30.0,
+        "enforcement_budget":         30.0,
+        "min_capture_ratio":           0.95,
+        "tax_rate_firm":               0.95,
+        "tax_rate_worker":             0.95,
+        "tax_rate_landowner":          0.99,
+    }
+
     def __init__(self, model):
         super().__init__(model); self.objective = model.objective
         obj_offset = {"SUM":0,"NASH":10000,"JAM":20000,"CROSS":30000,"TOPO":40000,"TARGET":50000,
@@ -163,8 +185,21 @@ class PlannerAgent(Agent):
         self._learn_rng = np.random.default_rng(model._seed + 7919 + obj_offset)
         self._es = EvolutionStrategy(dim=POLICY_DIM, rng=self._learn_rng)
         self._linear = LinearPolicy(state_dim=STATE_DIM, action_dim=POLICY_DIM, rng=self._learn_rng)
+        # Per-instance instrument bounds: standard or uncapped (Task 19)
+        caps = getattr(model, 'instrument_caps', 'standard')
+        if caps == 'uncapped':
+            hi = np.array([self._UNCAPPED_HI.get(name, INSTRUMENT_HI[i])
+                           for i, name in enumerate(INSTRUMENT_NAMES)], dtype=np.float64)
+        else:
+            hi = INSTRUMENT_HI.copy()
+        self._instrument_lo = INSTRUMENT_LO.copy()
+        self._instrument_hi = hi
+        self._instrument_range = hi - INSTRUMENT_LO
+
         self.policy = {name: default for name, default, _, _ in INSTRUMENT_SPEC}
-        self.tax_revenue = 0.0; self.last_objective_value = -math.inf
+        self.tax_revenue = 0.0
+        self.debt = 0.0             # accumulated deficit (Task 19)
+        self.last_objective_value = -math.inf
         self.trust_score = 0.5
         self.objective_history = []; self._reward_baseline = 0.0
         self._current_perturbations = None; self._perturbation_fitnesses = []
@@ -268,7 +303,7 @@ class PlannerAgent(Agent):
         combined = np.clip(es_params + linear_adj * 0.1, 0.01, 0.99)
         if np.any(np.isnan(combined)): combined = np.clip(es_params, 0.01, 0.99)
         if np.any(np.isnan(combined)): combined = np.full(POLICY_DIM, 0.5)
-        actual = INSTRUMENT_LO + combined * INSTRUMENT_RANGE
+        actual = self._instrument_lo + combined * self._instrument_range
         for i, name in enumerate(INSTRUMENT_NAMES): self.policy[name] = float(actual[i])
         # Apply democratic election constraints as floors
         for instr, floor in self._active_constraints.items():
@@ -351,20 +386,37 @@ class PlannerAgent(Agent):
         else: return
         if agent.wealth >= tax: agent.wealth -= tax; self.tax_revenue += tax
 
+    def _available_budget(self) -> float:
+        """Spending capacity: tax revenue plus deficit allowance (Task 19)."""
+        if getattr(self.model, 'deficit_spending', False):
+            debt_capacity = 5.0 * max(self.tax_revenue, 1.0)
+            return self.tax_revenue + max(0.0, debt_capacity - self.debt)
+        return self.tax_revenue
+
+    def _spend(self, amount: float) -> None:
+        """Deduct spending from revenue; any shortfall becomes debt (Task 19)."""
+        from_revenue = min(amount, self.tax_revenue)
+        self.tax_revenue -= from_revenue
+        shortfall = amount - from_revenue
+        if shortfall > 0:
+            self.debt += shortfall
+
     def _redistribute(self):
         workers = self.model.workers
         if not workers: return
         ubi = self.policy["ubi_payment"]
         if not np.isfinite(ubi): ubi = 0.0
         total_ubi = ubi * len(workers)
-        if total_ubi <= 0 or self.tax_revenue <= 0: return
-        if self.tax_revenue >= total_ubi:
+        if total_ubi <= 0: return
+        available = self._available_budget()
+        if available <= 0: return
+        if available >= total_ubi:
             for w in workers: w.wealth += ubi
-            self.tax_revenue -= total_ubi
+            self._spend(total_ubi)
         else:
-            per = self.tax_revenue / len(workers)
+            per = available / len(workers)
             for w in workers: w.wealth += per
-            self.tax_revenue = 0.0
+            self._spend(available)
 
     def _apply_investments(self):
         COST_PER_UNIT = 0.5
@@ -373,32 +425,33 @@ class PlannerAgent(Agent):
         agri = _safe("agriculture_investment", 0.5); infra = _safe("infrastructure_investment", 0.5)
         hlth = _safe("healthcare_investment", 0.0); edu = _safe("education_investment", 0.0)
         total_cost = (agri + infra + hlth + edu) * COST_PER_UNIT
-        if total_cost > 0 and self.tax_revenue > 0:
-            ratio = min(1.0, self.tax_revenue / (total_cost + 1e-9))
-            self.tax_revenue = max(0.0, self.tax_revenue - total_cost * ratio)
+        available = self._available_budget()
+        if total_cost > 0 and available > 0:
+            ratio = min(1.0, available / (total_cost + 1e-9))
+            self._spend(total_cost * ratio)
         else: ratio = 0.0
         self.model._agriculture_bonus = max(1.0, 1.0 + 0.3 * agri * ratio)
         self.model._infrastructure_level = max(0.5, 1.0 + 0.2 * infra * ratio)
         self.model._healthcare_bonus = max(0.0, min(0.30, 0.10 * hlth * ratio))
         self.model._education_quality = max(1.0, 1.0 + 0.3 * edu * ratio)
         cleanup = _safe("cleanup_investment", 0.0)
-        if cleanup > 0 and self.tax_revenue > 0:
+        if cleanup > 0 and self._available_budget() > 0:
             cc = cleanup * 2.0
-            if self.tax_revenue >= cc:
-                self.tax_revenue -= cc
+            if self._available_budget() >= cc:
+                self._spend(cc)
                 self.model.pollution_grid *= max(0.0, 1.0 - min(0.10, cleanup * 0.02))
 
         # Media funding: public-good subsidy for news firms
         media_fund = _safe("media_funding", 0.0)
-        if media_fund > 0 and self.tax_revenue > 0:
+        if media_fund > 0 and self._available_budget() > 0:
             active_nf = [nf for nf in self.model.news_firms if not nf.defunct]
             if active_nf:
-                budget = min(media_fund * 2.0, self.tax_revenue)
+                budget = min(media_fund * 2.0, self._available_budget())
                 per_firm = budget / len(active_nf)
                 for nf in active_nf:
                     nf.wealth += per_firm
                     nf._received_public_funding = True
-                self.tax_revenue -= budget
+                self._spend(budget)
 
         # Antitrust enforcement: probabilistic cartel breakup + fines
         antitrust = _safe("antitrust_enforcement", 0.0)
@@ -428,9 +481,9 @@ class PlannerAgent(Agent):
 
         # Enforcement budget: scale enforcer effectiveness
         enf_budget = _safe("enforcement_budget", 0.3)
-        if enf_budget > 0 and self.tax_revenue > 0:
+        if enf_budget > 0 and self._available_budget() > 0:
             enf_cost = enf_budget * 1.0
-            paid = min(enf_cost, self.tax_revenue); self.tax_revenue -= paid
+            paid = min(enf_cost, self._available_budget()); self._spend(paid)
             ratio_e = paid / max(enf_cost, 1e-9)
             for e in self.model.enforcers:
                 e.force = float(np.clip(0.3 + 0.7 * enf_budget * ratio_e, 0.1, 1.5))
@@ -438,9 +491,9 @@ class PlannerAgent(Agent):
         # Propaganda: reduces conflict but increases scapegoating risk
         prop = _safe("propaganda_budget", 0.0)
         self.model._propaganda_budget = prop  # expose for media scapegoating
-        if prop > 0 and self.tax_revenue > 0:
+        if prop > 0 and self._available_budget() > 0:
             prop_cost = prop * 1.5
-            paid_p = min(prop_cost, self.tax_revenue); self.tax_revenue -= paid_p
+            paid_p = min(prop_cost, self._available_budget()); self._spend(paid_p)
             ratio_p = paid_p / max(prop_cost, 1e-9)
             # Directly suppress conflict grid
             if hasattr(self.model, 'conflict_grid'):
@@ -790,8 +843,8 @@ class PlannerAgent(Agent):
 
     def get_policy_snapshot(self):
         snap = dict(self.policy); snap["objective_value"] = self.last_objective_value
-        snap["tax_revenue_pool"] = self.tax_revenue; snap["es_sigma"] = self._es.sigma
-        snap["total_updates"] = self._total_updates; return snap
+        snap["tax_revenue_pool"] = self.tax_revenue; snap["debt"] = self.debt
+        snap["es_sigma"] = self._es.sigma; snap["total_updates"] = self._total_updates; return snap
 
 def _gini_fast(w):
     w = np.sort(w[w > 0])
