@@ -450,6 +450,9 @@ EH_FORMULA = "@@EH_FORMULA@@"
 ENTREPRENEURSHIP_REQUIRES_INNOVATION = @@ENTREPRENEURSHIP_REQUIRES_INNOVATION@@
 ZOMBIE_FIRM_CLEANUP = @@ZOMBIE_FIRM_CLEANUP@@
 V_MEASURES_TOTAL_EMISSIONS = @@V_MEASURES_TOTAL_EMISSIONS@@
+WORKER_OWNERSHIP = @@WORKER_OWNERSHIP@@
+WORKER_OWNERSHIP_SHARE = @@WORKER_OWNERSHIP_SHARE@@
+MITOSIS_TRIGGER = "@@MITOSIS_TRIGGER@@"
 SEED = @@SEED@@
 N_STEPS = @@N_STEPS@@
 ANIMATE = @@ANIMATE@@
@@ -489,6 +492,14 @@ model.eh_formula = EH_FORMULA
 model.entrepreneurship_requires_innovation = ENTREPRENEURSHIP_REQUIRES_INNOVATION
 model.zombie_firm_cleanup = ZOMBIE_FIRM_CLEANUP
 model.v_measures_total_emissions = V_MEASURES_TOTAL_EMISSIONS
+model.worker_ownership = WORKER_OWNERSHIP
+model.worker_ownership_share = WORKER_OWNERSHIP_SHARE
+model.mitosis_trigger = MITOSIS_TRIGGER
+
+if WORKER_OWNERSHIP:
+    for firm in model.firms:
+        firm.worker_ownership_share = WORKER_OWNERSHIP_SHARE
+        firm.investor_ownership_share = 1.0 - WORKER_OWNERSHIP_SHARE
 
 if not USE_SEVC:
     for firm in model.firms:
@@ -610,6 +621,9 @@ def make_script(condition: Condition, seed: int, n_steps: int,
     s = s.replace("@@ENTREPRENEURSHIP_REQUIRES_INNOVATION@@", str(condition.entrepreneurship_requires_innovation))
     s = s.replace("@@ZOMBIE_FIRM_CLEANUP@@", str(condition.zombie_firm_cleanup))
     s = s.replace("@@V_MEASURES_TOTAL_EMISSIONS@@", str(condition.v_measures_total_emissions))
+    s = s.replace("@@WORKER_OWNERSHIP@@", str(condition.worker_ownership))
+    s = s.replace("@@WORKER_OWNERSHIP_SHARE@@", str(condition.worker_ownership_share))
+    s = s.replace("@@MITOSIS_TRIGGER@@", condition.mitosis_trigger)
     s = s.replace("@@SEED@@", str(seed))
     s = s.replace("@@N_STEPS@@", str(n_steps))
     s = s.replace("@@ANIMATE@@", str(animate))
