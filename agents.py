@@ -1012,14 +1012,16 @@ class FirmAgent(Agent):
         L = max(sum(w.skill for w in self.workers.values()) + worker.skill, 0.01)
         mp = A * 0.65 * (K ** 0.35) * (L ** -0.35) * self.model.economy.prices.get("goods", 1.0)
         if mp < self.offered_wage * 0.5: return
-        # Worker-ownership dilution check (Task 17): workers vote to hire only if
-        # the production gain exceeds the dilution of their ownership dividend.
-        if self.worker_ownership_share >= 0.51 and self.workers and self.profit > 0:
+        # Worker-ownership dilution check (Tasks 17-18): workers vote to hire only if
+        # the production gain exceeds dilution of their ownership dividend.
+        # Sensitivity scales with ownership share; threshold lowered to 0.2x (Task 18).
+        if self.worker_ownership_share >= 0.25 and self.workers and self.profit > 0:
             current_per_worker = self.profit * 0.5 * self.worker_ownership_share / len(self.workers)
             new_per_worker = self.profit * 0.5 * self.worker_ownership_share / (len(self.workers) + 1)
             dilution = current_per_worker - new_per_worker
             marginal_gain = mp - self.offered_wage
-            if marginal_gain < dilution * 0.5:
+            dilution_sensitivity = self.worker_ownership_share * 2.0  # 0.5 at 25%, ~1.02 at 51%, 1.5 at 75%
+            if marginal_gain < dilution * dilution_sensitivity * 0.2:
                 # Flag dilution block for this step; _consider_mitosis converts to step count
                 self._dilution_blocked_this_step = True
                 return

@@ -148,11 +148,26 @@ C28 = Condition("C28_worker_owned_captured", "Worker-owned 51/49, captured media
                 mitosis_trigger="dilution")
 WORKER_OWNED_CONDITIONS = [C27, C28]
 
+# Worker Ownership Dose-Response (C29-C30)
+C29 = Condition("C29_worker_owned_25_democratic", "Worker-owned 25% minority, clean democracy", "PLANNER_SEVC", True, True, 0.1, True, True, "democratic",
+                election_weight=1.0, production_aware_S_pop=True,
+                capture_normalization="ema", government_broadcaster=True, eh_formula="paper",
+                entrepreneurship_requires_innovation=True, zombie_firm_cleanup=True, v_measures_total_emissions=True,
+                worker_ownership=True, worker_ownership_share=0.25,
+                mitosis_trigger="dilution")
+C30 = Condition("C30_worker_owned_75_democratic", "Worker-owned 75% supermajority, clean democracy", "PLANNER_SEVC", True, True, 0.1, True, True, "democratic",
+                election_weight=1.0, production_aware_S_pop=True,
+                capture_normalization="ema", government_broadcaster=True, eh_formula="paper",
+                entrepreneurship_requires_innovation=True, zombie_firm_cleanup=True, v_measures_total_emissions=True,
+                worker_ownership=True, worker_ownership_share=0.75,
+                mitosis_trigger="dilution")
+DOSE_RESPONSE_CONDITIONS = [C29, C27, C30]  # ordered 25% → 51% → 75% for dose-response
+
 # Full default set (latest structural conditions)
 DEFAULT_CONDITIONS = [C23, C24, C25, C26]
 
 # All conditions combined
-ALL_CONDITIONS = ARCH_CONDITIONS + [C9, C10, C11] + RESP_CONDITIONS + PA_CONDITIONS + [C19, C20] + MITOSIS_CONDITIONS + EH_CONDITIONS + STRUCTURAL_CONDITIONS + WORKER_OWNED_CONDITIONS
+ALL_CONDITIONS = ARCH_CONDITIONS + [C9, C10, C11] + RESP_CONDITIONS + PA_CONDITIONS + [C19, C20] + MITOSIS_CONDITIONS + EH_CONDITIONS + STRUCTURAL_CONDITIONS + WORKER_OWNED_CONDITIONS + [C29, C30]
 
 # Test2: vanilla vs full stack
 TEST2_CONDITIONS = [
@@ -182,6 +197,7 @@ PRESETS = {
     "eh":          {"conditions": EH_CONDITIONS,          "seeds": [42, 137, 256, 389, 501, 623, 777, 888], "steps": 3000, "output_dir": "results/epistemic_health"},
     "structural":  {"conditions": STRUCTURAL_CONDITIONS,  "seeds": [42, 137, 256, 389, 501, 623, 777, 888], "steps": 3000, "output_dir": "results/structural"},
     "worker_owned": {"conditions": WORKER_OWNED_CONDITIONS, "seeds": [42, 137, 256, 389, 501, 623, 777, 888], "steps": 3000, "output_dir": "results/worker_owned"},
+    "dose_response": {"conditions": DOSE_RESPONSE_CONDITIONS, "seeds": [42, 137, 256, 389, 501, 623, 777, 888], "steps": 3000, "output_dir": "results/dose_response"},
     "comparison":  {"conditions": COMPARISON_CONDITIONS,  "seeds": [42, 137, 2024],                         "steps": 3000, "output_dir": "results/comparison"},
 }
 

@@ -306,21 +306,29 @@ def sustainable_choose_strategy(firm: "FirmAgent") -> str:
         elif floor_dim == 'S':
             context["innovate"] *= (1.0 + 1.5 * urgency)
 
-    # Worker-controlled strategy overrides (Task 17): in 51%+ worker-owned firms,
-    # workers suppress extractive strategies and boost growth/welfare strategies.
-    if getattr(firm, 'worker_ownership_share', 0.0) >= 0.51:
-        # Suppress strategies that harm workers
-        context["cut_wages"] = min(context.get("cut_wages", 0.1), 0.01)
-        context["downsize"] = min(context.get("downsize", 0.1), 0.05)
-        context["capture_media"] = min(context.get("capture_media", 0.1), 0.01)
-        context["form_cartel"] = min(context.get("form_cartel", 0.3), 0.05)
-        context["pollute_more"] = min(context.get("pollute_more", 0.3), 0.05)
+    # Worker-controlled strategy overrides (Tasks 17-18): strength scales with
+    # ownership share. Majority (>=51%) gets full control; minority (>=25%) gets
+    # partial influence proportional to share.
+    wo_share = getattr(firm, 'worker_ownership_share', 0.0)
+    if wo_share >= 0.51:
+        override_strength = 1.0   # majority control: full overrides
+    elif wo_share >= 0.25:
+        override_strength = 0.4   # significant minority: partial influence
+    else:
+        override_strength = 0.0
+    if override_strength > 0.0:
+        # Suppress strategies that harm workers (scaled by control strength)
+        context["cut_wages"] *= max(0.01, 1.0 - 0.99 * override_strength)
+        context["downsize"] *= max(0.05, 1.0 - 0.95 * override_strength)
+        context["capture_media"] *= max(0.01, 1.0 - 0.99 * override_strength)
+        context["form_cartel"] *= max(0.05, 1.0 - 0.95 * override_strength)
+        context["pollute_more"] *= max(0.05, 1.0 - 0.95 * override_strength)
         # Boost strategies that benefit workers as co-owners
-        context["raise_wages"] *= 2.0
-        context["invest_capital"] *= 1.5
-        context["innovate"] *= 2.0
-        context["hire"] *= 1.5
-        context["clean_up"] *= 1.5
+        context["raise_wages"] *= 1.0 + 1.0 * override_strength
+        context["invest_capital"] *= 1.0 + 0.5 * override_strength
+        context["innovate"] *= 1.0 + 1.0 * override_strength
+        context["hire"] *= 1.0 + 0.5 * override_strength
+        context["clean_up"] *= 1.0 + 0.5 * override_strength
 
     strategy_scores = {}
     for action, weight in firm.strategy_weights.items():
