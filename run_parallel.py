@@ -167,9 +167,9 @@ DOSE_RESPONSE_CONDITIONS = [C29, C27, C30]  # ordered 25% → 51% → 75% for do
 
 # Uncapped Planner Instruments (C31-C32)
 _SHARED_PLANNER_KWARGS = dict(
-    election_weight=1.0, production_aware_S_pop=True,
+    production_aware_S_pop=False,
     capture_normalization="ema", government_broadcaster=True, eh_formula="paper",
-    entrepreneurship_requires_innovation=True, zombie_firm_cleanup=True, v_measures_total_emissions=True,
+    entrepreneurship_requires_innovation=False, zombie_firm_cleanup=True, v_measures_total_emissions=True,
 )
 C31 = Condition("C31_capped_planner", "Capped planner instruments (baseline)", "TOPO_X", True, True, 0.2, True, True, "democratic",
                 election_weight=2.0, instrument_caps="standard", deficit_spending=False, **_SHARED_PLANNER_KWARGS)
