@@ -171,11 +171,15 @@ _SHARED_PLANNER_KWARGS = dict(
     capture_normalization="ema", government_broadcaster=True, eh_formula="paper",
     entrepreneurship_requires_innovation=True, zombie_firm_cleanup=True, v_measures_total_emissions=True,
 )
-C31 = Condition("C31_capped_planner", "Capped planner instruments (baseline)", "PLANNER_SEVC", True, True, 0.1, True, True, "democratic",
+C31 = Condition("C31_capped_planner", "Capped planner instruments (baseline)", "TOPO_X", True, True, 0.1, True, True, "democratic",
                 instrument_caps="standard", deficit_spending=False, **_SHARED_PLANNER_KWARGS)
-C32 = Condition("C32_uncapped_planner", "Uncapped planner instruments + deficit", "PLANNER_SEVC", True, True, 0.1, True, True, "democratic",
+C32 = Condition("C32_uncapped_planner", "Uncapped planner instruments + deficit", "TOPO_X", True, True, 0.1, True, True, "democratic",
                 instrument_caps="uncapped", deficit_spending=True, **_SHARED_PLANNER_KWARGS)
-UNCAPPED_CONDITIONS = [C31, C32]
+C33 = Condition("C33_nash_uncapped_planner", "Uncapped planner instruments + deficit", "NASH", True, True, 0.1, True, True, "democratic",
+                instrument_caps="uncapped", deficit_spending=True, **_SHARED_PLANNER_KWARGS)
+C34 = Condition("C34_sum_uncapped_planner", "Uncapped planner instruments + deficit", "SUM_RAW", True, True, 0.1, True, True, "democratic",
+                instrument_caps="uncapped", deficit_spending=True, **_SHARED_PLANNER_KWARGS)
+UNCAPPED_CONDITIONS = [C31, C32, C33, C34]
 
 # Full default set (latest structural conditions)
 DEFAULT_CONDITIONS = [C23, C24, C25, C26]
