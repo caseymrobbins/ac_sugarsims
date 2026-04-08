@@ -200,13 +200,13 @@ COMPARISON_CONDITIONS = [
 ]
 
 # Bottleneck Regulation Experiment (Hypothesis test)
-B1 = Condition("B1_baseline_no_reg", "Baseline (no bottleneck regulation)", "PLANNER_SEVC",
+B1 = Condition("B1_baseline_no_reg", "Baseline (no bottleneck regulation)", "NASH_MIN",
                True, True, 0.1, True, True, "democratic", election_weight=1.0,
                bottleneck_policy="off")
-B2 = Condition("B2_bottleneck_reg", "Bottleneck regulation enabled", "PLANNER_SEVC",
+B2 = Condition("B2_bottleneck_reg", "Bottleneck regulation enabled", "NASH_MIN",
                True, True, 0.1, True, True, "democratic", election_weight=1.0,
                bottleneck_policy="enabled")
-B3 = Condition("B3_bottleneck_aggressive", "Aggressive anti-bottleneck policy", "PLANNER_SEVC",
+B3 = Condition("B3_bottleneck_aggressive", "Aggressive anti-bottleneck policy", "NASH_MIN",
                True, True, 0.1, True, True, "democratic", election_weight=1.0,
                bottleneck_policy="aggressive", bottleneck_dynamic_capture=True)
 BOTTLENECK_CONDITIONS = [B1, B2, B3]
