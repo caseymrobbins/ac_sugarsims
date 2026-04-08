@@ -228,7 +228,7 @@ PRESETS = {
     "dose_response": {"conditions": DOSE_RESPONSE_CONDITIONS, "seeds": [42, 137, 256, 389, 501, 623, 777, 888], "steps": 3000, "output_dir": "results/dose_response"},
     "uncapped":    {"conditions": UNCAPPED_CONDITIONS,    "seeds": [42, 137, 256, 389, 501, 623, 777, 888], "steps": 3000, "output_dir": "results/uncapped"},
     "comparison":  {"conditions": COMPARISON_CONDITIONS,  "seeds": [42, 137, 2024],                         "steps": 3000, "output_dir": "results/comparison"},
-    "bottleneck":  {"conditions": BOTTLENECK_CONDITIONS,  "seeds": list(range(1, 201)),                     "steps": 1500, "output_dir": "results/bottleneck_regulation"},
+    "bottleneck":  {"conditions": BOTTLENECK_CONDITIONS,  "seeds": [42, 137, 256, 389, 501, 623, 777, 888], "steps": 1500, "output_dir": "results/bottleneck_regulation"},
 }
 
 
