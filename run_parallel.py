@@ -211,6 +211,24 @@ B3 = Condition("B3_bottleneck_aggressive", "Aggressive anti-bottleneck policy", 
                bottleneck_policy="aggressive", bottleneck_dynamic_capture=True)
 BOTTLENECK_CONDITIONS = [B1, B2, B3]
 
+# Focused BICF sanity-test condition (single-condition smoke preset)
+BICF_TEST_CONDITIONS = [
+    Condition(
+        "BICF_test_condition",
+        "BICF qualification stress test",
+        "PLANNER_SEVC",
+        True,
+        True,
+        0.1,
+        True,
+        True,
+        "democratic",
+        election_weight=1.0,
+        bottleneck_policy="enabled",
+        bottleneck_dynamic_capture=True,
+    )
+]
+
 
 # ── Preset definitions ──────────────────────────────────────────
 
@@ -229,6 +247,7 @@ PRESETS = {
     "uncapped":    {"conditions": UNCAPPED_CONDITIONS,    "seeds": [42, 137, 256, 389, 501, 623, 777, 888], "steps": 3000, "output_dir": "results/uncapped"},
     "comparison":  {"conditions": COMPARISON_CONDITIONS,  "seeds": [42, 137, 2024],                         "steps": 3000, "output_dir": "results/comparison"},
     "bottleneck":  {"conditions": BOTTLENECK_CONDITIONS,  "seeds": [42, 137, 256, 389, 501, 623, 777, 888], "steps": 1500, "output_dir": "results/bottleneck_regulation"},
+    "bicf_test":   {"conditions": BICF_TEST_CONDITIONS,   "seeds": [42, 137, 256],                          "steps": 500,  "output_dir": "results/bicf_test"},
 }
 
 
