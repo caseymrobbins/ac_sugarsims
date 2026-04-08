@@ -70,6 +70,8 @@ class Condition:
     mitosis_trigger: str = "standard"     # "standard" | "dilution"
     instrument_caps: str = "standard"     # Task 19: "standard" | "uncapped"
     deficit_spending: bool = False        # Task 19: allow debt-financed planner spending
+    bottleneck_policy: str = "off"        # off | enabled | aggressive
+    bottleneck_dynamic_capture: bool = False
 
 
 # ── All conditions ──────────────────────────────────────────────
@@ -197,6 +199,18 @@ COMPARISON_CONDITIONS = [
     Condition("TOPO_MIN", "Topology + min-gate HI",       "TOPO_MIN", True, True, 0.1, True,  True,  "democratic"),
 ]
 
+# Bottleneck Regulation Experiment (Hypothesis test)
+B1 = Condition("B1_baseline_no_reg", "Baseline (no bottleneck regulation)", "PLANNER_SEVC",
+               True, True, 0.1, True, True, "democratic", election_weight=1.0,
+               bottleneck_policy="off")
+B2 = Condition("B2_bottleneck_reg", "Bottleneck regulation enabled", "PLANNER_SEVC",
+               True, True, 0.1, True, True, "democratic", election_weight=1.0,
+               bottleneck_policy="enabled")
+B3 = Condition("B3_bottleneck_aggressive", "Aggressive anti-bottleneck policy", "PLANNER_SEVC",
+               True, True, 0.1, True, True, "democratic", election_weight=1.0,
+               bottleneck_policy="aggressive", bottleneck_dynamic_capture=True)
+BOTTLENECK_CONDITIONS = [B1, B2, B3]
+
 
 # ── Preset definitions ──────────────────────────────────────────
 
@@ -214,6 +228,7 @@ PRESETS = {
     "dose_response": {"conditions": DOSE_RESPONSE_CONDITIONS, "seeds": [42, 137, 256, 389, 501, 623, 777, 888], "steps": 3000, "output_dir": "results/dose_response"},
     "uncapped":    {"conditions": UNCAPPED_CONDITIONS,    "seeds": [42, 137, 256, 389, 501, 623, 777, 888], "steps": 3000, "output_dir": "results/uncapped"},
     "comparison":  {"conditions": COMPARISON_CONDITIONS,  "seeds": [42, 137, 2024],                         "steps": 3000, "output_dir": "results/comparison"},
+    "bottleneck":  {"conditions": BOTTLENECK_CONDITIONS,  "seeds": list(range(1, 201)),                     "steps": 1500, "output_dir": "results/bottleneck_regulation"},
 }
 
 
@@ -246,6 +261,16 @@ def configure_model(model, condition: Condition):
     model.mitosis_trigger = condition.mitosis_trigger
     model.instrument_caps = condition.instrument_caps
     model.deficit_spending = condition.deficit_spending
+    model.bottleneck_regulation_policy = condition.bottleneck_policy
+    model.bottleneck_dynamic_capture = condition.bottleneck_dynamic_capture
+    if condition.bottleneck_policy == "aggressive":
+        model.max_profit_margin_cap = 0.10
+        model.bottleneck_open_access_bonus = 0.10
+        model.bottleneck_breakup_threshold = 25
+    elif condition.bottleneck_policy == "enabled":
+        model.max_profit_margin_cap = 0.15
+        model.bottleneck_open_access_bonus = 0.05
+        model.bottleneck_breakup_threshold = 50
 
     # Apply worker ownership to all existing firms
     if condition.worker_ownership:
@@ -444,6 +469,7 @@ if hasattr(planner_mod, '_get_horizon_index'):
 # -- Config (injected) --
 
 COND_NAME = "@@NAME@@"
+COND_LABEL = "@@LABEL@@"
 OBJECTIVE = "@@OBJECTIVE@@"
 USE_SEVC = @@USE_SEVC@@
 USE_INNOVATION = @@USE_INNOVATION@@
@@ -472,6 +498,8 @@ WORKER_OWNERSHIP_SHARE = @@WORKER_OWNERSHIP_SHARE@@
 MITOSIS_TRIGGER = "@@MITOSIS_TRIGGER@@"
 INSTRUMENT_CAPS = "@@INSTRUMENT_CAPS@@"
 DEFICIT_SPENDING = @@DEFICIT_SPENDING@@
+BOTTLENECK_POLICY = "@@BOTTLENECK_POLICY@@"
+BOTTLENECK_DYNAMIC_CAPTURE = @@BOTTLENECK_DYNAMIC_CAPTURE@@
 SEED = @@SEED@@
 N_STEPS = @@N_STEPS@@
 ANIMATE = @@ANIMATE@@
@@ -516,6 +544,16 @@ model.worker_ownership_share = WORKER_OWNERSHIP_SHARE
 model.mitosis_trigger = MITOSIS_TRIGGER
 model.instrument_caps = INSTRUMENT_CAPS
 model.deficit_spending = DEFICIT_SPENDING
+model.bottleneck_regulation_policy = BOTTLENECK_POLICY
+model.bottleneck_dynamic_capture = BOTTLENECK_DYNAMIC_CAPTURE
+if BOTTLENECK_POLICY == "aggressive":
+    model.max_profit_margin_cap = 0.10
+    model.bottleneck_open_access_bonus = 0.10
+    model.bottleneck_breakup_threshold = 25
+elif BOTTLENECK_POLICY == "enabled":
+    model.max_profit_margin_cap = 0.15
+    model.bottleneck_open_access_bonus = 0.05
+    model.bottleneck_breakup_threshold = 50
 
 if WORKER_OWNERSHIP:
     for firm in model.firms:
@@ -574,6 +612,7 @@ print("done " + "{:.1f}".format(elapsed) + "s")
 os.makedirs(OUTPUT_DIR + "/raw_data", exist_ok=True)
 df = pd.DataFrame(model.metrics_history)
 df["condition"] = COND_NAME
+df["condition_label"] = COND_LABEL
 df["objective"] = OBJECTIVE
 df["use_sevc"] = USE_SEVC
 df["use_innovation"] = USE_INNOVATION
@@ -582,6 +621,7 @@ df["trust_noise"] = TRUST_NOISE
 df["use_hi"] = USE_HI
 df["use_firm_hi"] = USE_FIRM_HI
 df["gov_type"] = GOV_TYPE
+df["bottleneck_policy"] = BOTTLENECK_POLICY
 df["seed"] = SEED
 outpath = OUTPUT_DIR + "/raw_data/" + COND_NAME + "_seed" + str(SEED) + ".parquet"
 df.to_parquet(outpath, index=False)
@@ -619,6 +659,7 @@ def make_script(condition: Condition, seed: int, n_steps: int,
     s = SCRIPT_TEMPLATE
     s = s.replace("@@CWD@@", _SCRIPT_DIR)
     s = s.replace("@@NAME@@", condition.name)
+    s = s.replace("@@LABEL@@", condition.label)
     s = s.replace("@@OBJECTIVE@@", condition.objective)
     s = s.replace("@@USE_SEVC@@", str(condition.use_sevc))
     s = s.replace("@@USE_INNOVATION@@", str(condition.use_sevc))  # innovation tracks SEVC
@@ -647,6 +688,8 @@ def make_script(condition: Condition, seed: int, n_steps: int,
     s = s.replace("@@MITOSIS_TRIGGER@@", condition.mitosis_trigger)
     s = s.replace("@@INSTRUMENT_CAPS@@", condition.instrument_caps)
     s = s.replace("@@DEFICIT_SPENDING@@", str(condition.deficit_spending))
+    s = s.replace("@@BOTTLENECK_POLICY@@", condition.bottleneck_policy)
+    s = s.replace("@@BOTTLENECK_DYNAMIC_CAPTURE@@", str(condition.bottleneck_dynamic_capture))
     s = s.replace("@@SEED@@", str(seed))
     s = s.replace("@@N_STEPS@@", str(n_steps))
     s = s.replace("@@ANIMATE@@", str(animate))
@@ -775,6 +818,113 @@ def print_comparison(output_dir):
     print("Saved: " + summary_dir + "/all_data.parquet")
 
 
+def export_episode_and_overall_summaries(output_dir):
+    import pandas as pd
+    from metrics import episode_summary
+
+    raw_dir = output_dir + "/raw_data"
+    if not os.path.isdir(raw_dir):
+        return
+    files = sorted(f for f in os.listdir(raw_dir) if f.endswith(".parquet"))
+    if not files:
+        return
+
+    episodes = []
+    for f in files:
+        df = pd.read_parquet(raw_dir + "/" + f)
+        if df.empty:
+            continue
+        cond = str(df["condition"].iloc[0]) if "condition" in df.columns else f
+        label = str(df["condition_label"].iloc[0]) if "condition_label" in df.columns else cond
+        seed = int(df["seed"].iloc[0]) if "seed" in df.columns else -1
+        metrics_hist = df.to_dict("records")
+        ep = episode_summary(metrics_hist)
+        ep["condition"] = cond
+        ep["condition_label"] = label
+        ep["seed"] = seed
+        episodes.append(ep)
+
+    if not episodes:
+        return
+
+    ep_df = pd.DataFrame(episodes)
+    ep_out = output_dir + "/episode_summaries.csv"
+    ep_df.to_csv(ep_out, index=False)
+    print("Saved: " + ep_out)
+
+    core = [
+        "total_production", "tech_frontier", "mean_wage", "employment_rate", "n_firms",
+        "hhi", "top_firm_share", "mean_capture_ratio", "total_rent_collected",
+        "all_gini", "worker_gini",
+        "mean_trust", "legitimacy_mean", "identity_conflict_index", "epistemic_health_mean",
+        "frac_monopoly", "frac_bottleneck"
+    ]
+    rows = []
+    for cond, grp in ep_df.groupby("condition"):
+        row = {"condition": cond, "n_seeds": int(len(grp))}
+        for k in core:
+            if k in grp.columns:
+                row[k + "_mean"] = float(grp[k].mean())
+                row[k + "_std"] = float(grp[k].std())
+        rows.append(row)
+    overall = pd.DataFrame(rows).sort_values("condition")
+    overall_out = output_dir + "/overall_run_summary.csv"
+    overall.to_csv(overall_out, index=False)
+    print("Saved: " + overall_out)
+
+
+def generate_bottleneck_diagnostics(output_dir):
+    import pandas as pd
+    import matplotlib.pyplot as plt
+
+    raw_dir = output_dir + "/raw_data"
+    if not os.path.isdir(raw_dir):
+        return
+    files = sorted(f for f in os.listdir(raw_dir) if f.endswith(".parquet"))
+    if not files:
+        return
+    all_data = pd.concat([pd.read_parquet(raw_dir + "/" + f) for f in files], ignore_index=True)
+    if all_data.empty:
+        return
+
+    plot_dir = output_dir + "/diagnostic_plots"
+    os.makedirs(plot_dir, exist_ok=True)
+
+    def _agg(x, y):
+        cols = ["condition", x, y]
+        d = all_data[cols].dropna()
+        if d.empty:
+            return None
+        return d.groupby("condition", as_index=False)[[x, y]].mean()
+
+    specs = [
+        ("hhi", "total_production", "hhi_vs_production.png", "HHI vs Production"),
+        ("monopoly_detected", "all_gini", "monopoly_fraction_vs_inequality.png", "Monopoly Fraction vs Inequality"),
+        ("n_firms", "all_gini", "firm_count_vs_inequality.png", "Firm Count vs Inequality"),
+        ("mean_capture_ratio", "population_growth_rate", "rent_extraction_vs_growth.png", "Rent Extraction vs Growth"),
+        ("all_gini", "population_growth_rate", "growth_vs_inequality_phase_map.png", "Growth vs Inequality Phase Map"),
+    ]
+
+    for x, y, fname, title in specs:
+        if x not in all_data.columns or y not in all_data.columns:
+            continue
+        d = _agg(x, y)
+        if d is None or d.empty:
+            continue
+        fig, ax = plt.subplots(figsize=(7, 5))
+        for _, r in d.iterrows():
+            ax.scatter(r[x], r[y], s=80, label=r["condition"])
+            ax.annotate(r["condition"], (r[x], r[y]), xytext=(4, 4), textcoords="offset points", fontsize=8)
+        ax.set_xlabel(x)
+        ax.set_ylabel(y)
+        ax.set_title(title)
+        ax.grid(alpha=0.2)
+        fig.tight_layout()
+        fig.savefig(plot_dir + "/" + fname, dpi=150)
+        plt.close(fig)
+        print("Saved: " + plot_dir + "/" + fname)
+
+
 # ── Main ────────────────────────────────────────────────────────
 
 def main():
@@ -853,6 +1003,8 @@ def main():
         if cond.entrepreneurship_requires_innovation: flags.append("InnoReq")
         if cond.zombie_firm_cleanup: flags.append("Zombie")
         if cond.v_measures_total_emissions: flags.append("VTotal")
+        if cond.bottleneck_policy != "off": flags.append("Bottleneck=" + cond.bottleneck_policy)
+        if cond.bottleneck_dynamic_capture: flags.append("DynCapture")
         print("  " + cond.name + ": " + cond.objective + " [" + ", ".join(flags) + "]")
     print()
 
@@ -885,6 +1037,8 @@ def main():
     pd.DataFrame(results).to_csv(output_dir + "/run_log.csv", index=False)
 
     print_comparison(output_dir)
+    export_episode_and_overall_summaries(output_dir)
+    generate_bottleneck_diagnostics(output_dir)
 
 
 if __name__ == "__main__":
