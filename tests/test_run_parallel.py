@@ -41,6 +41,12 @@ class DummyModel:
 
 
 class TestRunParallelConfig(unittest.TestCase):
+    def test_bicf_test_preset_registered(self):
+        self.assertIn("bicf_test", PRESETS)
+        preset = PRESETS["bicf_test"]
+        self.assertEqual(len(preset["conditions"]), 1)
+        self.assertEqual(preset["conditions"][0].name, "BICF_test_condition")
+
     def test_bottleneck_preset_registered(self):
         self.assertIn("bottleneck", PRESETS)
         preset = PRESETS["bottleneck"]
