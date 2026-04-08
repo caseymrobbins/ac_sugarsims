@@ -33,7 +33,18 @@ import multiprocessing
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import dataclass, fields
 
-import numpy as np
+try:
+    import numpy as np
+except ImportError:
+    import types as _np_types, sys as _np_sys
+    np = _np_types.ModuleType("numpy")
+    class _NpRng:
+        def shuffle(self, seq): return None
+    class _NpRandom:
+        @staticmethod
+        def default_rng(_seed=None): return _NpRng()
+    np.random = _NpRandom()
+    _np_sys.modules["numpy"] = np
 
 
 # ── Condition dataclass ─────────────────────────────────────────
@@ -1060,5 +1071,349 @@ def main():
     generate_bottleneck_diagnostics(output_dir)
 
 
+# ── Inline test suite ───────────────────────────────────────────
+# Run with:  python run_parallel.py --test
+
+import sys as _sys
+import types as _types
+import unittest as _unittest
+from types import SimpleNamespace as _SimpleNamespace
+
+# Provide a tiny numpy stub so the suite runs without a real numpy install.
+def _ensure_numpy_stub():
+    if "numpy" not in _sys.modules or not hasattr(_sys.modules["numpy"], "array"):
+        fake = _types.ModuleType("numpy")
+        class _Rng:
+            def shuffle(self, seq): return None
+        class _Random:
+            @staticmethod
+            def default_rng(_seed=None): return _Rng()
+        fake.random = _Random()
+        _sys.modules["numpy"] = fake
+
+
+class _DummyFirm:
+    def __init__(self):
+        self.worker_ownership_share = 0.0
+        self.investor_ownership_share = 1.0
+        self.is_sevc = True
+        self.strategy_weights = {"expand": 0.6, "innovate": 0.4}
+        self.tech_level = 1.2
+
+
+class _DummyModel:
+    def __init__(self, n_firms=3):
+        self.firms = [_DummyFirm() for _ in range(n_firms)]
+        self.schedule = _SimpleNamespace(agents=[])
+        import numpy as _np
+        self.rng = _np.random.default_rng(123)
+
+
+# ── run_parallel condition / preset tests ───────────────────────
+
+class TestRunParallelConditions(_unittest.TestCase):
+    def test_bicf_test_preset_registered(self):
+        self.assertIn("bicf_test", PRESETS)
+        preset = PRESETS["bicf_test"]
+        self.assertEqual(len(preset["conditions"]), 1)
+        self.assertEqual(preset["conditions"][0].name, "BICF_test_condition")
+
+    def test_bottleneck_preset_registered(self):
+        self.assertIn("bottleneck", PRESETS)
+        names = [c.name for c in PRESETS["bottleneck"]["conditions"]]
+        self.assertEqual(names, ["B1_baseline_no_reg", "B2_bottleneck_reg", "B3_bottleneck_aggressive"])
+
+    def test_aggressive_bottleneck_policy_sets_caps(self):
+        model = _DummyModel()
+        m = configure_model(model, B3)
+        self.assertEqual(m.bottleneck_regulation_policy, "aggressive")
+        self.assertEqual(m.max_profit_margin_cap, 0.10)
+        self.assertEqual(m.bottleneck_open_access_bonus, 0.10)
+        self.assertEqual(m.bottleneck_breakup_threshold, 25)
+
+    def test_enabled_bottleneck_policy_sets_moderate_caps(self):
+        model = _DummyModel()
+        m = configure_model(model, B2)
+        self.assertEqual(m.bottleneck_regulation_policy, "enabled")
+        self.assertEqual(m.max_profit_margin_cap, 0.15)
+        self.assertEqual(m.bottleneck_open_access_bonus, 0.05)
+        self.assertEqual(m.bottleneck_breakup_threshold, 50)
+
+    def test_off_policy_sets_no_caps(self):
+        model = _DummyModel()
+        m = configure_model(model, B1)
+        self.assertEqual(m.bottleneck_regulation_policy, "off")
+        self.assertFalse(hasattr(m, "max_profit_margin_cap"))
+
+    def test_worker_ownership_applies_to_existing_firms(self):
+        model = _DummyModel(n_firms=2)
+        cond = Condition(
+            "test_worker_owned", "worker owned", "PLANNER_SEVC",
+            True, True, 0.1, True, True, "democratic",
+            worker_ownership=True, worker_ownership_share=0.75,
+        )
+        m = configure_model(model, cond)
+        for firm in m.firms:
+            self.assertEqual(firm.worker_ownership_share, 0.75)
+            self.assertEqual(firm.investor_ownership_share, 0.25)
+
+    def test_bicf_test_condition_flags(self):
+        cond = PRESETS["bicf_test"]["conditions"][0]
+        self.assertEqual(cond.bottleneck_policy, "enabled")
+        self.assertTrue(cond.bottleneck_dynamic_capture)
+        self.assertTrue(cond.use_sevc)
+        self.assertEqual(cond.objective, "NASH")
+
+    def test_all_preset_conditions_have_valid_bottleneck_policy(self):
+        valid = {"off", "enabled", "aggressive"}
+        for cond in ALL_CONDITIONS + BOTTLENECK_CONDITIONS + BICF_TEST_CONDITIONS:
+            self.assertIn(cond.bottleneck_policy, valid, msg=cond.name)
+
+
+# ── BICF policy-evaluation tests ────────────────────────────────
+
+from bicf import (
+    AcquisitionEvent,
+    EntrantProfile,
+    IndustryProfile,
+    aggregate_improvement,
+    check_supply_chain_neutrality,
+    compute_relative_improvements,
+    evaluate_acquisition_safeguard,
+    evaluate_bicf_qualification,
+    incentive_package,
+    innovation_tier,
+    is_bottleneck_industry,
+    passes_market_participation,
+    required_improvement_threshold,
+    supplier_retaliation_levy,
+)
+
+
+def _capital_industry(**kw):
+    defaults = dict(
+        sector_type="capital_intensive",
+        high_capital_barriers=True,
+        concentrated_market_share=True,
+        chokepoint_infrastructure=True,
+        persistent_rent_extraction=True,
+        low_innovation_rates=False,
+    )
+    defaults.update(kw)
+    return IndustryProfile(**defaults)
+
+
+def _good_entrant(**kw):
+    defaults = dict(
+        incumbent_ownership_share=0.10,
+        sells_to_end_customers=True,
+        price_vs_incumbent_median=0.98,
+        incumbent_linked_revenue_share=0.20,
+        market_share_after_5y=0.03,
+        board_control_by_incumbent=False,
+    )
+    defaults.update(kw)
+    return EntrantProfile(**defaults)
+
+
+class TestBottleneckClassification(_unittest.TestCase):
+    def test_four_signals_qualifies(self):
+        self.assertTrue(is_bottleneck_industry(_capital_industry()))
+
+    def test_five_signals_qualifies(self):
+        self.assertTrue(is_bottleneck_industry(_capital_industry(low_innovation_rates=True)))
+
+    def test_three_signals_does_not_qualify(self):
+        ind = _capital_industry(concentrated_market_share=False, chokepoint_infrastructure=False)
+        self.assertFalse(is_bottleneck_industry(ind))
+
+
+class TestInnovationQualification(_unittest.TestCase):
+    def test_threshold_map(self):
+        self.assertEqual(required_improvement_threshold("capital_intensive"), 0.15)
+        self.assertEqual(required_improvement_threshold("regulated"), 0.20)
+        self.assertEqual(required_improvement_threshold("service_technology"), 0.25)
+
+    def test_unknown_sector_raises(self):
+        with self.assertRaises(ValueError):
+            required_improvement_threshold("unknown")
+
+    def test_aggregate_uses_median(self):
+        improvements = {"cost": 0.20, "energy": 0.15, "emissions": 0.30, "throughput": 0.10, "waste": 0.05}
+        self.assertEqual(aggregate_improvement(improvements), 0.15)
+
+    def test_aggregate_empty(self):
+        self.assertEqual(aggregate_improvement({}), 0.0)
+
+    def test_aggregate_clamps_negatives(self):
+        self.assertEqual(aggregate_improvement({"cost": -0.10, "energy": 0.20}), 0.10)
+
+    def test_tier_assignment(self):
+        self.assertEqual(innovation_tier(0.09), 0)
+        self.assertEqual(innovation_tier(0.10), 1)
+        self.assertEqual(innovation_tier(0.249), 1)
+        self.assertEqual(innovation_tier(0.25), 2)
+
+
+class TestMarketParticipationAndIndependence(_unittest.TestCase):
+    def test_passes_when_all_criteria_met(self):
+        self.assertTrue(passes_market_participation(_good_entrant()))
+
+    def test_fails_excessive_incumbent_ownership(self):
+        self.assertFalse(passes_market_participation(_good_entrant(incumbent_ownership_share=0.21)))
+
+    def test_fails_board_control(self):
+        self.assertFalse(passes_market_participation(_good_entrant(board_control_by_incumbent=True)))
+
+    def test_fails_no_direct_sales(self):
+        self.assertFalse(passes_market_participation(_good_entrant(sells_to_end_customers=False)))
+
+    def test_fails_price_above_median(self):
+        self.assertFalse(passes_market_participation(_good_entrant(price_vs_incumbent_median=1.01)))
+
+    def test_fails_excessive_incumbent_revenue(self):
+        self.assertFalse(passes_market_participation(_good_entrant(incumbent_linked_revenue_share=0.31)))
+
+    def test_fails_insufficient_market_share(self):
+        self.assertFalse(passes_market_participation(_good_entrant(market_share_after_5y=0.019)))
+
+    def test_boundary_market_share_2pct(self):
+        self.assertTrue(passes_market_participation(_good_entrant(market_share_after_5y=0.02)))
+
+
+class TestIncentiveStructure(_unittest.TestCase):
+    def test_not_qualified_no_incentives(self):
+        self.assertFalse(any(incentive_package(2, False).values()))
+
+    def test_tier_zero_no_incentives(self):
+        self.assertFalse(any(incentive_package(0, True).values()))
+
+    def test_tier_one_incentives(self):
+        pkg = incentive_package(1, True)
+        self.assertTrue(pkg["tax_reduction"])
+        self.assertTrue(pkg["regulatory_fast_track"])
+        self.assertFalse(pkg["innovation_grant"])
+        self.assertFalse(pkg["legal_defense"])
+
+    def test_tier_two_incentives(self):
+        pkg = incentive_package(2, True)
+        self.assertTrue(pkg["innovation_grant"])
+        self.assertTrue(pkg["legal_defense"])
+
+
+class TestAcquisitionSafeguards(_unittest.TestCase):
+    def test_compliant_acquisition(self):
+        self.assertTrue(evaluate_acquisition_safeguard(
+            AcquisitionEvent(technology_remains_available=True, technology_suppressed=False)))
+
+    def test_suppressed_fails(self):
+        self.assertFalse(evaluate_acquisition_safeguard(
+            AcquisitionEvent(technology_remains_available=True, technology_suppressed=True)))
+
+    def test_unavailable_fails(self):
+        self.assertFalse(evaluate_acquisition_safeguard(
+            AcquisitionEvent(technology_remains_available=False, technology_suppressed=False)))
+
+
+class TestSupplierRetaliationProtection(_unittest.TestCase):
+    def test_retaliatory_cancellation_levied(self):
+        r = supplier_retaliation_levy(500_000.0, False)
+        self.assertEqual(r["incumbent_tax"], 500_000.0)
+        self.assertEqual(r["entrant_transfer"], 500_000.0)
+
+    def test_legitimate_exemption_no_levy(self):
+        r = supplier_retaliation_levy(500_000.0, True)
+        self.assertEqual(r["incumbent_tax"], 0.0)
+
+    def test_zero_contract_no_levy(self):
+        r = supplier_retaliation_levy(0.0, False)
+        self.assertEqual(r["incumbent_tax"], 0.0)
+
+
+class TestSupplyChainNeutrality(_unittest.TestCase):
+    def test_critical_supplier_denying_access_violates(self):
+        self.assertFalse(check_supply_chain_neutrality(True, True))
+
+    def test_critical_supplier_granting_access_ok(self):
+        self.assertTrue(check_supply_chain_neutrality(True, False))
+
+    def test_non_critical_supplier_may_deny(self):
+        self.assertTrue(check_supply_chain_neutrality(False, True))
+
+
+class TestDynamicBenchmarking(_unittest.TestCase):
+    def test_lower_is_better(self):
+        r = compute_relative_improvements(
+            {"cost": 80.0, "emissions": 150.0},
+            {"cost": 100.0, "emissions": 200.0},
+            lower_is_better={"cost", "emissions"},
+        )
+        self.assertAlmostEqual(r["cost"], 0.20)
+        self.assertAlmostEqual(r["emissions"], 0.25)
+
+    def test_higher_is_better(self):
+        r = compute_relative_improvements(
+            {"throughput": 120.0}, {"throughput": 100.0}, lower_is_better=set()
+        )
+        self.assertAlmostEqual(r["throughput"], 0.20)
+
+    def test_defaults_to_lower_is_better(self):
+        r = compute_relative_improvements({"cost": 80.0}, {"cost": 100.0})
+        self.assertAlmostEqual(r["cost"], 0.20)
+
+    def test_missing_metric_defaults_to_zero_improvement(self):
+        r = compute_relative_improvements({}, {"cost": 100.0})
+        self.assertAlmostEqual(r["cost"], 0.0)
+
+    def test_zero_baseline_skipped(self):
+        r = compute_relative_improvements({"cost": 10.0}, {"cost": 0.0})
+        self.assertNotIn("cost", r)
+
+    def test_dynamic_pipeline_qualifies(self):
+        industry = _capital_industry()
+        entrant_profile = _good_entrant()
+        baseline = {"cost_per_unit": 100.0, "energy_kwh": 500.0, "co2_kg": 200.0}
+        actuals = {"cost_per_unit": 82.0, "energy_kwh": 410.0, "co2_kg": 158.0}
+        improvements = compute_relative_improvements(actuals, baseline)
+        result = evaluate_bicf_qualification(industry, entrant_profile, improvements)
+        self.assertTrue(result["qualified"])
+
+
+class TestEndToEndBICF(_unittest.TestCase):
+    def setUp(self):
+        self.industry = _capital_industry()
+
+    def test_qualified_tier_one_entrant(self):
+        improvements = {"production_cost": 0.18, "energy_efficiency": 0.22,
+                        "emissions": 0.19, "throughput": 0.15, "waste": 0.16}
+        result = evaluate_bicf_qualification(self.industry, _good_entrant(), improvements)
+        self.assertTrue(result["qualified"])
+        self.assertEqual(result["tier"], 1)
+        self.assertTrue(result["incentives"]["tax_reduction"])
+        self.assertFalse(result["incentives"]["innovation_grant"])
+
+    def test_high_gain_entrant_gets_full_incentives(self):
+        improvements = {"cost": 0.30, "energy": 0.28, "emissions": 0.35, "throughput": 0.26}
+        result = evaluate_bicf_qualification(
+            self.industry,
+            _good_entrant(incumbent_ownership_share=0.05, price_vs_incumbent_median=0.90),
+            improvements,
+        )
+        self.assertTrue(result["qualified"])
+        self.assertEqual(result["tier"], 2)
+        self.assertTrue(result["incentives"]["innovation_grant"])
+        self.assertTrue(result["incentives"]["legal_defense"])
+
+    def test_non_bottleneck_does_not_qualify(self):
+        weak = _capital_industry(concentrated_market_share=False, chokepoint_infrastructure=False)
+        result = evaluate_bicf_qualification(weak, _good_entrant(), {"cost": 0.30})
+        self.assertFalse(result["qualified"])
+
+
 if __name__ == "__main__":
-    main()
+    if len(_sys.argv) > 1 and _sys.argv[1] == "--test":
+        _ensure_numpy_stub()
+        _sys.argv = [_sys.argv[0]]   # strip --test so unittest doesn't choke
+        _unittest.main(verbosity=2)
+    else:
+        main()
