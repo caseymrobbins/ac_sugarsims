@@ -794,6 +794,7 @@ class FirmAgent(Agent):
         self.worker_dividend_pool: float = 0.0      # cumulative worker dividends paid
         self.investor_dividend_pool: float = 0.0    # cumulative investor dividends paid
         self._dilution_rejections: int = 0          # consecutive steps where hire was dilution-blocked
+        self.open_access_bonus: float = 0.0         # temporary production bonus under bottleneck regulation
         # Innovation
         init_firm_tech(self)
 
@@ -938,6 +939,10 @@ class FirmAgent(Agent):
         A = 3.0 * self.model.infrastructure_bonus * scale_bonus
         K = max(self.capital_stock, 1.0); L = max(sum(w.skill for w in self.workers.values()), 0.01)
         output = A * (K ** 0.35) * (L ** 0.65)
+        # Bottleneck regulation Mode B: competitors can access neutral infrastructure.
+        if self.open_access_bonus > 0 and self.unique_id != getattr(self.model, "_current_bottleneck_firm_id", None):
+            output *= (1.0 + float(self.open_access_bonus))
+        self.open_access_bonus = 0.0
         # Apply technology multiplier
         output = apply_tech_to_production(self, output)
         price = self.model.economy.prices.get("goods", 1.0)

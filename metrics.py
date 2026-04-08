@@ -212,6 +212,14 @@ def collect_step_metrics(model: "EconomicModel") -> Dict[str, Any]:
     m["monopoly_detected"] = _detect_monopoly(model)
     m["cartel_detected"] = m["n_active_cartels"] > 0
     m["poverty_trap_detected"] = _detect_poverty_trap(worker_w)
+    m["employment_rate"] = 1.0 - m["unemployment_rate"]
+    m["bottleneck_detected"] = bool(getattr(model, "bottleneck_detected", False))
+    m["bottleneck_firm_id"] = getattr(model, "bottleneck_firm_id", None)
+    m["bottleneck_market_share"] = float(getattr(model, "bottleneck_market_share", 0.0))
+    m["bottleneck_duration"] = int(getattr(model, "bottleneck_duration", 0))
+    m["bottleneck_mode"] = getattr(model, "bottleneck_mode", "none")
+    m["bottleneck_breakups"] = int(getattr(model, "bottleneck_breakups", 0))
+    m["total_bottleneck_rent_redistributed"] = float(getattr(model, "total_bottleneck_rent_redistributed", 0.0))
 
     # Skill distribution
     if model.workers:
@@ -792,6 +800,7 @@ def episode_summary(metrics_history: List[Dict]) -> Dict[str, Any]:
         "wealth_power_law_alpha",
         "hhi", "top_firm_share", "n_active_cartels",
         "unemployment_rate", "mean_wage",
+        "employment_rate",
         "total_rent_collected", "total_debt",
         "fraction_in_debt", "debt_gini",
         "agency_floor", "agency_mean", "agency_median", "agency_gini",
@@ -808,6 +817,8 @@ def episode_summary(metrics_history: List[Dict]) -> Dict[str, Any]:
         "n_polluted_cells", "pollution_health_burden",
         "planner_pollution_tax", "planner_cleanup_investment",
         "monopoly_detected", "cartel_detected", "poverty_trap_detected",
+        "bottleneck_detected", "bottleneck_market_share", "bottleneck_duration",
+        "bottleneck_breakups", "total_bottleneck_rent_redistributed",
         "mean_skill", "skill_gini",
         "total_investment", "n_investors", "investment_concentration",
         "total_production", "mean_firm_wage", "total_wages_paid",
@@ -852,6 +863,7 @@ def episode_summary(metrics_history: List[Dict]) -> Dict[str, Any]:
 
     # Emergence fractions
     summary["frac_monopoly"] = float(np.mean([m.get("monopoly_detected", False) for m in metrics_history]))
+    summary["frac_bottleneck"] = float(np.mean([m.get("bottleneck_detected", False) for m in metrics_history]))
     summary["frac_cartel"] = float(np.mean([m.get("cartel_detected", False) for m in metrics_history]))
     summary["frac_poverty_trap"] = float(np.mean([m.get("poverty_trap_detected", False) for m in metrics_history]))
 

@@ -126,6 +126,22 @@ class EconomicModel(Model):
 
         # Metrics history
         self.metrics_history: List[Dict] = []
+        # Bottleneck detection/regulation state
+        self.bottleneck_detected: bool = False
+        self.bottleneck_firm_id: Optional[int] = None
+        self.bottleneck_market_share: float = 0.0
+        self.bottleneck_duration: int = 0
+        self.bottleneck_hhi: float = 0.0
+        self.bottleneck_top_firm_share: float = 0.0
+        self.bottleneck_mode: str = "none"
+        self.bottleneck_regulation_policy: str = "off"  # off | enabled | aggressive
+        self.bottleneck_dynamic_capture: bool = False
+        self.bottleneck_breakup_threshold: int = 50
+        self.bottleneck_open_access_bonus: float = 0.05
+        self.max_profit_margin_cap: float = 0.15
+        self.total_bottleneck_rent_redistributed: float = 0.0
+        self.bottleneck_breakups: int = 0
+        self._current_bottleneck_firm_id: Optional[int] = None
 
         # Animation frame history (lightweight snapshots for visualization)
         self.animation_frames: List[Dict] = []
@@ -344,6 +360,8 @@ class EconomicModel(Model):
         self.economy.service_loans()
         self.economy.update_market_sentiment()
         self._update_market_shares()
+        self._detect_bottleneck()
+        self._apply_bottleneck_regulation()
         self.economy.refresh_trade_network()
 
         # Population management: immigration and firm spawning
@@ -439,6 +457,141 @@ class EconomicModel(Model):
         for f in self.firms:
             if not f.defunct:
                 f.market_share = f.production_this_step / total
+
+    def _detect_bottleneck(self):
+        active_firms = [f for f in self.firms if not f.defunct]
+        self.bottleneck_detected = False
+        self.bottleneck_mode = "none"
+        self._current_bottleneck_firm_id = None
+        if not active_firms:
+            self.bottleneck_firm_id = None
+            self.bottleneck_market_share = 0.0
+            self.bottleneck_hhi = 0.0
+            self.bottleneck_top_firm_share = 0.0
+            self.bottleneck_duration = 0
+            return
+
+        shares = np.array([max(0.0, float(f.market_share)) for f in active_firms], dtype=np.float64)
+        top_idx = int(np.argmax(shares))
+        top_firm = active_firms[top_idx]
+        top_share = float(shares[top_idx]) if len(shares) else 0.0
+        hhi = float(np.sum(shares ** 2))
+        capture_trigger = False
+        if self.bottleneck_dynamic_capture:
+            cap_vals = [float(getattr(f, "capture_ratio", 0.0)) for f in active_firms]
+            capture_trigger = (float(np.mean(cap_vals)) > 0.25) if cap_vals else False
+
+        detected = (top_share > 0.35) or (hhi > 0.25) or (top_share > 0.4) or capture_trigger
+        if detected:
+            if self.bottleneck_firm_id == top_firm.unique_id:
+                self.bottleneck_duration += 1
+            else:
+                self.bottleneck_duration = 1
+            self.bottleneck_detected = True
+            self.bottleneck_firm_id = top_firm.unique_id
+            self._current_bottleneck_firm_id = top_firm.unique_id
+            self.bottleneck_market_share = top_share
+            self.bottleneck_hhi = hhi
+            self.bottleneck_top_firm_share = top_share
+        else:
+            self.bottleneck_firm_id = None
+            self.bottleneck_market_share = 0.0
+            self.bottleneck_hhi = hhi
+            self.bottleneck_top_firm_share = top_share
+            self.bottleneck_duration = 0
+
+    def _apply_bottleneck_regulation(self):
+        self._current_bottleneck_firm_id = self.bottleneck_firm_id if self.bottleneck_detected else None
+        if not self.bottleneck_detected or self.bottleneck_regulation_policy == "off":
+            return
+        bottleneck = next((f for f in self.firms
+                           if (not f.defunct) and f.unique_id == self.bottleneck_firm_id), None)
+        if bottleneck is None:
+            return
+
+        is_aggressive = self.bottleneck_regulation_policy == "aggressive"
+        margin_cap = 0.10 if is_aggressive else self.max_profit_margin_cap
+        open_access_bonus = 0.10 if is_aggressive else self.bottleneck_open_access_bonus
+        breakup_threshold = 25 if is_aggressive else self.bottleneck_breakup_threshold
+
+        # Mode A — Rent cap
+        self.bottleneck_mode = "rent_cap"
+        revenue = max(float(getattr(bottleneck, "revenue", 0.0)), 0.0)
+        current_profit = float(getattr(bottleneck, "profit", 0.0))
+        margin = (current_profit / max(revenue, 1e-9)) if revenue > 0 else 0.0
+        if margin > margin_cap and current_profit > 0 and bottleneck.wealth > 0:
+            capped_profit = margin_cap * revenue
+            excess = max(0.0, current_profit - capped_profit)
+            extraction = min(excess, bottleneck.wealth)
+            if extraction > 0:
+                bottleneck.wealth -= extraction
+                bottleneck.profit -= extraction
+                self.total_bottleneck_rent_redistributed += extraction
+                workers = list(bottleneck.workers.values())
+                wage_pool = extraction * (0.7 if is_aggressive else 0.5)
+                if workers and wage_pool > 0:
+                    per_worker = wage_pool / len(workers)
+                    for w in workers:
+                        w.wealth += per_worker
+                        w.income_last_step += per_worker
+                goods_pool = extraction - wage_pool
+                if goods_pool > 0:
+                    reduction = min(0.20 if is_aggressive else 0.10, goods_pool / max(revenue, 1.0))
+                    self.economy.prices["goods"] = max(0.10, self.economy.prices.get("goods", 1.0) * (1.0 - reduction))
+
+        # Mode B — Open access
+        self.bottleneck_mode = "open_access"
+        for f in self.firms:
+            if f.defunct or f.unique_id == bottleneck.unique_id:
+                continue
+            f.open_access_bonus = open_access_bonus
+
+        # Mode C — Structural breakup
+        if self.bottleneck_duration > breakup_threshold:
+            self.bottleneck_mode = "breakup"
+            self._break_up_firm(bottleneck, n_parts=3)
+            self.bottleneck_duration = 0
+            self.bottleneck_detected = False
+            self.bottleneck_firm_id = None
+            self._current_bottleneck_firm_id = None
+
+    def _break_up_firm(self, firm: FirmAgent, n_parts: int = 3):
+        if firm.defunct or n_parts < 2:
+            return
+        workers = list(firm.workers.values())
+        total_parts = max(2, int(n_parts))
+        wealth_share = max(firm.wealth, 0.0) / total_parts
+        cap_share = max(firm.capital_stock, 0.0) / total_parts
+
+        # Reduce incumbent and spawn new competitors.
+        firm.wealth = wealth_share
+        firm.capital_stock = cap_share
+        firm.market_share = 1.0 / total_parts
+        firm.workers.clear()
+
+        spawned = []
+        for _ in range(total_parts - 1):
+            nf = FirmAgent(model=self, capital=wealth_share)
+            nf.capital_stock = cap_share
+            nf.offered_wage = firm.offered_wage
+            nf.pollution_factor = firm.pollution_factor
+            nf.is_sevc = getattr(firm, "is_sevc", True)
+            nf.worker_ownership_share = getattr(firm, "worker_ownership_share", 0.0)
+            nf.investor_ownership_share = getattr(firm, "investor_ownership_share", 1.0)
+            pos = self._random_cell()
+            self.grid.place_agent(nf, pos)
+            self.firms.append(nf)
+            self._id_cache[nf.unique_id] = nf
+            spawned.append(nf)
+
+        buckets = [firm] + spawned
+        for i, w in enumerate(workers):
+            tgt = buckets[i % len(buckets)]
+            tgt.workers[w.unique_id] = w
+            w.employed = True
+            w.employer_id = tgt.unique_id
+            w.wage = tgt.offered_wage
+        self.bottleneck_breakups += 1
 
     def next_cartel_id(self) -> int:
         self._cartel_counter += 1
