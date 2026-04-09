@@ -211,15 +211,15 @@ COMPARISON_CONDITIONS = [
 ]
 
 # Bottleneck Regulation Experiment (Hypothesis test)
-B1 = Condition("B1_baseline_no_reg", "Baseline (no bottleneck regulation)", "NASH_MIN",
+B1 = Condition("B1_baseline_no_reg", "Baseline (no bottleneck regulation)", "NASH",
                True, True, 0.1, True, True, "democratic", election_weight=1.0,
-               bottleneck_policy="off")
-B2 = Condition("B2_bottleneck_reg", "Bottleneck regulation enabled", "NASH_MIN",
+               bottleneck_policy="off", instrument_caps="uncapped", deficit_spending=True, **_SHARED_PLANNER_KWARGS)
+B2 = Condition("B2_bottleneck_reg", "Bottleneck regulation enabled", "NASH",
                True, True, 0.1, True, True, "democratic", election_weight=1.0,
-               bottleneck_policy="enabled")
-B3 = Condition("B3_bottleneck_aggressive", "Aggressive anti-bottleneck policy", "NASH_MIN",
+               bottleneck_policy="enabled", instrument_caps="uncapped", deficit_spending=True, **_SHARED_PLANNER_KWARGS)
+B3 = Condition("B3_bottleneck_aggressive", "Aggressive anti-bottleneck policy", "NASH",
                True, True, 0.1, True, True, "democratic", election_weight=1.0,
-               bottleneck_policy="aggressive", bottleneck_dynamic_capture=True)
+               bottleneck_policy="aggressive", bottleneck_dynamic_capture=True, instrument_caps="uncapped", deficit_spending=True, **_SHARED_PLANNER_KWARGS)
 BOTTLENECK_CONDITIONS = [B1, B2, B3]
 
 # Focused BICF sanity-test condition (single-condition smoke preset)
@@ -257,7 +257,7 @@ PRESETS = {
     "dose_response": {"conditions": DOSE_RESPONSE_CONDITIONS, "seeds": [42, 137, 256, 389, 501, 623, 777, 888], "steps": 3000, "output_dir": "results/dose_response"},
     "uncapped":    {"conditions": UNCAPPED_CONDITIONS,    "seeds": [42, 137, 256, 389, 501, 623, 777, 888], "steps": 3000, "output_dir": "results/uncapped"},
     "comparison":  {"conditions": COMPARISON_CONDITIONS,  "seeds": [42, 137, 2024],                         "steps": 3000, "output_dir": "results/comparison"},
-    "bottleneck":  {"conditions": BOTTLENECK_CONDITIONS,  "seeds": [42, 137, 256, 389, 501, 623, 777, 888], "steps": 1500, "output_dir": "results/bottleneck_regulation"},
+    "bottleneck":  {"conditions": BOTTLENECK_CONDITIONS,  "seeds": [42, 137, 256, 389, 501, 623, 777, 888], "steps": 3000, "output_dir": "results/"},
     "bicf_test":   {"conditions": BICF_TEST_CONDITIONS,   "seeds": [389, 501, 623, 777, 888],                          "steps": 500,  "output_dir": "results/bicf_test"},
 }
 
