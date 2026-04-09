@@ -139,9 +139,12 @@ class EconomicModel(Model):
         self.bottleneck_breakup_threshold: int = 50
         self.bottleneck_open_access_bonus: float = 0.05
         self.max_profit_margin_cap: float = 0.15
-        self.total_bottleneck_rent_redistributed: float = 0.0
+        self.total_bottleneck_rent_redistributed: float = 0.0  # total BICF grant capital issued
         self.bottleneck_breakups: int = 0
         self._current_bottleneck_firm_id: Optional[int] = None
+        self.bicf_entrants_spawned: int = 0
+        self.bicf_entrant_ids: set = set()
+        self._bicf_spawn_cooldown: int = 0           # steps until next entrant may be spawned
 
         # Animation frame history (lightweight snapshots for visualization)
         self.animation_frames: List[Dict] = []
@@ -502,6 +505,8 @@ class EconomicModel(Model):
 
     def _apply_bottleneck_regulation(self):
         self._current_bottleneck_firm_id = self.bottleneck_firm_id if self.bottleneck_detected else None
+        if self._bicf_spawn_cooldown > 0:
+            self._bicf_spawn_cooldown -= 1
         if not self.bottleneck_detected or self.bottleneck_regulation_policy == "off":
             return
         bottleneck = next((f for f in self.firms
@@ -510,88 +515,81 @@ class EconomicModel(Model):
             return
 
         is_aggressive = self.bottleneck_regulation_policy == "aggressive"
-        margin_cap = 0.10 if is_aggressive else self.max_profit_margin_cap
+        # B3 aggressive = larger grant + longer vesting, not faster breakup.
+        grant_fraction  = 0.80 if is_aggressive else 0.50
+        vesting_steps   = 40   if is_aggressive else 20
         open_access_bonus = 0.10 if is_aggressive else self.bottleneck_open_access_bonus
-        breakup_threshold = 25 if is_aggressive else self.bottleneck_breakup_threshold
+        margin_cap      = 0.10 if is_aggressive else self.max_profit_margin_cap
 
-        # Mode A — Rent cap
-        self.bottleneck_mode = "rent_cap"
+        # Compute rent signal from incumbent margin (incumbent balance sheet unchanged).
         revenue = max(float(getattr(bottleneck, "revenue", 0.0)), 0.0)
         current_profit = float(getattr(bottleneck, "profit", 0.0))
         margin = (current_profit / max(revenue, 1e-9)) if revenue > 0 else 0.0
-        if margin > margin_cap and current_profit > 0 and bottleneck.wealth > 0:
+        rent_signal = 0.0
+        if margin > margin_cap and current_profit > 0:
             capped_profit = margin_cap * revenue
-            excess = max(0.0, current_profit - capped_profit)
-            extraction = min(excess, bottleneck.wealth)
-            if extraction > 0:
-                bottleneck.wealth -= extraction
-                bottleneck.profit -= extraction
-                self.total_bottleneck_rent_redistributed += extraction
-                workers = list(bottleneck.workers.values())
-                wage_pool = extraction * (0.7 if is_aggressive else 0.5)
-                if workers and wage_pool > 0:
-                    per_worker = wage_pool / len(workers)
-                    for w in workers:
-                        w.wealth += per_worker
-                        w.income_last_step += per_worker
-                goods_pool = extraction - wage_pool
-                if goods_pool > 0:
-                    reduction = min(0.20 if is_aggressive else 0.10, goods_pool / max(revenue, 1.0))
-                    self.economy.prices["goods"] = max(0.10, self.economy.prices.get("goods", 1.0) * (1.0 - reduction))
+            rent_signal = max(0.0, current_profit - capped_profit)
 
-        # Mode B — Open access
-        self.bottleneck_mode = "open_access"
-        for f in self.firms:
-            if f.defunct or f.unique_id == bottleneck.unique_id:
-                continue
-            f.open_access_bonus = open_access_bonus
+        grant = rent_signal * grant_fraction
 
-        # Mode C — Structural breakup
-        if self.bottleneck_duration > breakup_threshold:
-            self.bottleneck_mode = "breakup"
-            self._break_up_firm(bottleneck, n_parts=3)
-            self.bottleneck_duration = 0
-            self.bottleneck_detected = False
-            self.bottleneck_firm_id = None
-            self._current_bottleneck_firm_id = None
+        # Spawn a BICF entrant funded by the detected rent.
+        # Only spawn if cooldown has expired AND no living BICF entrant already exists.
+        living_bicf = [f for f in self.firms
+                       if not f.defunct and f.unique_id in self.bicf_entrant_ids]
+        if self._bicf_spawn_cooldown == 0 and not living_bicf and grant > 0:
+            self.bottleneck_mode = "entrant_spawned"
+            entrant = self._spawn_bicf_entrant(
+                grant=grant,
+                vesting_steps=vesting_steps,
+                open_access_bonus=open_access_bonus,
+                incumbent=bottleneck,
+            )
+            self.total_bottleneck_rent_redistributed += grant
+            self._bicf_spawn_cooldown = vesting_steps  # don't flood with entrants
+            _ = entrant  # referenced for clarity; registered inside _spawn_bicf_entrant
+        else:
+            # Bottleneck persists but entrant already exists or grant too small:
+            # keep giving the living BICF entrant its open_access_bonus.
+            self.bottleneck_mode = "open_access"
+            for f in living_bicf:
+                f.open_access_bonus = open_access_bonus
 
-    def _break_up_firm(self, firm: FirmAgent, n_parts: int = 3):
-        if firm.defunct or n_parts < 2:
-            return
-        workers = list(firm.workers.values())
-        total_parts = max(2, int(n_parts))
-        wealth_share = max(firm.wealth, 0.0) / total_parts
-        cap_share = max(firm.capital_stock, 0.0) / total_parts
+    def _spawn_bicf_entrant(
+        self,
+        grant: float,
+        vesting_steps: int,
+        open_access_bonus: float,
+        incumbent: FirmAgent,
+    ) -> FirmAgent:
+        """Create a new firm with structural entry advantages funded by detected rent.
 
-        # Reduce incumbent and spawn new competitors.
-        firm.wealth = wealth_share
-        firm.capital_stock = cap_share
-        firm.market_share = 1.0 / total_parts
-        firm.workers.clear()
+        The incumbent is not touched. This is the topology change: reduce the
+        entrant's barrier, not the incumbent's capacity.
+        """
+        entrant = FirmAgent(model=self, capital=grant)
+        # Entrant starts with better-than-baseline capital stock funded by grant.
+        entrant.capital_stock = max(grant * 0.5, incumbent.capital_stock * 0.25)
+        # Wage competitive with incumbent so the entrant can attract workers.
+        entrant.offered_wage = incumbent.offered_wage
+        # SEVC and ownership structure mirrors model-wide settings.
+        entrant.is_sevc = getattr(self, "use_sevc", True)
+        entrant.worker_ownership_share = getattr(incumbent, "worker_ownership_share", 0.0)
+        entrant.investor_ownership_share = getattr(incumbent, "investor_ownership_share", 1.0)
+        # BICF structural advantages.
+        entrant.bicf_entrant = True
+        entrant.tax_advantage_remaining = vesting_steps
+        entrant.bicf_grant_received = grant
+        entrant.open_access_bonus = open_access_bonus  # production boost this step
+        # Lower pollution factor: entrant represents newer technology.
+        entrant.pollution_factor = max(0.0, incumbent.pollution_factor * 0.75)
 
-        spawned = []
-        for _ in range(total_parts - 1):
-            nf = FirmAgent(model=self, capital=wealth_share)
-            nf.capital_stock = cap_share
-            nf.offered_wage = firm.offered_wage
-            nf.pollution_factor = firm.pollution_factor
-            nf.is_sevc = getattr(firm, "is_sevc", True)
-            nf.worker_ownership_share = getattr(firm, "worker_ownership_share", 0.0)
-            nf.investor_ownership_share = getattr(firm, "investor_ownership_share", 1.0)
-            pos = self._random_cell()
-            self.grid.place_agent(nf, pos)
-            self.firms.append(nf)
-            self._id_cache[nf.unique_id] = nf
-            spawned.append(nf)
-
-        buckets = [firm] + spawned
-        for i, w in enumerate(workers):
-            tgt = buckets[i % len(buckets)]
-            tgt.workers[w.unique_id] = w
-            w.employed = True
-            w.employer_id = tgt.unique_id
-            w.wage = tgt.offered_wage
-        self.bottleneck_breakups += 1
+        pos = self._random_cell()
+        self.grid.place_agent(entrant, pos)
+        self.firms.append(entrant)
+        self._id_cache[entrant.unique_id] = entrant
+        self.bicf_entrant_ids.add(entrant.unique_id)
+        self.bicf_entrants_spawned += 1
+        return entrant
 
     def next_cartel_id(self) -> int:
         self._cartel_counter += 1
