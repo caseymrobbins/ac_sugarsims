@@ -7,7 +7,6 @@ framework proposal in the project discussion.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from statistics import median
 from typing import Dict, Mapping, Optional, Set
 
 
@@ -36,6 +35,7 @@ class AcquisitionEvent:
     """Represents an incumbent acquisition of a qualifying entrant (mechanism 5)."""
     technology_remains_available: bool
     technology_suppressed: bool
+    open_license_required: bool = True  # triggered on acquisition
 
 
 SECTOR_THRESHOLDS = {
@@ -43,6 +43,11 @@ SECTOR_THRESHOLDS = {
     "regulated": 0.20,
     "service_technology": 0.25,
 }
+
+# Metrics where a lower value represents improvement.
+# Throughput, efficiency, and similar output metrics are higher-is-better
+# and must NOT appear here.
+DEFAULT_LOWER_IS_BETTER: Set[str] = {"cost", "emissions", "waste", "energy_consumption"}
 
 
 def is_bottleneck_industry(industry: IndustryProfile) -> bool:
@@ -65,17 +70,30 @@ def required_improvement_threshold(sector_type: str) -> float:
 
 
 def aggregate_improvement(improvements: Mapping[str, float]) -> float:
-    """Aggregate multi-metric improvements using median for robustness."""
+    """Return the minimum improvement across all metrics.
+
+    An entrant must clear the bar on *every* metric simultaneously.
+    Using min() closes the cherry-picking loophole: strong performance on
+    some metrics cannot compensate for regression on others.
+    Negative values are intentionally preserved so that a metric getting
+    worse causes the aggregate to fail.
+    """
     if not improvements:
         return 0.0
-    vals = [max(0.0, float(v)) for v in improvements.values()]
-    return median(vals)
+    return min(float(v) for v in improvements.values())
 
 
-def innovation_tier(aggregate_gain: float) -> int:
+def innovation_tier(aggregate_gain: float, sector_type: str) -> int:
+    """Assign incentive tier, anchored to the sector qualification floor.
+
+    Tier 1 starts at the minimum sector threshold so an unqualified entrant
+    can never receive a non-zero tier.
+    Tier 2 requires ≥25% improvement (the highest sector bar).
+    """
+    floor = required_improvement_threshold(sector_type)
     if aggregate_gain >= 0.25:
         return 2
-    if aggregate_gain >= 0.10:
+    if aggregate_gain >= floor:
         return 1
     return 0
 
@@ -99,8 +117,8 @@ def passes_market_participation(entrant: EntrantProfile) -> bool:
 def incentive_package(tier: int, qualified: bool) -> Dict[str, bool]:
     """Map innovation tier to applicable incentives.
 
-    Tier 1 (≥10% gain): tax reduction + regulatory fast-track.
-    Tier 2 (≥25% gain): adds innovation grant + government legal defense.
+    Tier 1 (≥ sector floor): tax reduction + regulatory fast-track.
+    Tier 2 (≥25%): adds innovation grant + government legal defense.
     """
     if not qualified or tier == 0:
         return {
@@ -121,13 +139,17 @@ def incentive_package(tier: int, qualified: bool) -> Dict[str, bool]:
 # Mechanism 5: Acquisition safeguards
 # ---------------------------------------------------------------------------
 
-def evaluate_acquisition_safeguard(event: AcquisitionEvent) -> bool:
-    """Returns True if the acquisition complies with BICF safeguards.
+def evaluate_acquisition_safeguard(event: AcquisitionEvent) -> Dict[str, object]:
+    """Evaluate BICF compliance for an incumbent acquisition.
 
-    After an incumbent acquires a qualifying entrant the innovation must
-    remain available to the market and cannot be suppressed.
+    Technology must remain available to the market and must not be suppressed.
+    Non-compliance triggers a mandatory open-license remedy.
     """
-    return event.technology_remains_available and not event.technology_suppressed
+    compliant = event.technology_remains_available and not event.technology_suppressed
+    return {
+        "compliant": compliant,
+        "remedy": "mandatory_open_license" if not compliant else None,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -183,13 +205,16 @@ def compute_relative_improvements(
     industry median (or top-performer values), the qualification bar rises
     automatically as the industry improves.
 
-    lower_is_better: metric names where a lower value is an improvement
-                     (e.g. cost, emissions, waste). Defaults to all metrics.
-    Returns a dict of fractional improvements; negative values mean the
-    entrant is worse than baseline on that metric.
+    lower_is_better: metric names where a lower value is an improvement.
+                     Defaults to DEFAULT_LOWER_IS_BETTER (cost, emissions,
+                     waste, energy_consumption). Callers with throughput or
+                     efficiency metrics must NOT include them here, or those
+                     metrics will invert and penalise genuinely good entrants.
+    Returns fractional improvements; negative values are preserved and will
+    cause aggregate_improvement (min) to fail qualification correctly.
     """
     if lower_is_better is None:
-        lower_is_better = set(industry_baseline.keys())
+        lower_is_better = DEFAULT_LOWER_IS_BETTER
 
     result: Dict[str, float] = {}
     for metric, baseline_val in industry_baseline.items():
@@ -220,7 +245,7 @@ def evaluate_bicf_qualification(
     innovation_pass = aggregate_gain >= threshold
     market_pass = passes_market_participation(entrant)
     qualified = bottleneck and innovation_pass and market_pass
-    tier = innovation_tier(aggregate_gain)
+    tier = innovation_tier(aggregate_gain, industry.sector_type)
 
     return {
         "qualified": qualified,
