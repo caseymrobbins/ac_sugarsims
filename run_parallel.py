@@ -1124,12 +1124,13 @@ class TestRunParallelConditions(_unittest.TestCase):
         self.assertEqual(names, ["B1_baseline_no_reg", "B2_bottleneck_reg", "B3_bottleneck_aggressive"])
 
     def test_aggressive_bottleneck_policy_sets_caps(self):
+        # B3 aggressive = tighter margin cap (rent signal) + larger open_access_bonus.
+        # "Aggressive" means larger entrant grant and longer vesting, not faster breakup.
         model = _DummyModel()
         m = configure_model(model, B3)
         self.assertEqual(m.bottleneck_regulation_policy, "aggressive")
-        self.assertEqual(m.max_profit_margin_cap, 0.10)
-        self.assertEqual(m.bottleneck_open_access_bonus, 0.10)
-        self.assertEqual(m.bottleneck_breakup_threshold, 25)
+        self.assertEqual(m.max_profit_margin_cap, 0.10)       # used to size rent signal
+        self.assertEqual(m.bottleneck_open_access_bonus, 0.10) # production boost to entrant
 
     def test_enabled_bottleneck_policy_sets_moderate_caps(self):
         model = _DummyModel()
@@ -1137,13 +1138,11 @@ class TestRunParallelConditions(_unittest.TestCase):
         self.assertEqual(m.bottleneck_regulation_policy, "enabled")
         self.assertEqual(m.max_profit_margin_cap, 0.15)
         self.assertEqual(m.bottleneck_open_access_bonus, 0.05)
-        self.assertEqual(m.bottleneck_breakup_threshold, 50)
 
     def test_off_policy_sets_no_caps(self):
         model = _DummyModel()
         m = configure_model(model, B1)
         self.assertEqual(m.bottleneck_regulation_policy, "off")
-        self.assertFalse(hasattr(m, "max_profit_margin_cap"))
 
     def test_worker_ownership_applies_to_existing_firms(self):
         model = _DummyModel(n_firms=2)

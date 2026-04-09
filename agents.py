@@ -795,6 +795,10 @@ class FirmAgent(Agent):
         self.investor_dividend_pool: float = 0.0    # cumulative investor dividends paid
         self._dilution_rejections: int = 0          # consecutive steps where hire was dilution-blocked
         self.open_access_bonus: float = 0.0         # temporary production bonus under bottleneck regulation
+        # BICF entrant state
+        self.bicf_entrant: bool = False              # True if spawned by BICF mechanism
+        self.tax_advantage_remaining: int = 0        # steps of tax holiday remaining
+        self.bicf_grant_received: float = 0.0        # total grant capital received at spawn
         # Innovation
         init_firm_tech(self)
 
@@ -843,6 +847,13 @@ class FirmAgent(Agent):
         if self.wealth < -200 and len(self.workers) == 0: self._go_bankrupt(); return
         self._consider_mitosis()
         self.model.planner.apply_tax(self)
+        # BICF tax holiday: refund firm tax for the vesting period so the
+        # entrant isn't immediately taxed back to parity with the incumbent.
+        if self.tax_advantage_remaining > 0:
+            rate = self.model.planner.policy.get("tax_rate_firm", 0.10)
+            refund = rate * max(0.0, self.profit)
+            self.wealth += refund
+            self.tax_advantage_remaining -= 1
 
     def _get_ceo(self):
         """Return the highest-skilled current worker as the acting CEO."""
