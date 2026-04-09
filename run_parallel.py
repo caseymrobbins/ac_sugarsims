@@ -1238,21 +1238,44 @@ class TestInnovationQualification(_unittest.TestCase):
         with self.assertRaises(ValueError):
             required_improvement_threshold("unknown")
 
-    def test_aggregate_uses_median(self):
+    def test_aggregate_uses_min(self):
+        # min() — must clear the bar on every metric simultaneously
         improvements = {"cost": 0.20, "energy": 0.15, "emissions": 0.30, "throughput": 0.10, "waste": 0.05}
-        self.assertEqual(aggregate_improvement(improvements), 0.15)
+        self.assertEqual(aggregate_improvement(improvements), 0.05)
 
     def test_aggregate_empty(self):
         self.assertEqual(aggregate_improvement({}), 0.0)
 
-    def test_aggregate_clamps_negatives(self):
-        self.assertEqual(aggregate_improvement({"cost": -0.10, "energy": 0.20}), 0.10)
+    def test_aggregate_exposes_negatives(self):
+        # Negatives are NOT clipped; a regressing metric must fail the entrant
+        self.assertEqual(aggregate_improvement({"cost": -0.10, "energy": 0.20}), -0.10)
 
-    def test_tier_assignment(self):
-        self.assertEqual(innovation_tier(0.09), 0)
-        self.assertEqual(innovation_tier(0.10), 1)
-        self.assertEqual(innovation_tier(0.249), 1)
-        self.assertEqual(innovation_tier(0.25), 2)
+    def test_aggregate_negative_fails_qualification(self):
+        # A single regressing metric collapses the aggregate below any positive threshold
+        industry = _capital_industry()
+        improvements = {"cost": 0.20, "emissions": 0.25, "throughput": -0.05}
+        result = evaluate_bicf_qualification(industry, _good_entrant(), improvements)
+        self.assertFalse(result["innovation_pass"])
+        self.assertFalse(result["qualified"])
+
+    def test_tier_assignment_anchored_to_sector_floor(self):
+        # capital_intensive floor = 0.15: below floor → tier 0, floor → tier 1, ≥0.25 → tier 2
+        self.assertEqual(innovation_tier(0.14, "capital_intensive"), 0)
+        self.assertEqual(innovation_tier(0.15, "capital_intensive"), 1)
+        self.assertEqual(innovation_tier(0.249, "capital_intensive"), 1)
+        self.assertEqual(innovation_tier(0.25, "capital_intensive"), 2)
+
+    def test_tier_alignment_no_unqualified_tier_one(self):
+        # 12% is below the 15% capital_intensive floor → must be tier 0, not tier 1
+        self.assertEqual(innovation_tier(0.12, "capital_intensive"), 0)
+        # same gain clears the 10% floor of... wait, min sector threshold is 15%.
+        # regulated floor = 20%: 12% is still below → tier 0
+        self.assertEqual(innovation_tier(0.12, "regulated"), 0)
+
+    def test_tier_varies_by_sector(self):
+        # 18% clears capital_intensive (15%) but not regulated (20%)
+        self.assertEqual(innovation_tier(0.18, "capital_intensive"), 1)
+        self.assertEqual(innovation_tier(0.18, "regulated"), 0)
 
 
 class TestMarketParticipationAndIndependence(_unittest.TestCase):
@@ -1303,16 +1326,26 @@ class TestIncentiveStructure(_unittest.TestCase):
 
 class TestAcquisitionSafeguards(_unittest.TestCase):
     def test_compliant_acquisition(self):
-        self.assertTrue(evaluate_acquisition_safeguard(
-            AcquisitionEvent(technology_remains_available=True, technology_suppressed=False)))
+        r = evaluate_acquisition_safeguard(
+            AcquisitionEvent(technology_remains_available=True, technology_suppressed=False))
+        self.assertTrue(r["compliant"])
+        self.assertIsNone(r["remedy"])
 
-    def test_suppressed_fails(self):
-        self.assertFalse(evaluate_acquisition_safeguard(
-            AcquisitionEvent(technology_remains_available=True, technology_suppressed=True)))
+    def test_suppressed_triggers_open_license_remedy(self):
+        r = evaluate_acquisition_safeguard(
+            AcquisitionEvent(technology_remains_available=True, technology_suppressed=True))
+        self.assertFalse(r["compliant"])
+        self.assertEqual(r["remedy"], "mandatory_open_license")
 
-    def test_unavailable_fails(self):
-        self.assertFalse(evaluate_acquisition_safeguard(
-            AcquisitionEvent(technology_remains_available=False, technology_suppressed=False)))
+    def test_unavailable_triggers_open_license_remedy(self):
+        r = evaluate_acquisition_safeguard(
+            AcquisitionEvent(technology_remains_available=False, technology_suppressed=False))
+        self.assertFalse(r["compliant"])
+        self.assertEqual(r["remedy"], "mandatory_open_license")
+
+    def test_open_license_required_flag_default(self):
+        event = AcquisitionEvent(technology_remains_available=True, technology_suppressed=False)
+        self.assertTrue(event.open_license_required)
 
 
 class TestSupplierRetaliationProtection(_unittest.TestCase):
@@ -1357,9 +1390,21 @@ class TestDynamicBenchmarking(_unittest.TestCase):
         )
         self.assertAlmostEqual(r["throughput"], 0.20)
 
-    def test_defaults_to_lower_is_better(self):
+    def test_default_treats_cost_as_lower_is_better(self):
+        # cost is in DEFAULT_LOWER_IS_BETTER → lower entrant value = positive improvement
         r = compute_relative_improvements({"cost": 80.0}, {"cost": 100.0})
         self.assertAlmostEqual(r["cost"], 0.20)
+
+    def test_default_does_not_treat_throughput_as_lower_is_better(self):
+        # throughput is NOT in DEFAULT_LOWER_IS_BETTER → higher entrant value = positive improvement
+        r = compute_relative_improvements({"throughput": 120.0}, {"throughput": 100.0})
+        self.assertAlmostEqual(r["throughput"], 0.20)
+        # If throughput were wrongly treated as lower-is-better this would be -0.20
+
+    def test_default_throughput_regression_is_negative(self):
+        # Entrant with worse throughput must produce a negative improvement
+        r = compute_relative_improvements({"throughput": 80.0}, {"throughput": 100.0})
+        self.assertAlmostEqual(r["throughput"], -0.20)
 
     def test_missing_metric_defaults_to_zero_improvement(self):
         r = compute_relative_improvements({}, {"cost": 100.0})
@@ -1373,8 +1418,12 @@ class TestDynamicBenchmarking(_unittest.TestCase):
         industry = _capital_industry()
         entrant_profile = _good_entrant()
         baseline = {"cost_per_unit": 100.0, "energy_kwh": 500.0, "co2_kg": 200.0}
-        actuals = {"cost_per_unit": 82.0, "energy_kwh": 410.0, "co2_kg": 158.0}
-        improvements = compute_relative_improvements(actuals, baseline)
+        actuals  = {"cost_per_unit": 82.0,  "energy_kwh": 410.0, "co2_kg": 158.0}
+        # All three are lower-is-better; pass explicitly so direction is unambiguous
+        improvements = compute_relative_improvements(
+            actuals, baseline,
+            lower_is_better={"cost_per_unit", "energy_kwh", "co2_kg"},
+        )
         result = evaluate_bicf_qualification(industry, entrant_profile, improvements)
         self.assertTrue(result["qualified"])
 
@@ -1384,15 +1433,26 @@ class TestEndToEndBICF(_unittest.TestCase):
         self.industry = _capital_industry()
 
     def test_qualified_tier_one_entrant(self):
+        # min() across all metrics = 0.15 (throughput), exactly at the capital_intensive floor
         improvements = {"production_cost": 0.18, "energy_efficiency": 0.22,
                         "emissions": 0.19, "throughput": 0.15, "waste": 0.16}
         result = evaluate_bicf_qualification(self.industry, _good_entrant(), improvements)
         self.assertTrue(result["qualified"])
+        self.assertEqual(result["aggregate_improvement"], 0.15)
         self.assertEqual(result["tier"], 1)
         self.assertTrue(result["incentives"]["tax_reduction"])
         self.assertFalse(result["incentives"]["innovation_grant"])
 
+    def test_one_weak_metric_blocks_qualification(self):
+        # min() means a single metric below the floor disqualifies the entrant
+        improvements = {"production_cost": 0.20, "energy_efficiency": 0.22,
+                        "emissions": 0.19, "throughput": 0.14, "waste": 0.18}
+        result = evaluate_bicf_qualification(self.industry, _good_entrant(), improvements)
+        self.assertFalse(result["innovation_pass"])
+        self.assertFalse(result["qualified"])
+
     def test_high_gain_entrant_gets_full_incentives(self):
+        # min() across all metrics = 0.26, which is ≥ 0.25 → tier 2
         improvements = {"cost": 0.30, "energy": 0.28, "emissions": 0.35, "throughput": 0.26}
         result = evaluate_bicf_qualification(
             self.industry,
