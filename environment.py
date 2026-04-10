@@ -531,12 +531,16 @@ class EconomicModel(Model):
             rent_signal = max(0.0, current_profit - capped_profit)
 
         grant = rent_signal * grant_fraction
+        # Floor: policy fires even when the incumbent's margin is modest.
+        # Sized to incumbent capital stock so the entrant starts with meaningful resources.
+        min_grant = incumbent.capital_stock * 0.10
+        grant = max(grant, min_grant)
 
         # Spawn a BICF entrant funded by the detected rent.
         # Only spawn if cooldown has expired AND no living BICF entrant already exists.
         living_bicf = [f for f in self.firms
                        if not f.defunct and f.unique_id in self.bicf_entrant_ids]
-        if self._bicf_spawn_cooldown == 0 and not living_bicf and grant > 0:
+        if self._bicf_spawn_cooldown == 0 and not living_bicf:
             self.bottleneck_mode = "entrant_spawned"
             entrant = self._spawn_bicf_entrant(
                 grant=grant,
@@ -589,6 +593,7 @@ class EconomicModel(Model):
         self._id_cache[entrant.unique_id] = entrant
         self.bicf_entrant_ids.add(entrant.unique_id)
         self.bicf_entrants_spawned += 1
+        self.bottleneck_breakups += 1  # repurposed: now counts BICF spawns; collected by metrics.py
         return entrant
 
     def next_cartel_id(self) -> int:

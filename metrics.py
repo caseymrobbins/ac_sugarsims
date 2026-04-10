@@ -220,6 +220,8 @@ def collect_step_metrics(model: "EconomicModel") -> Dict[str, Any]:
     m["bottleneck_mode"] = getattr(model, "bottleneck_mode", "none")
     m["bottleneck_breakups"] = int(getattr(model, "bottleneck_breakups", 0))
     m["total_bottleneck_rent_redistributed"] = float(getattr(model, "total_bottleneck_rent_redistributed", 0.0))
+    m["bicf_entrants_spawned"] = int(getattr(model, "bicf_entrants_spawned", 0))
+    m["bicf_total_grant"] = float(getattr(model, "total_bottleneck_rent_redistributed", 0.0))
 
     # Skill distribution
     if model.workers:

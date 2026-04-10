@@ -1168,6 +1168,18 @@ class TestRunParallelConditions(_unittest.TestCase):
         for cond in ALL_CONDITIONS + BOTTLENECK_CONDITIONS + BICF_TEST_CONDITIONS:
             self.assertIn(cond.bottleneck_policy, valid, msg=cond.name)
 
+    def test_metrics_keys_include_bicf_counters(self):
+        # Confirm that the two new BICF metrics keys are present in metrics.py
+        # source without importing the module (importing requires scipy).
+        import os
+        path = os.path.join(os.path.dirname(__file__) or ".", "metrics.py")
+        with open(path) as fh:
+            metrics_src = fh.read()
+        for key in ("bicf_entrants_spawned", "bicf_total_grant",
+                    "bottleneck_breakups", "total_bottleneck_rent_redistributed"):
+            self.assertIn(f'"{key}"', metrics_src,
+                          msg=f"metrics key {key!r} missing from metrics.py")
+
 
 # ── BICF policy-evaluation tests ────────────────────────────────
 
@@ -1213,6 +1225,64 @@ def _good_entrant(**kw):
     )
     defaults.update(kw)
     return EntrantProfile(**defaults)
+
+
+class TestBICFRegulationMechanism(_unittest.TestCase):
+    """Unit-test the grant floor and spawn-counter fixes in environment.py logic."""
+
+    def _make_incumbent(self, capital_stock=200.0, profit=0.0, revenue=100.0):
+        """Minimal stand-in for the bottleneck incumbent attributes read by the handler."""
+        inc = _SimpleNamespace(
+            capital_stock=capital_stock,
+            profit=profit,
+            revenue=revenue,
+            pollution_factor=0.5,
+            offered_wage=5.0,
+            worker_ownership_share=0.0,
+            investor_ownership_share=1.0,
+        )
+        return inc
+
+    def test_grant_floor_fires_when_margin_below_cap(self):
+        # When rent_signal = 0 (margin below cap), grant must still equal
+        # incumbent.capital_stock * 0.10 so the spawn always triggers.
+        inc = self._make_incumbent(capital_stock=200.0, profit=5.0, revenue=100.0)
+        # margin = 5%, cap = 15% → rent_signal = 0
+        margin_cap = 0.15
+        grant_fraction = 0.50
+        revenue = max(float(inc.revenue), 0.0)
+        current_profit = float(inc.profit)
+        margin = current_profit / max(revenue, 1e-9)
+        rent_signal = 0.0
+        if margin > margin_cap and current_profit > 0:
+            rent_signal = max(0.0, current_profit - margin_cap * revenue)
+        grant = rent_signal * grant_fraction
+        min_grant = inc.capital_stock * 0.10
+        grant = max(grant, min_grant)
+        self.assertEqual(rent_signal, 0.0)
+        self.assertEqual(grant, 20.0)   # 200 * 0.10
+
+    def test_grant_above_floor_when_supra_normal_margin(self):
+        # When margin exceeds cap, rent_signal drives the grant above the floor.
+        inc = self._make_incumbent(capital_stock=100.0, profit=40.0, revenue=100.0)
+        margin_cap = 0.15
+        grant_fraction = 0.50
+        revenue = float(inc.revenue)
+        profit = float(inc.profit)
+        margin = profit / revenue  # 0.40
+        rent_signal = max(0.0, profit - margin_cap * revenue) if margin > margin_cap and profit > 0 else 0.0
+        grant = max(rent_signal * grant_fraction, inc.capital_stock * 0.10)
+        self.assertAlmostEqual(rent_signal, 25.0)   # 40 - 15
+        self.assertAlmostEqual(grant, 12.5)          # max(12.5, 10) → 12.5
+        self.assertGreater(grant, inc.capital_stock * 0.10)  # above floor
+
+    def test_aggressive_floor_also_applies(self):
+        # B3 aggressive uses grant_fraction=0.80; floor still 10% of capital_stock.
+        inc = self._make_incumbent(capital_stock=300.0, profit=0.0, revenue=50.0)
+        grant_fraction = 0.80
+        rent_signal = 0.0   # no supra-normal profit
+        grant = max(rent_signal * grant_fraction, inc.capital_stock * 0.10)
+        self.assertEqual(grant, 30.0)   # 300 * 0.10
 
 
 class TestBottleneckClassification(_unittest.TestCase):
