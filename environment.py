@@ -533,7 +533,7 @@ class EconomicModel(Model):
         grant = rent_signal * grant_fraction
         # Floor: policy fires even when the incumbent's margin is modest.
         # Sized to incumbent capital stock so the entrant starts with meaningful resources.
-        min_grant = incumbent.capital_stock * 0.10
+        min_grant = bottleneck.capital_stock * 0.10
         grant = max(grant, min_grant)
 
         # Spawn a BICF entrant funded by the detected rent.
