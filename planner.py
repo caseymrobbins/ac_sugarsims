@@ -12,6 +12,7 @@ Changes from original:
 """
 from __future__ import annotations
 import math
+from collections import deque
 from typing import TYPE_CHECKING, Dict, Any, List, Optional, Tuple
 import numpy as np
 from mesa import Agent
@@ -210,6 +211,9 @@ class PlannerAgent(Agent):
         self._vote_shares = {}
         self._active_constraints = {}  # instrument floors from election
         self._steps_since_election = 0
+        self.redistribution_scheme = "uniform"
+        self.hi_history = deque(maxlen=25)
+        self.previous_hi = 0.0
 
     def step(self):
         self._steps_since_update += 1; self._steps_since_election += 1
@@ -273,6 +277,7 @@ class PlannerAgent(Agent):
         elif self.objective == "CROSS": return float(np.sum(np.log(np.full(n, 200.0)))) * 0.5
         elif self.objective == "JAM": return math.log(5.0)
         elif self.objective == "PLANNER_SEVC": return 1.0  # score is already [0,1]
+        elif self.objective == "CUSTOM_REWARD": return 1.0
         else: return 0.0
 
     def _learning_step(self):
@@ -298,6 +303,9 @@ class PlannerAgent(Agent):
             self._perturbation_idx = 0; self._perturbation_fitnesses.clear()
         idx = min(self._perturbation_idx, len(self._current_perturbations) - 1)
         perturbation = self._current_perturbations[idx]
+        if self.objective == "CUSTOM_REWARD":
+            self._planner_policy_search()
+            return
         state = self._observe_state(); es_params = self._es.get_params(perturbation)
         linear_adj = self._linear.forward(state, explore=True)
         combined = np.clip(es_params + linear_adj * 0.1, 0.01, 0.99)
@@ -405,11 +413,17 @@ class PlannerAgent(Agent):
         workers = self.model.workers
         if not workers: return
         ubi = self.policy["ubi_payment"]
+        scheme = getattr(self, "redistribution_scheme", "uniform")
         if not np.isfinite(ubi): ubi = 0.0
         total_ubi = ubi * len(workers)
         if total_ubi <= 0: return
         available = self._available_budget()
         if available <= 0: return
+        if scheme == "targeted":
+            poorest = min(workers, key=lambda w: w.wealth)
+            poorest.wealth += min(available, total_ubi)
+            self._spend(min(available, total_ubi))
+            return
         if available >= total_ubi:
             for w in workers: w.wealth += ubi
             self._spend(total_ubi)
@@ -513,6 +527,74 @@ class PlannerAgent(Agent):
     # base reward. A sustainable path with hi=0.85 keeps 85%.
     # ------------------------------------------------------------------
 
+    def _agent_assets(self):
+        vals = [max(getattr(w, "sugar", w.wealth), 0.0) for w in self.model.workers]
+        if not vals: return np.array([0.0], dtype=np.float64)
+        return np.array(vals, dtype=np.float64)
+
+    def _objective_agent_reward(self):
+        A = self._agent_assets()
+        return float(np.log(np.min(A + EPSILON)) + (1.0 - getattr(self.model, "planner_lambda", 0.5)) * np.sum(np.log(A + EPSILON)))
+
+    def _compute_hi(self, total_sugar):
+        self.hi_history.append(float(total_sugar))
+        x_past = float(np.mean(self.hi_history)) if self.hi_history else 0.0
+        A = self._agent_assets()
+        inequality = float(_gini_fast(A)) if len(A) > 1 else 0.0
+        variance = float(np.var(list(self.hi_history))) if len(self.hi_history) > 1 else 0.0
+        phi = inequality + variance
+        hi = x_past / (x_past * phi + EPSILON)
+        return max(0.0, hi)
+
+    def _planner_custom_reward(self):
+        A = self._agent_assets()
+        total = float(np.sum(A))
+        max_possible = max(float(len(A)) * 200.0, EPSILON)
+        fhi = float(np.clip(1.0 - (total / max_possible), 0.0, 1.0))
+        hi = self._compute_hi(total)
+        d_hi = hi - self.previous_hi
+        self.previous_hi = hi
+        lam = getattr(self.model, "planner_lambda", 0.5)
+        w1 = getattr(self.model, "planner_w1", 0.5)
+        w2 = getattr(self.model, "planner_w2", 0.5)
+        g_term = w1 * np.log(hi + EPSILON) + w2 * d_hi
+        return float(np.log(np.min(A + EPSILON)) + (1.0 - lam) * np.sum(np.log(A + EPSILON)) * fhi + g_term)
+
+    def simulate_policy(self, policy, _state_copy=None):
+        workers = self.model.workers
+        if not workers: return -math.inf
+        wealths = np.array([w.wealth for w in workers], dtype=np.float64)
+        incomes = np.array([max(w.income_last_step, 0.0) for w in workers], dtype=np.float64)
+        tax = float(policy.get("tax_rate_worker", self.policy.get("tax_rate_worker", 0.0)))
+        taxes = incomes * max(0.0, tax)
+        post = wealths - taxes
+        pool = float(np.sum(taxes))
+        scheme = policy.get("redistribution_scheme", "uniform")
+        if scheme == "targeted" and len(post) > 0:
+            idx = int(np.argmin(post)); post[idx] += pool
+        elif len(post) > 0:
+            post += pool / len(post)
+        A = np.maximum(post, 0.0)
+        total = float(np.sum(A)); max_possible = max(float(len(A)) * 200.0, EPSILON)
+        fhi = float(np.clip(1.0 - (total / max_possible), 0.0, 1.0))
+        hi = self._compute_hi(total)
+        d_hi = hi - self.previous_hi
+        lam = getattr(self.model, "planner_lambda", 0.5)
+        w1 = getattr(self.model, "planner_w1", 0.5); w2 = getattr(self.model, "planner_w2", 0.5)
+        g_term = w1 * np.log(hi + EPSILON) + w2 * d_hi
+        return float(np.log(np.min(A + EPSILON)) + (1.0 - lam) * np.sum(np.log(A + EPSILON)) * fhi + g_term)
+
+    def _planner_policy_search(self):
+        candidates = []
+        for t in (0.0, 0.1, 0.2, 0.3):
+            for scheme in ("uniform", "targeted"):
+                pol = dict(self.policy); pol["tax_rate_worker"] = t; pol["redistribution_scheme"] = scheme
+                candidates.append((self.simulate_policy(pol, None), pol))
+        if candidates:
+            best = max(candidates, key=lambda x: x[0])[1]
+            self.policy["tax_rate_worker"] = best["tax_rate_worker"]
+            self.redistribution_scheme = best["redistribution_scheme"]
+
     def compute_objective(self):
         if self.objective == "SUM": return self._objective_sum()
         elif self.objective == "SUM_RAW": return self._objective_sum_raw()
@@ -525,6 +607,7 @@ class PlannerAgent(Agent):
         elif self.objective == "TOPO_MIN": return self._objective_topo_min()
         elif self.objective == "TARGET": return self._objective_target()
         elif self.objective == "PLANNER_SEVC": return self._objective_planner_sevc()
+        elif self.objective == "CUSTOM_REWARD": return self._planner_custom_reward()
         else: raise ValueError(f"Unknown objective: {self.objective}")
 
     def _objective_sum_raw(self):
