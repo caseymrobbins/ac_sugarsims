@@ -83,6 +83,7 @@ class Condition:
     deficit_spending: bool = False        # Task 19: allow debt-financed planner spending
     bottleneck_policy: str = "off"        # off | enabled | aggressive
     bottleneck_dynamic_capture: bool = False
+    planner_mode: str = "none"
 
 
 # ── All conditions ──────────────────────────────────────────────
@@ -223,6 +224,11 @@ B3 = Condition("B3_bottleneck_aggressive", "Aggressive anti-bottleneck policy", 
 BOTTLENECK_CONDITIONS = [B1, B2, B3]
 
 # Focused BICF sanity-test condition (single-condition smoke preset)
+D1 = Condition("D1_no_planner", "No planner baseline", "SUM_RAW", True, True, 0.1, True, True, "democratic", planner_mode="none")
+D2 = Condition("D2_simple_planner", "Planner simple rule", "SUM_RAW", True, True, 0.1, True, True, "democratic", planner_mode="simple")
+D3 = Condition("D3_custom_reward_planner", "Planner custom reward", "CUSTOM_REWARD", True, True, 0.1, True, True, "democratic", planner_mode="custom")
+D_CONDITIONS = [D1, D2, D3]
+
 BICF_TEST_CONDITIONS = [
     Condition(
         "BICF_test_condition",
@@ -258,6 +264,7 @@ PRESETS = {
     "uncapped":    {"conditions": UNCAPPED_CONDITIONS,    "seeds": [42, 137, 256, 389, 501, 623, 777, 888], "steps": 3000, "output_dir": "results/uncapped"},
     "comparison":  {"conditions": COMPARISON_CONDITIONS,  "seeds": [42, 137, 2024],                         "steps": 3000, "output_dir": "results/comparison"},
     "bottleneck":  {"conditions": BOTTLENECK_CONDITIONS,  "seeds": [42, 137, 256, 389, 501, 623, 777, 888], "steps": 3000, "output_dir": "results/"},
+    "d_tests":     {"conditions": D_CONDITIONS,           "seeds": [42, 137, 256], "steps": 500, "output_dir": "results/d_tests"},
     "bicf_test":   {"conditions": BICF_TEST_CONDITIONS,   "seeds": [389, 501, 623, 777, 888],                          "steps": 500,  "output_dir": "results/bicf_test"},
 }
 
@@ -1167,6 +1174,17 @@ class TestRunParallelConditions(_unittest.TestCase):
         valid = {"off", "enabled", "aggressive"}
         for cond in ALL_CONDITIONS + BOTTLENECK_CONDITIONS + BICF_TEST_CONDITIONS:
             self.assertIn(cond.bottleneck_policy, valid, msg=cond.name)
+
+    def test_d1_d3_preset_registered(self):
+        self.assertIn("d_tests", PRESETS)
+        names = [c.name for c in PRESETS["d_tests"]["conditions"]]
+        self.assertEqual(names, ["D1_no_planner", "D2_simple_planner", "D3_custom_reward_planner"])
+
+    def test_d1_d3_planner_modes(self):
+        self.assertEqual(D1.planner_mode, "none")
+        self.assertEqual(D2.planner_mode, "simple")
+        self.assertEqual(D3.planner_mode, "custom")
+        self.assertEqual(D3.objective, "CUSTOM_REWARD")
 
     def test_metrics_keys_include_bicf_counters(self):
         # Confirm that the two new BICF metrics keys are present in metrics.py
