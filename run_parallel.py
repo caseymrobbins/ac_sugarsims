@@ -636,9 +636,50 @@ if not USE_TRUST:
 else:
     model._trust_frozen = False
 
+def _agent_metric_rows(model, step):
+    rows = []
+    workers = getattr(model, "workers", [])
+    for w in workers:
+        rows.append({
+            "step": int(step),
+            "seed": int(SEED),
+            "condition": COND_NAME,
+            "agent_id": int(getattr(w, "unique_id", -1)),
+            "alive": int(1),
+            "wealth": float(getattr(w, "wealth", 0.0)),
+            "floor": float(getattr(w, "compute_agency", lambda: 0.0)()),
+            "steps_on_board": int(getattr(w, "steps_on_board", 0)),
+            "migrated_in_step": int(getattr(w, "migrated_in_step", -1)),
+            "migrated_away_step": int(getattr(w, "migrated_away_step", -1)),
+            "died_step": int(getattr(w, "died_step", -1)),
+            "is_entrepreneur": int(1 if getattr(w, "my_firm", None) is not None else 0),
+            "firm_id": int(getattr(getattr(w, "my_firm", None), "unique_id", -1)),
+            "innovations_made": int(getattr(w, "innovations_made", 0)),
+            "rd_spent": float(getattr(w, "rd_spent", 0.0)),
+            "trust": float(getattr(w, "trust_score", float("nan"))),
+            "legitimacy_perception": float(getattr(w, "legitimacy_perception", 0.0)),
+            "aggression": float(getattr(w, "aggression", 0.0)),
+            "conflict_participation": int(getattr(w, "conflict_participation", 0)),
+        })
+    return rows
+
 t0 = time.time()
+agent_step_dir = OUTPUT_DIR + "/raw_data/agent_steps"
+os.makedirs(agent_step_dir, exist_ok=True)
 for step in range(N_STEPS):
     model.step()
+    step_rows = _agent_metric_rows(model, model.current_step)
+    step_out = (
+        agent_step_dir
+        + "/"
+        + COND_NAME
+        + "_seed"
+        + str(SEED)
+        + "_agent_metrics_step"
+        + str(model.current_step)
+        + ".csv"
+    )
+    pd.DataFrame(step_rows).to_csv(step_out, index=False)
     if (step + 1) % 500 == 0:
         elapsed_so_far = time.time() - t0
         print(str(step + 1) + " (" + "{:.0f}".format(elapsed_so_far) + "s)", end=" ", flush=True)
@@ -663,6 +704,10 @@ df["seed"] = SEED
 outpath = OUTPUT_DIR + "/raw_data/" + COND_NAME + "_seed" + str(SEED) + ".parquet"
 df.to_parquet(outpath, index=False)
 print("Saved: " + outpath)
+
+sim_metrics_csv_path = OUTPUT_DIR + "/raw_data/" + COND_NAME + "_seed" + str(SEED) + "_simulation_metrics.csv"
+df.to_csv(sim_metrics_csv_path, index=False)
+print("Saved: " + sim_metrics_csv_path)
 
 if ANIMATE and model.animation_frames:
     anim_dir = OUTPUT_DIR + "/animations"
