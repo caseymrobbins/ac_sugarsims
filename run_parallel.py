@@ -225,7 +225,7 @@ BOTTLENECK_CONDITIONS = [B1, B2, B3]
 
 # Focused BICF sanity-test condition (single-condition smoke preset)
 D1 = Condition("D1_no_planner", "No planner baseline", "SUM_RAW", True, True, 0.1, True, True, "democratic", planner_mode="none")
-D2 = Condition("D2_simple_planner", "Planner simple rule", "SUM_RAW", True, True, 0.1, True, True, "democratic", planner_mode="simple")
+D2 = Condition("D2_simple_planner", "Planner simple rule", "NASH_MIN", True, True, 0.1, True, True, "democratic", planner_mode="simple")
 D3 = Condition("D3_custom_reward_planner", "Planner custom reward", "CUSTOM_REWARD", True, True, 0.1, True, True, "democratic", planner_mode="custom")
 D_CONDITIONS = [D1, D2, D3]
 
@@ -264,7 +264,7 @@ PRESETS = {
     "uncapped":    {"conditions": UNCAPPED_CONDITIONS,    "seeds": [42, 137, 256, 389, 501, 623, 777, 888], "steps": 3000, "output_dir": "results/uncapped"},
     "comparison":  {"conditions": COMPARISON_CONDITIONS,  "seeds": [42, 137, 2024],                         "steps": 3000, "output_dir": "results/comparison"},
     "bottleneck":  {"conditions": BOTTLENECK_CONDITIONS,  "seeds": [42, 137, 256, 389, 501, 623, 777, 888], "steps": 3000, "output_dir": "results/"},
-    "d_tests":     {"conditions": D_CONDITIONS,           "seeds": [42, 137, 256], "steps": 500, "output_dir": "results/d_tests"},
+    "d_tests":     {"conditions": D_CONDITIONS,           "seeds": [42, 137, 256, 153, 798, 437, 390, 485, 89, 37, 98, 734, 389, 50, 72, 985, 783, 94, 2], "steps": 500, "output_dir": "results/d_tests"},
     "bicf_test":   {"conditions": BICF_TEST_CONDITIONS,   "seeds": [389, 501, 623, 777, 888],                          "steps": 500,  "output_dir": "results/bicf_test"},
 }
 
