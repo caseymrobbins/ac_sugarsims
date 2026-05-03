@@ -35,6 +35,7 @@ ADAPT_LR = 0.01
 ADAPT_NOISE = 0.02
 REWARD_CLIP = 50.0
 REWARD_BASELINE_DECAY = 0.9
+CUSTOM_REWARD_FLOOR_TARGET = 25.0
 
 # ---------------------------------------------------------------------------
 # Government types (Task 8)
@@ -557,23 +558,41 @@ class PlannerAgent(Agent):
         lam = getattr(self.model, "planner_lambda", 0.5)
         w1 = getattr(self.model, "planner_w1", 0.5)
         w2 = getattr(self.model, "planner_w2", 0.5)
+        floor_target = float(getattr(self.model, "planner_floor_target", CUSTOM_REWARD_FLOOR_TARGET))
+        floor_gap = max(0.0, floor_target - float(np.min(A)))
+        floor_progress = 1.0 - (floor_gap / (floor_target + EPSILON))
+        floor_progress = float(np.clip(floor_progress, 0.0, 1.0))
         g_term = w1 * np.log(hi + EPSILON) + w2 * d_hi
-        return float(np.log(np.min(A + EPSILON)) + (1.0 - lam) * np.sum(np.log(A + EPSILON)) * fhi + g_term)
+        floor_term = 2.0 * np.log(np.min(A + EPSILON)) + floor_progress
+        return float(floor_term + (1.0 - lam) * np.sum(np.log(A + EPSILON)) * fhi + g_term)
 
     def simulate_policy(self, policy, _state_copy=None):
         workers = self.model.workers
         if not workers: return -math.inf
         wealths = np.array([w.wealth for w in workers], dtype=np.float64)
         incomes = np.array([max(w.income_last_step, 0.0) for w in workers], dtype=np.float64)
-        tax = float(policy.get("tax_rate_worker", self.policy.get("tax_rate_worker", 0.0)))
-        taxes = incomes * max(0.0, tax)
+        worker_tax = float(policy.get("tax_rate_worker", self.policy.get("tax_rate_worker", 0.0)))
+        taxes = incomes * max(0.0, worker_tax)
+        firms = getattr(self.model, "firms", [])
+        firm_tax = float(policy.get("tax_rate_firm", self.policy.get("tax_rate_firm", 0.0)))
+        firm_income = float(np.sum([max(getattr(f, "income_last_step", 0.0), 0.0) for f in firms]))
+        taxes += firm_income * max(0.0, firm_tax)
         post = wealths - taxes
         pool = float(np.sum(taxes))
         scheme = policy.get("redistribution_scheme", "uniform")
-        if scheme == "targeted" and len(post) > 0:
-            idx = int(np.argmin(post)); post[idx] += pool
-        elif len(post) > 0:
+        if len(post) > 0:
             post += pool / len(post)
+            if scheme == "targeted":
+                # Soft top-up to bottom quintile instead of winner-take-all transfer.
+                q = max(1, int(0.2 * len(post)))
+                idx = np.argpartition(post, q - 1)[:q]
+                post[idx] += 0.25 * pool / q
+                post -= 0.25 * pool / len(post)
+            ubi = float(policy.get("ubi_payment", self.policy.get("ubi_payment", 0.0)))
+            post += max(0.0, ubi)
+            edu = float(policy.get("education_investment", self.policy.get("education_investment", 0.0)))
+            hlth = float(policy.get("healthcare_investment", self.policy.get("healthcare_investment", 0.0)))
+            post += 0.35 * max(0.0, edu) + 0.35 * max(0.0, hlth)
         A = np.maximum(post, 0.0)
         total = float(np.sum(A)); max_possible = max(float(len(A)) * 200.0, EPSILON)
         fhi = float(np.clip(1.0 - (total / max_possible), 0.0, 1.0))
@@ -582,17 +601,36 @@ class PlannerAgent(Agent):
         lam = getattr(self.model, "planner_lambda", 0.5)
         w1 = getattr(self.model, "planner_w1", 0.5); w2 = getattr(self.model, "planner_w2", 0.5)
         g_term = w1 * np.log(hi + EPSILON) + w2 * d_hi
-        return float(np.log(np.min(A + EPSILON)) + (1.0 - lam) * np.sum(np.log(A + EPSILON)) * fhi + g_term)
+        floor_target = float(getattr(self.model, "planner_floor_target", CUSTOM_REWARD_FLOOR_TARGET))
+        floor_gap = max(0.0, floor_target - float(np.min(A)))
+        floor_progress = 1.0 - (floor_gap / (floor_target + EPSILON))
+        floor_progress = float(np.clip(floor_progress, 0.0, 1.0))
+        floor_term = 2.0 * np.log(np.min(A + EPSILON)) + floor_progress
+        return float(floor_term + (1.0 - lam) * np.sum(np.log(A + EPSILON)) * fhi + g_term)
 
     def _planner_policy_search(self):
         candidates = []
-        for t in (0.0, 0.1, 0.2, 0.3):
-            for scheme in ("uniform", "targeted"):
-                pol = dict(self.policy); pol["tax_rate_worker"] = t; pol["redistribution_scheme"] = scheme
-                candidates.append((self.simulate_policy(pol, None), pol))
+        for tw in (0.0, 0.1, 0.2, 0.3):
+            for tf in (0.05, 0.1, 0.15, 0.2):
+                for ubi in (0.0, 1.0, 2.0, 3.0):
+                    for hlth in (0.0, 0.5, 1.0):
+                        for edu in (0.0, 0.5, 1.0):
+                            for scheme in ("uniform", "targeted"):
+                                pol = dict(self.policy)
+                                pol["tax_rate_worker"] = tw
+                                pol["tax_rate_firm"] = tf
+                                pol["ubi_payment"] = ubi
+                                pol["healthcare_investment"] = hlth
+                                pol["education_investment"] = edu
+                                pol["redistribution_scheme"] = scheme
+                                candidates.append((self.simulate_policy(pol, None), pol))
         if candidates:
             best = max(candidates, key=lambda x: x[0])[1]
             self.policy["tax_rate_worker"] = best["tax_rate_worker"]
+            self.policy["tax_rate_firm"] = best["tax_rate_firm"]
+            self.policy["ubi_payment"] = best["ubi_payment"]
+            self.policy["healthcare_investment"] = best["healthcare_investment"]
+            self.policy["education_investment"] = best["education_investment"]
             self.redistribution_scheme = best["redistribution_scheme"]
 
     def compute_objective(self):
