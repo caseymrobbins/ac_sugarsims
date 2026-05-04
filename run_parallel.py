@@ -264,7 +264,7 @@ PRESETS = {
     "uncapped":    {"conditions": UNCAPPED_CONDITIONS,    "seeds": [42, 137, 256, 389, 501, 623, 777, 888], "steps": 3000, "output_dir": "results/uncapped"},
     "comparison":  {"conditions": COMPARISON_CONDITIONS,  "seeds": [42, 137, 2024],                         "steps": 3000, "output_dir": "results/comparison"},
     "bottleneck":  {"conditions": BOTTLENECK_CONDITIONS,  "seeds": [42, 137, 256, 389, 501, 623, 777, 888], "steps": 3000, "output_dir": "results/"},
-    "d_tests":     {"conditions": D_CONDITIONS,           "seeds": [42, 137, 256, 153, 798, 437, 390, 485, 89, 37, 98, 734, 389, 50, 72, 985, 783, 94, 2], "steps": 500, "output_dir": "results/d_tests"},
+    "d_tests":     {"conditions": D_CONDITIONS,           "seeds": [800], "steps": 500, "output_dir": "results/d_tests"},
     "bicf_test":   {"conditions": BICF_TEST_CONDITIONS,   "seeds": [389, 501, 623, 777, 888],                          "steps": 500,  "output_dir": "results/bicf_test"},
 }
 
