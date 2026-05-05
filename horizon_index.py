@@ -5,9 +5,9 @@ Measures whether current policy trajectory is sustainable.
 
 Detects sugar-rush policies: improvements to headline metrics that come
 at the cost of degrading the foundations those metrics depend on. A
-planner that reduces Gini by destroying employment gets a low Horizon
-Index. A planner that reduces Gini by growing the productive base gets
-a high one.
+planner that lifts the wealth floor by growing productive employment
+gets a high Horizon Index. A planner that boosts mean wealth through
+pollution-intensive production while the bottom declines gets a low one.
 
 Architecture:
     - Smooth sigmoid scoring (no hard boolean thresholds)
@@ -187,11 +187,13 @@ def compute_horizon_index(model: "EconomicModel") -> float:
 
     pair_scores = []
 
-    # 1. Gini (lower is better) depends on employment, wealth, population
-    m = _metric_score(history, "all_gini", lower_is_better=True)
+    # 1. Floor-distance distribution: are agents at the bottom moving toward or
+    #    away from the floor? worker_min rising means the bottom has more buffer.
+    #    Sustainable if supported by employment quality and redistribution capacity.
+    m = _metric_score(history, "worker_min")
     f = _foundation_score(
         history,
-        ["unemployment_rate", "worker_mean", "n_workers"],
+        ["unemployment_rate", "mean_wage", "planner_tax_revenue"],
         lower_is_better={"unemployment_rate"},
     )
     pair_scores.append(_pair_sustainability(m, f))
@@ -204,12 +206,14 @@ def compute_horizon_index(model: "EconomicModel") -> float:
     )
     pair_scores.append(_pair_sustainability(m, f))
 
-    # 3. Mean wealth (higher is better) depends on production, skills, employment
+    # 3. Mean wealth (higher is better) depends on production, skills, employment,
+    #    and environmental quality. Wealth growth from pollution-intensive production
+    #    scores low: the environmental cost is a hidden liability against the gain.
     m = _metric_score(history, "worker_mean")
     f = _foundation_score(
         history,
-        ["total_production", "mean_skill", "unemployment_rate"],
-        lower_is_better={"unemployment_rate"},
+        ["total_production", "mean_skill", "unemployment_rate", "pollution_health_burden"],
+        lower_is_better={"unemployment_rate", "pollution_health_burden"},
     )
     pair_scores.append(_pair_sustainability(m, f))
 
@@ -221,12 +225,14 @@ def compute_horizon_index(model: "EconomicModel") -> float:
     )
     pair_scores.append(_pair_sustainability(m, f))
 
-    # 5. Population (higher is better) depends on wealth floor, employment
+    # 5. Population (higher is better) depends on wealth floor, employment, and
+    #    environmental quality. Population health degrades under pollution burden,
+    #    making that growth unsustainable regardless of labor market conditions.
     m = _metric_score(history, "n_workers")
     f = _foundation_score(
         history,
-        ["worker_min", "unemployment_rate"],
-        lower_is_better={"unemployment_rate"},
+        ["worker_min", "unemployment_rate", "pollution_health_burden"],
+        lower_is_better={"unemployment_rate", "pollution_health_burden"},
     )
     pair_scores.append(_pair_sustainability(m, f))
 
@@ -236,6 +242,18 @@ def compute_horizon_index(model: "EconomicModel") -> float:
         history,
         ["worker_min", "mean_skill", "unemployment_rate"],
         lower_is_better={"unemployment_rate"},
+    )
+    pair_scores.append(_pair_sustainability(m, f))
+
+    # 7. Epistemic health (regulatory capacity / expert independence): is improving
+    #    EH backed by durable structural foundations? Gains driven by diversity of
+    #    sources, claim accuracy, and contestation quality are sustainable; gains
+    #    from a single captured channel that happens to score well are not.
+    m = _metric_score(history, "epistemic_health_mean")
+    f = _foundation_score(
+        history,
+        ["system_VE", "system_CI", "system_tau_c", "system_M"],
+        lower_is_better={"system_M"},
     )
     pair_scores.append(_pair_sustainability(m, f))
 
