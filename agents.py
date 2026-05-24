@@ -920,7 +920,10 @@ class FirmAgent(Agent):
         elif strategy == "capture_media": self._attempt_media_capture()
         elif strategy == "pollute_more": self.pollution_factor = min(0.60, self.pollution_factor * 1.05)
         elif strategy == "clean_up": self.pollution_factor = max(0.02, self.pollution_factor * 0.90)
-        elif strategy == "innovate": firm_rd_invest(self)
+        elif strategy == "innovate":
+            subsidy = float(self.model.planner.policy.get("green_tech_investment", 0.0)) if hasattr(self.model, "planner") else 0.0
+            self.green_rd_priority = min(1.0, self.green_rd_priority + min(0.2, subsidy * 0.02))
+            firm_rd_invest(self)
         self._maintain_wages()
 
     def _maintain_wages(self):

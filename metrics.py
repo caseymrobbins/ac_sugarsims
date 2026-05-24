@@ -201,6 +201,8 @@ def collect_step_metrics(model: "EconomicModel") -> Dict[str, Any]:
     m["pollution_health_burden"] = health_burden
     m["planner_pollution_tax"] = model.planner.policy["pollution_tax"]
     m["planner_cleanup_investment"] = model.planner.policy["cleanup_investment"]
+    m["planner_green_tech_investment"] = model.planner.policy.get("green_tech_investment", 0.0)
+    m["planner_public_green_rnd"] = model.planner.policy.get("public_green_rnd", 0.0)
     m["planner_media_funding"] = model.planner.policy.get("media_funding", 0.0)
     m["planner_antitrust_enforcement"] = model.planner.policy.get("antitrust_enforcement", 0.0)
     m["planner_min_capture_ratio"] = model.planner.policy.get("min_capture_ratio", 0.0)
@@ -818,6 +820,7 @@ def episode_summary(metrics_history: List[Dict]) -> Dict[str, Any]:
         "mean_pollution", "max_pollution", "total_pollution",
         "n_polluted_cells", "pollution_health_burden",
         "planner_pollution_tax", "planner_cleanup_investment",
+        "planner_green_tech_investment", "planner_public_green_rnd",
         "monopoly_detected", "cartel_detected", "poverty_trap_detected",
         "bottleneck_detected", "bottleneck_market_share", "bottleneck_duration",
         "bottleneck_breakups", "total_bottleneck_rent_redistributed",

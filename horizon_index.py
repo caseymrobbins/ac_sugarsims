@@ -245,6 +245,16 @@ def compute_horizon_index(model: "EconomicModel") -> float:
     )
     pair_scores.append(_pair_sustainability(m, f))
 
+    # 8. Environmental stability: lower pollution burden sustained by cleaner
+    #    production and active green investment policy.
+    m = _metric_score(history, "pollution_health_burden", lower_is_better=True)
+    f = _foundation_score(
+        history,
+        ["mean_pollution_factor", "planner_cleanup_investment", "planner_pollution_tax", "planner_green_tech_investment", "planner_public_green_rnd"],
+        lower_is_better={"mean_pollution_factor"},
+    )
+    pair_scores.append(_pair_sustainability(m, f))
+
     # 7. Epistemic health (regulatory capacity / expert independence): is improving
     #    EH backed by durable structural foundations? Gains driven by diversity of
     #    sources, claim accuracy, and contestation quality are sustainable; gains
@@ -258,6 +268,14 @@ def compute_horizon_index(model: "EconomicModel") -> float:
     pair_scores.append(_pair_sustainability(m, f))
 
     hi = float(np.min(pair_scores))
+
+    # Additional HI brake for high inequality: once Gini rises above 0.5,
+    # sustainability is treated as increasingly fragile.
+    all_gini = float(history[-1].get("all_gini", 0.5))
+    if all_gini > 0.5:
+        over = min(0.5, all_gini - 0.5)
+        hi *= max(0.0, 1.0 - 1.6 * over)
+
     return float(np.clip(hi, 0.0, 1.0))
 
 

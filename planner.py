@@ -30,7 +30,7 @@ ES_SIGMA_MIN = 0.005
 ES_LR = 0.1
 ES_MOMENTUM = 0.9
 STATE_DIM = 16
-POLICY_DIM = 19
+POLICY_DIM = 21
 ADAPT_LR = 0.01
 ADAPT_NOISE = 0.02
 REWARD_CLIP = 50.0
@@ -48,7 +48,7 @@ PLATFORM_CONSTRAINTS = {
     "redistribution": {"ubi_payment": 1.0, "tax_rate_firm": 0.10, "inheritance_tax": 0.10},
     "growth":         {"tax_rate_worker": 0.0, "tax_rate_firm": 0.0, "infrastructure_investment": 1.0},
     "education":      {"education_investment": 1.0, "min_wage": 3.0},
-    "environment":    {"pollution_tax": 0.5, "cleanup_investment": 1.0},
+    "environment":    {"pollution_tax": 0.5, "cleanup_investment": 1.0, "green_tech_investment": 0.5, "public_green_rnd": 0.5},
     "security":       {"healthcare_investment": 1.0, "agriculture_investment": 1.0},
 }
 
@@ -65,6 +65,8 @@ INSTRUMENT_SPEC: List[Tuple[str, float, float, float]] = [
     ("education_investment",      0.0,   0.0,   3.0),
     ("pollution_tax",             0.0,   0.0,   2.0),
     ("cleanup_investment",        0.0,   0.0,   5.0),
+    ("green_tech_investment",      0.0,   0.0,   5.0),
+    ("public_green_rnd",           0.0,   0.0,   5.0),
     ("inheritance_tax",           0.0,   0.0,   0.80),
     ("media_funding",             0.0,   0.0,   5.0),
     ("antitrust_enforcement",     0.0,   0.0,   3.0),
@@ -169,6 +171,8 @@ class PlannerAgent(Agent):
         "education_investment":       30.0,
         "pollution_tax":              20.0,
         "cleanup_investment":         50.0,
+        "green_tech_investment":      50.0,
+        "public_green_rnd":           50.0,
         "inheritance_tax":             0.99,
         "media_funding":              50.0,
         "antitrust_enforcement":      30.0,
@@ -455,6 +459,31 @@ class PlannerAgent(Agent):
             if self._available_budget() >= cc:
                 self._spend(cc)
                 self.model.pollution_grid *= max(0.0, 1.0 - min(0.10, cleanup * 0.02))
+
+        green_inv = _safe("green_tech_investment", 0.0)
+        if green_inv > 0 and self._available_budget() > 0:
+            gc = green_inv * 1.5
+            budget = min(gc, self._available_budget())
+            if budget > 0:
+                active_firms = [f for f in self.model.firms if not f.defunct]
+                if active_firms:
+                    subsidy_strength = min(0.30, green_inv * 0.03)
+                    for f in active_firms:
+                        f.green_rd_priority = min(1.0, getattr(f, "green_rd_priority", 0.5) + subsidy_strength)
+                        f.pollution_factor = max(0.01, f.pollution_factor * (1.0 - subsidy_strength * 0.4))
+                self._spend(budget)
+
+        public_green_rnd = _safe("public_green_rnd", 0.0)
+        if public_green_rnd > 0 and self._available_budget() > 0:
+            rc = public_green_rnd * 1.2
+            budget = min(rc, self._available_budget())
+            if budget > 0:
+                active_firms = [f for f in self.model.firms if not f.defunct]
+                if active_firms:
+                    spill = min(0.20, public_green_rnd * 0.025)
+                    for f in active_firms:
+                        f.pollution_factor = max(0.01, f.pollution_factor * (1.0 - spill * 0.3))
+                self._spend(budget)
 
         # Media funding: public-good subsidy for news firms
         media_fund = _safe("media_funding", 0.0)
@@ -917,7 +946,9 @@ class PlannerAgent(Agent):
         model._poll_ema = 0.95 * model._poll_ema + 0.05 * poll_per_worker
         v_pollution = max(0.0, 1.0 - (poll_per_worker / max(model._poll_ema * 3.0, 0.1)))
         v_green = float(np.clip(self.policy.get("pollution_tax", 0.0) * 0.5 +
-                                self.policy.get("cleanup_investment", 0.0) * 0.2, 0.0, 1.0))
+                                self.policy.get("cleanup_investment", 0.0) * 0.2 +
+                                self.policy.get("green_tech_investment", 0.0) * 0.15 +
+                                self.policy.get("public_green_rnd", 0.0) * 0.10, 0.0, 1.0))
         if firms:
             mean_firm_v = float(np.mean([getattr(f, '_prev_scores', {}).get('V_raw', 0.5)
                                          if hasattr(f, '_prev_scores') else 0.5 for f in firms]))

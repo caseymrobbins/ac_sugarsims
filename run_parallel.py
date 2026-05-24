@@ -224,8 +224,8 @@ B3 = Condition("B3_bottleneck_aggressive", "Aggressive anti-bottleneck policy", 
 BOTTLENECK_CONDITIONS = [B1, B2, B3]
 
 # Focused BICF sanity-test condition (single-condition smoke preset)
-D1 = Condition("D1_no_planner", "No planner baseline", "SUM_RAW", False, True, 0.1, True, True, "democratic", planner_mode="none")
-D2 = Condition("D2_simple_planner", "Planner simple rule", "NASH_MIN", True, True, 0.1, True, True, "democratic", planner_mode="simple")
+D1 = Condition("vNM_utility_no_planner", "No planner baseline", "SUM_RAW", False, True, 0.1, True, True, "democratic", planner_mode="none")
+D2 = Condition("Nash_utility_simple_planner", "Planner simple rule", "NASH_MIN", True, True, 0.1, True, True, "democratic", planner_mode="simple")
 D3 = Condition("D3_custom_reward_planner", "Planner custom reward", "CUSTOM_REWARD", True, True, 0.1, True, True, "democratic", planner_mode="custom")
 D_CONDITIONS = [D1, D2, D3]
 
@@ -1223,7 +1223,7 @@ class TestRunParallelConditions(_unittest.TestCase):
     def test_d1_d3_preset_registered(self):
         self.assertIn("d_tests", PRESETS)
         names = [c.name for c in PRESETS["d_tests"]["conditions"]]
-        self.assertEqual(names, ["D1_no_planner", "D2_simple_planner", "D3_custom_reward_planner"])
+        self.assertEqual(names, ["vNM_utility_no_planner", "Nash_utility_simple_planner", "D3_custom_reward_planner"])
 
     def test_d1_d3_planner_modes(self):
         self.assertEqual(D1.planner_mode, "none")
