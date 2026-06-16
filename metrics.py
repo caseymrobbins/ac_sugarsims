@@ -28,6 +28,7 @@ if TYPE_CHECKING:
     from environment import EconomicModel
 
 from agents import _identity_similarity
+from hardware import POLLUTION_DECAY as _POLLUTION_DECAY
 
 
 # ---------------------------------------------------------------------------
@@ -193,6 +194,15 @@ def collect_step_metrics(model: "EconomicModel") -> Dict[str, Any]:
     m["total_firm_emissions"] = float(sum(
         f.total_pollution_emitted for f in model.firms if not f.defunct
     ))
+    # Per-step emission rate → regeneration threshold (the per-cell pollution level
+    # where emission equals decay, i.e., the onset of self-sustaining accumulation).
+    # Stored on the model so compute_agency() can use it without recomputing per worker.
+    _active_firms = [f for f in model.firms if not f.defunct]
+    _step_emission_rate = float(sum(f.production_this_step * f.pollution_factor for f in _active_firms))
+    _n_cells = model.pollution_grid.size
+    model._regen_threshold_per_cell = (
+        _step_emission_rate / (_POLLUTION_DECAY * _n_cells) if _n_cells > 0 else 1.0
+    )
     health_burden = 0.0
     for w in model.workers:
         if w.pos is not None:

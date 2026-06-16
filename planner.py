@@ -720,7 +720,22 @@ class PlannerAgent(Agent):
         if not workers: return float(math.log(EPSILON))
         a = np.array([w.compute_agency() for w in workers], dtype=np.float64)
         a = a[np.isfinite(a)]
-        base = float(math.log(max(float(np.min(a)), EPSILON))) if len(a) > 0 else float(math.log(EPSILON))
+        current_min = float(np.min(a)) if len(a) > 0 else EPSILON
+
+        # Temporal floor: pollution is a stock that accumulates while its cost lags
+        # the instantaneous signal. Flooring over a rolling window catches stock
+        # degradation before the knee — the same move as the Horizon Index, but
+        # applied directly to the objective. The planner cannot declare victory
+        # while the floor has been lower in recent memory.
+        TEMPORAL_WINDOW = 24  # steps (~2 simulated years at monthly cadence)
+        history = self.model.metrics_history
+        if len(history) >= 2:
+            recent_floors = [h.get("agency_floor", current_min) for h in history[-TEMPORAL_WINDOW:]]
+            temporal_min = min(recent_floors + [current_min])
+        else:
+            temporal_min = current_min
+
+        base = float(math.log(max(temporal_min, EPSILON)))
         return base * _get_horizon_index(self.model)
 
     def _objective_cross(self):

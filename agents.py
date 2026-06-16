@@ -706,11 +706,13 @@ class WorkerAgent(Agent):
     def compute_agency(self):
         # Raw POLI dimensions
         resources = max(self.wealth, 1e-9)                                  # P: material prerequisites
+        local_pollution = 0.0
         if self.pos is not None:
             p = (int(self.pos[0]), int(self.pos[1]))
             local_density = (float(self.model.food_grid[p[0],p[1]]) +
                              float(self.model.raw_grid[p[0],p[1]]) +
                              float(self.model.capital_grid[p[0],p[1]]))
+            local_pollution = float(self.model.pollution_grid[p[0], p[1]])
         else:
             local_density = 1.0
         options = max(self.skill * (local_density + 1), 1e-9)               # O: available options
@@ -727,10 +729,25 @@ class WorkerAgent(Agent):
         CI      = getattr(self, 'claim_integrity', 0.5)
         tau_c   = getattr(self, 'contestation_quality', 0.5)
 
-        P_eff = resources / (1.0 + M)          # high M distorts P-perception
-        O_eff = max(options * VE, 1e-9)        # low VE shrinks visible option set
-        L_eff = levers * CI                    # low CI corrupts lever selection
-        I_eff = max(impact * tau_c, 1e-9)      # low tau_c mutes effective impact
+        # Pollution-to-agency coupling: calibrated from epidemiology/ecology dose-response.
+        # Silent below the regeneration threshold (environment is self-healing there);
+        # bites above it where accumulation is self-sustaining without intervention.
+        # Three channels match the three ways pollution reduces real agent options:
+        #   health → P  (metabolic and cognitive load, ~1.5 %/unit above threshold)
+        #   food access → O  (contamination reduces harvestable options, ~1.2 %/unit)
+        #   displacement → L  (forced relocation reduces available levers, ~1.0 %/unit)
+        # Adjust these coefficients to match domain dose-response data; do not tune
+        # them to fix simulation outputs — the coupling is an empirical quantity.
+        regen_thresh = float(getattr(self.model, '_regen_threshold_per_cell', 1.0))
+        poll_excess = max(0.0, local_pollution - regen_thresh)
+        health_penalty   = max(0.0, 1.0 - poll_excess * 0.015)  # epidemiological: ~15% loss at +10 units
+        food_penalty     = max(0.0, 1.0 - poll_excess * 0.012)  # ecological: ~12% loss at +10 units
+        displace_penalty = max(0.0, 1.0 - poll_excess * 0.010)  # sociological: ~10% loss at +10 units
+
+        P_eff = (resources / (1.0 + M)) * health_penalty
+        O_eff = max(options * VE, 1e-9) * food_penalty
+        L_eff = levers * CI * displace_penalty
+        I_eff = max(impact * tau_c, 1e-9)      # I: pollution affects through P/O/L, not direct impact
 
         agency = (P_eff * O_eff * L_eff * I_eff) ** 0.25
         return float(agency)
