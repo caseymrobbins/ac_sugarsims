@@ -255,6 +255,21 @@ def compute_horizon_index(model: "EconomicModel") -> float:
     )
     pair_scores.append(_pair_sustainability(m, f))
 
+    # 9. Direct pollution abatement: are actual grid pollution levels declining?
+    #    Distinct from the health-burden pair above—high pollution with low
+    #    worker density can mask latent environmental liability. This pair
+    #    rewards structural reduction in mean_pollution backed by durable
+    #    policy: tax pressure, active cleanup, cleaner production factors,
+    #    and green tech investment. A temporary dip without those foundations
+    #    (e.g., a recession that briefly cuts emissions) scores low.
+    m = _metric_score(history, "mean_pollution", lower_is_better=True)
+    f = _foundation_score(
+        history,
+        ["planner_pollution_tax", "planner_cleanup_investment", "mean_pollution_factor", "planner_green_tech_investment"],
+        lower_is_better={"mean_pollution_factor"},
+    )
+    pair_scores.append(_pair_sustainability(m, f))
+
     # 7. Epistemic health (regulatory capacity / expert independence): is improving
     #    EH backed by durable structural foundations? Gains driven by diversity of
     #    sources, claim accuracy, and contestation quality are sustainable; gains
