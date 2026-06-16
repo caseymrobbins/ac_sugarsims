@@ -63,13 +63,13 @@ INSTRUMENT_SPEC: List[Tuple[str, float, float, float]] = [
     ("infrastructure_investment", 0.5,   0.0,   5.0),
     ("healthcare_investment",     0.0,   0.0,   3.0),
     ("education_investment",      0.0,   0.0,   3.0),
-    ("pollution_tax",             0.0,   0.0,   2.0),
-    ("cleanup_investment",        0.0,   0.0,   5.0),
+    ("pollution_tax",             0.3,   0.0,   2.0),
+    ("cleanup_investment",        0.5,   0.0,   5.0),
     ("green_tech_investment",      0.0,   0.0,   5.0),
     ("public_green_rnd",           0.0,   0.0,   5.0),
     ("inheritance_tax",           0.0,   0.0,   0.80),
     ("media_funding",             0.0,   0.0,   5.0),
-    ("antitrust_enforcement",     0.0,   0.0,   3.0),
+    ("antitrust_enforcement",     0.5,   0.0,   3.0),
     ("surveillance_level",        0.0,   0.0,   1.0),
     ("enforcement_budget",        0.3,   0.0,   3.0),
     ("propaganda_budget",         0.0,   0.0,   3.0),
@@ -383,7 +383,12 @@ class PlannerAgent(Agent):
                     elif self.tax_revenue > 0: agent.wealth += self.tax_revenue; self.tax_revenue = 0.0
         elif isinstance(agent, FirmAgent):
             rate = _safe("tax_rate_firm", 0.10); tax = max(0.0, agent.profit) * rate
-            tax += agent.production_this_step * agent.pollution_factor * _safe("pollution_tax", 0.0)
+            ptax = _safe("pollution_tax", 0.0)
+            tax += agent.production_this_step * agent.pollution_factor * ptax
+            if ptax > 0 and agent.pos is not None:
+                fx, fy = int(agent.pos[0]), int(agent.pos[1])
+                local_poll = float(self.model.pollution_grid[fx, fy])
+                tax += local_poll * ptax * 0.05
             min_w = _safe("min_wage", 1.0)
             if agent.offered_wage < min_w: agent.offered_wage = min_w
             # Production-sharing floor: firms below min_capture_ratio pay a surcharge
@@ -458,7 +463,7 @@ class PlannerAgent(Agent):
             cc = cleanup * 2.0
             if self._available_budget() >= cc:
                 self._spend(cc)
-                self.model.pollution_grid *= max(0.0, 1.0 - min(0.10, cleanup * 0.02))
+                self.model.pollution_grid *= max(0.0, 1.0 - min(0.25, cleanup * 0.05))
 
         green_inv = _safe("green_tech_investment", 0.0)
         if green_inv > 0 and self._available_budget() > 0:
@@ -941,10 +946,10 @@ class PlannerAgent(Agent):
         # ---- V_pop: Value/Environment ----
         total_poll = float(np.sum(model.pollution_grid))
         poll_per_worker = total_poll / max(n_workers, 1)
-        if not hasattr(model, '_poll_ema'):
-            model._poll_ema = max(poll_per_worker, 0.1)
-        model._poll_ema = 0.95 * model._poll_ema + 0.05 * poll_per_worker
-        v_pollution = max(0.0, 1.0 - (poll_per_worker / max(model._poll_ema * 3.0, 0.1)))
+        # Fixed absolute reference: 30 pollution-units per worker = crisis (V=0).
+        # Previously used 3× rolling EMA, which rose with chronic pollution,
+        # letting the planner habituate and never feel environmental pressure.
+        v_pollution = max(0.0, 1.0 - min(1.0, poll_per_worker / 30.0))
         v_green = float(np.clip(self.policy.get("pollution_tax", 0.0) * 0.5 +
                                 self.policy.get("cleanup_investment", 0.0) * 0.2 +
                                 self.policy.get("green_tech_investment", 0.0) * 0.15 +

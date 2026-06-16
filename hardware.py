@@ -44,7 +44,7 @@ POLLUTION_CAP = 50.0
 FOOD_REGEN = 0.8
 RAW_REGEN = 0.3
 WATER_REGEN = 0.5
-POLLUTION_DECAY = 0.02       # fraction that decays per step
+POLLUTION_DECAY = 0.05       # fraction that decays per step
 POLLUTION_DIFFUSE = 0.05     # spatial diffusion fraction
 
 
