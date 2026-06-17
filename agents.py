@@ -717,7 +717,8 @@ class WorkerAgent(Agent):
             local_density = 1.0
         options = max(self.skill * (local_density + 1), 1e-9)               # O: available options
         levers = 1.0 + float(self.employed) + float(self.debt < 100) + float(len(self.network_connections) > 0)  # L: action levers
-        impact = max(abs(self.income_last_step - self.income_prev_step) + 1e-9, 1e-9)  # I: effective impact
+        BASE_I = 1.0
+        impact = max(float(self.income_last_step), BASE_I)  # I: income level (floored), not volatility
 
         # POLI-EH separation: each dimension filtered by its phase-specific epistemic variable
         #   P-phase: M degrades perception of own prerequisites

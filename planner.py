@@ -35,6 +35,7 @@ ADAPT_LR = 0.01
 ADAPT_NOISE = 0.02
 REWARD_CLIP = 50.0
 REWARD_BASELINE_DECAY = 0.9
+_GAMMA = 0.99                  # discount factor for long-horizon credit assignment
 CUSTOM_REWARD_FLOOR_TARGET = 25.0
 
 # ---------------------------------------------------------------------------
@@ -219,6 +220,7 @@ class PlannerAgent(Agent):
         self.redistribution_scheme = "uniform"
         self.hi_history = deque(maxlen=25)
         self.previous_hi = 0.0
+        self._per_step_returns = deque(maxlen=120)  # rolling per-step objectives for discounted return
 
     def step(self):
         self._steps_since_update += 1; self._steps_since_election += 1
@@ -226,6 +228,9 @@ class PlannerAgent(Agent):
         if gov in ('democratic', 'demo_captured') and self._steps_since_election >= ELECTION_CYCLE:
             self._run_election(); self._steps_since_election = 0
         self._apply_investments(); self._redistribute()
+        if self._current_perturbations is not None:
+            _r = self.compute_objective()
+            if np.isfinite(_r): self._per_step_returns.append(_r)
         if self._steps_since_update >= POLICY_UPDATE_INTERVAL: self._learning_step(); self._steps_since_update = 0
 
     def _observe_state(self):
@@ -295,9 +300,19 @@ class PlannerAgent(Agent):
         else: reward = current_obj
         reward = np.clip(reward, -REWARD_CLIP, REWARD_CLIP)
         self._reward_baseline = REWARD_BASELINE_DECAY * self._reward_baseline + (1 - REWARD_BASELINE_DECAY) * current_obj
-        self._linear.record_reward(reward)
+        # FIX 4: discounted return G. Rolling 120-step window of per-step objectives,
+        # newest weighted by 1 and oldest by gamma^(n-1). Green/slow levers
+        # (green_tech, education, infrastructure) pay off ~50 steps after investment;
+        # G carries that signal back to the perturbation region that triggered it.
+        if self._per_step_returns:
+            _G = 0.0
+            for _r in list(self._per_step_returns):  # oldest to newest
+                _G = _r + _GAMMA * _G               # newest weight=1, oldest=gamma^(n-1)
+        else:
+            _G = current_obj
+        self._linear.record_reward(_G)
         if self._current_perturbations is not None:
-            self._perturbation_fitnesses.append(current_obj); self._perturbation_idx += 1
+            self._perturbation_fitnesses.append(_G); self._perturbation_idx += 1
             if self._perturbation_idx >= ES_POPULATION:
                 fitnesses = np.array(self._perturbation_fitnesses[-ES_POPULATION:])
                 self._es.update(self._current_perturbations, fitnesses)
@@ -308,9 +323,9 @@ class PlannerAgent(Agent):
             self._perturbation_idx = 0; self._perturbation_fitnesses.clear()
         idx = min(self._perturbation_idx, len(self._current_perturbations) - 1)
         perturbation = self._current_perturbations[idx]
-        if self.objective == "CUSTOM_REWARD":
-            self._planner_policy_search()
-            return
+        # FIX 5: CUSTOM_REWARD now routes through ES like all other objectives.
+        # _planner_policy_search / simulate_policy only searched {tax,ubi,health,edu}
+        # and ignored pollution/green levers entirely — they were unreachable.
         state = self._observe_state(); es_params = self._es.get_params(perturbation)
         linear_adj = self._linear.forward(state, explore=True)
         combined = np.clip(es_params + linear_adj * 0.1, 0.01, 0.99)
@@ -582,23 +597,23 @@ class PlannerAgent(Agent):
         return max(0.0, hi)
 
     def _planner_custom_reward(self):
-        A = self._agent_assets()
+        # FIX 2: objective = log(min A) + lambda * sum(log A) * FHI * HI
+        # A = POLI agency from compute_agency() (not wealth).
+        # FHI = flexible headroom index (1 - total_agency / max_possible).
+        # HI = real multi-dimensional Horizon Index (not ad-hoc _compute_hi).
+        workers = self.model.workers
+        if not workers: return float(math.log(EPSILON))
+        A = np.array([w.compute_agency() for w in workers], dtype=np.float64)
+        A = A[np.isfinite(A)]
+        if len(A) == 0: return float(math.log(EPSILON))
         total = float(np.sum(A))
-        max_possible = max(float(len(A)) * 200.0, EPSILON)
+        max_possible = max(float(len(A)) * 50.0, EPSILON)  # agency scale ~1-50, not wealth scale
         fhi = float(np.clip(1.0 - (total / max_possible), 0.0, 1.0))
-        hi = self._compute_hi(total)
-        d_hi = hi - self.previous_hi
-        self.previous_hi = hi
+        hi = _get_horizon_index(self.model)
         lam = getattr(self.model, "planner_lambda", 0.5)
-        w1 = getattr(self.model, "planner_w1", 0.5)
-        w2 = getattr(self.model, "planner_w2", 0.5)
-        floor_target = float(getattr(self.model, "planner_floor_target", CUSTOM_REWARD_FLOOR_TARGET))
-        floor_gap = max(0.0, floor_target - float(np.min(A)))
-        floor_progress = 1.0 - (floor_gap / (floor_target + EPSILON))
-        floor_progress = float(np.clip(floor_progress, 0.0, 1.0))
-        g_term = w1 * np.log(hi + EPSILON) + w2 * d_hi
-        floor_term = 2.0 * np.log(np.min(A + EPSILON)) + floor_progress
-        return float(floor_term + (1.0 - lam) * np.sum(np.log(A + EPSILON)) * fhi + g_term)
+        floor_term = float(math.log(max(float(np.min(A)), EPSILON)))
+        expansion = lam * float(np.sum(np.log(np.maximum(A, EPSILON)))) * fhi * hi
+        return floor_term + expansion
 
     def simulate_policy(self, policy, _state_copy=None):
         workers = self.model.workers
