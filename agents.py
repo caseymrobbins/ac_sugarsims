@@ -706,11 +706,13 @@ class WorkerAgent(Agent):
     def compute_agency(self):
         # Raw POLI dimensions
         resources = max(self.wealth, 1e-9)                                  # P: material prerequisites
+        local_pollution = 0.0
         if self.pos is not None:
             p = (int(self.pos[0]), int(self.pos[1]))
             local_density = (float(self.model.food_grid[p[0],p[1]]) +
                              float(self.model.raw_grid[p[0],p[1]]) +
                              float(self.model.capital_grid[p[0],p[1]]))
+            local_pollution = float(self.model.pollution_grid[p[0], p[1]])
         else:
             local_density = 1.0
         options = max(self.skill * (local_density + 1), 1e-9)               # O: available options
@@ -727,10 +729,35 @@ class WorkerAgent(Agent):
         CI      = getattr(self, 'claim_integrity', 0.5)
         tau_c   = getattr(self, 'contestation_quality', 0.5)
 
-        P_eff = resources / (1.0 + M)          # high M distorts P-perception
-        O_eff = max(options * VE, 1e-9)        # low VE shrinks visible option set
-        L_eff = levers * CI                    # low CI corrupts lever selection
-        I_eff = max(impact * tau_c, 1e-9)      # low tau_c mutes effective impact
+        # Pollution-to-agency coupling: calibrated from epidemiology/ecology dose-response.
+        # Silent below the regeneration threshold (environment is self-healing there);
+        # bites above it where accumulation is self-sustaining without intervention.
+        # Three channels match the three ways pollution reduces real agent options:
+        #   health → P  (metabolic and cognitive load)
+        #   food access → O  (contamination reduces harvestable options)
+        #   displacement → L  (forced relocation reduces available levers)
+        #
+        # Exponential form avoids the cliff that linear clamps create inside the
+        # geometric mean (a single zeroed channel zeros total agency).
+        #
+        # k values are calibrated to AGENCY-level losses, accounting for **0.25:
+        #   combined agency change = (exp(-k_P*x) * exp(-k_O*x) * exp(-k_L*x))^0.25
+        #   k_P=0.040, k_O=0.032, k_L=0.024 targets:
+        #     +10 units: (0.67*0.73*0.79)^0.25 ≈ 0.79  (~21% agency loss)
+        #     +30 units: (0.30*0.38*0.49)^0.25 ≈ 0.49  (~51% agency loss)
+        # Per-channel penalties at +10: P→33%, O→27%, L→21%.
+        # Adjust k values to match domain dose-response for your pollution units;
+        # do not tune them to fix simulation outputs.
+        regen_thresh = float(getattr(self.model, '_regen_threshold_per_cell', 1.0))
+        poll_excess = max(0.0, local_pollution - regen_thresh)
+        health_penalty   = float(np.exp(-poll_excess * 0.040))
+        food_penalty     = float(np.exp(-poll_excess * 0.032))
+        displace_penalty = float(np.exp(-poll_excess * 0.024))
+
+        P_eff = (resources / (1.0 + M)) * health_penalty
+        O_eff = max(options * VE, 1e-9) * food_penalty
+        L_eff = levers * CI * displace_penalty
+        I_eff = max(impact * tau_c, 1e-9)      # I: pollution affects through P/O/L, not direct impact
 
         agency = (P_eff * O_eff * L_eff * I_eff) ** 0.25
         return float(agency)

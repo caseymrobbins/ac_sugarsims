@@ -720,7 +720,12 @@ class PlannerAgent(Agent):
         if not workers: return float(math.log(EPSILON))
         a = np.array([w.compute_agency() for w in workers], dtype=np.float64)
         a = a[np.isfinite(a)]
-        base = float(math.log(max(float(np.min(a)), EPSILON))) if len(a) > 0 else float(math.log(EPSILON))
+        current_min = float(np.min(a)) if len(a) > 0 else EPSILON
+        # Temporal aggregation is handled by the Horizon Index (12- and 60-step
+        # blended trends). Adding a second window here double-counts time and is
+        # a no-op during monotonic accumulation anyway (min of declining series
+        # == current value). Let HI carry the trajectory signal.
+        base = float(math.log(max(current_min, EPSILON)))
         return base * _get_horizon_index(self.model)
 
     def _objective_cross(self):
