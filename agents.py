@@ -733,16 +733,26 @@ class WorkerAgent(Agent):
         # Silent below the regeneration threshold (environment is self-healing there);
         # bites above it where accumulation is self-sustaining without intervention.
         # Three channels match the three ways pollution reduces real agent options:
-        #   health → P  (metabolic and cognitive load, ~1.5 %/unit above threshold)
-        #   food access → O  (contamination reduces harvestable options, ~1.2 %/unit)
-        #   displacement → L  (forced relocation reduces available levers, ~1.0 %/unit)
-        # Adjust these coefficients to match domain dose-response data; do not tune
-        # them to fix simulation outputs — the coupling is an empirical quantity.
+        #   health → P  (metabolic and cognitive load)
+        #   food access → O  (contamination reduces harvestable options)
+        #   displacement → L  (forced relocation reduces available levers)
+        #
+        # Exponential form avoids the cliff that linear clamps create inside the
+        # geometric mean (a single zeroed channel zeros total agency).
+        #
+        # k values are calibrated to AGENCY-level losses, accounting for **0.25:
+        #   combined agency change = (exp(-k_P*x) * exp(-k_O*x) * exp(-k_L*x))^0.25
+        #   k_P=0.040, k_O=0.032, k_L=0.024 targets:
+        #     +10 units: (0.67*0.73*0.79)^0.25 ≈ 0.79  (~21% agency loss)
+        #     +30 units: (0.30*0.38*0.49)^0.25 ≈ 0.49  (~51% agency loss)
+        # Per-channel penalties at +10: P→33%, O→27%, L→21%.
+        # Adjust k values to match domain dose-response for your pollution units;
+        # do not tune them to fix simulation outputs.
         regen_thresh = float(getattr(self.model, '_regen_threshold_per_cell', 1.0))
         poll_excess = max(0.0, local_pollution - regen_thresh)
-        health_penalty   = max(0.0, 1.0 - poll_excess * 0.015)  # epidemiological: ~15% loss at +10 units
-        food_penalty     = max(0.0, 1.0 - poll_excess * 0.012)  # ecological: ~12% loss at +10 units
-        displace_penalty = max(0.0, 1.0 - poll_excess * 0.010)  # sociological: ~10% loss at +10 units
+        health_penalty   = float(np.exp(-poll_excess * 0.040))
+        food_penalty     = float(np.exp(-poll_excess * 0.032))
+        displace_penalty = float(np.exp(-poll_excess * 0.024))
 
         P_eff = (resources / (1.0 + M)) * health_penalty
         O_eff = max(options * VE, 1e-9) * food_penalty

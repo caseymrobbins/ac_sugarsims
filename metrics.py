@@ -194,15 +194,24 @@ def collect_step_metrics(model: "EconomicModel") -> Dict[str, Any]:
     m["total_firm_emissions"] = float(sum(
         f.total_pollution_emitted for f in model.firms if not f.defunct
     ))
-    # Per-step emission rate → regeneration threshold (the per-cell pollution level
-    # where emission equals decay, i.e., the onset of self-sustaining accumulation).
-    # Stored on the model so compute_agency() can use it without recomputing per worker.
+    # Per-cell regeneration threshold: the local pollution level at which emission
+    # equals decay — the onset of self-sustaining accumulation.
+    # Use a 100-step EMA of the per-cell emission rate so the threshold tracks the
+    # long-run emission pressure rather than instantaneous spikes. The instantaneous
+    # total is perverse: a high-emission step would raise the threshold, weakening
+    # the coupling exactly when emissions are highest.
+    # Spatial limitation: this is a basin-wide average; hotspot cells near clustered
+    # firms will have local emission density well above this average. Per-cell tracking
+    # would be exact but expensive; EMA smoothing is the practical middle ground.
     _active_firms = [f for f in model.firms if not f.defunct]
     _step_emission_rate = float(sum(f.production_this_step * f.pollution_factor for f in _active_firms))
     _n_cells = model.pollution_grid.size
-    model._regen_threshold_per_cell = (
-        _step_emission_rate / (_POLLUTION_DECAY * _n_cells) if _n_cells > 0 else 1.0
-    )
+    _step_per_cell = _step_emission_rate / max(_n_cells, 1)
+    if not hasattr(model, '_emission_ema_per_cell'):
+        model._emission_ema_per_cell = max(_step_per_cell, 1e-6)
+    else:
+        model._emission_ema_per_cell = 0.99 * model._emission_ema_per_cell + 0.01 * _step_per_cell
+    model._regen_threshold_per_cell = model._emission_ema_per_cell / _POLLUTION_DECAY
     health_burden = 0.0
     for w in model.workers:
         if w.pos is not None:
