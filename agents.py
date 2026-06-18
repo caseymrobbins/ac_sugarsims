@@ -717,16 +717,8 @@ class WorkerAgent(Agent):
             local_density = 1.0
         options = max(self.skill * (local_density + 1), 1e-9)               # O: available options
         levers = 1.0 + float(self.employed) + float(self.debt < 100) + float(len(self.network_connections) > 0)  # L: action levers
-        # I (Impact): realized capacity to affect outcomes, measured as the agent's
-        # income LEVEL (floored), not income volatility. The previous definition,
-        # abs(income_last_step - income_prev_step), sent I_eff to ~1e-9 for any agent
-        # with flat income (most of the unemployed, and every stable earner). Through
-        # the geometric mean that pinned min(agency) at EPSILON regardless of wealth or
-        # pollution, leaving the JAM floor term a dead constant that no pollution signal
-        # could move. A stable earner has high agency; volatility is not impact.
-        # BASE_I is the minimal baseline impact of simply being a viable agent.
         BASE_I = 1.0
-        impact = max(float(self.income_last_step), BASE_I)  # I: effective impact (income level, floored)
+        impact = max(float(self.income_last_step), BASE_I)  # I: income level (floored), not volatility
 
         # POLI-EH separation: each dimension filtered by its phase-specific epistemic variable
         #   P-phase: M degrades perception of own prerequisites

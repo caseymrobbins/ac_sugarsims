@@ -2,9 +2,4 @@ __pycache__/
 *.pyc
 *.pyo
 .env
-results/architecture/
-results/test_conditions/raw_data/
-results/test_conditions/summary/
-results/responsiveness/raw_data/
-results/responsiveness/summary/
-gov-repo.md
+results/

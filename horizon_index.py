@@ -282,6 +282,55 @@ def compute_horizon_index(model: "EconomicModel") -> float:
     )
     pair_scores.append(_pair_sustainability(m, f))
 
+    # 10. Production trajectory: is total output rising on a foundation of
+    #     firm count and skills rather than unsupported extraction?
+    m = _metric_score(history, "total_production")
+    f = _foundation_score(
+        history,
+        ["n_firms", "mean_skill", "unemployment_rate"],
+        lower_is_better={"unemployment_rate"},
+    )
+    pair_scores.append(_pair_sustainability(m, f))
+
+    # 11. Legitimacy: is institutional legitimacy rising, backed by real
+    #     material outcomes (wages, workers, tax capacity)?
+    m = _metric_score(history, "legitimacy_mean")
+    f = _foundation_score(
+        history,
+        ["worker_min", "mean_wage", "planner_tax_revenue"],
+    )
+    pair_scores.append(_pair_sustainability(m, f))
+
+    # 12. Aggression (lower is better): is mean aggression declining, backed
+    #     by falling unemployment, rising wages, and lower pollution burden?
+    m = _metric_score(history, "mean_aggression", lower_is_better=True)
+    f = _foundation_score(
+        history,
+        ["unemployment_rate", "mean_wage", "pollution_health_burden"],
+        lower_is_better={"unemployment_rate", "pollution_health_burden"},
+    )
+    pair_scores.append(_pair_sustainability(m, f))
+
+    # 13. Conflict (lower is better): is conflict declining on a foundation of
+    #     improving inequality and employment, not just suppression?
+    m = _metric_score(history, "mean_conflict", lower_is_better=True)
+    f = _foundation_score(
+        history,
+        ["all_gini", "unemployment_rate", "mean_aggression"],
+        lower_is_better={"all_gini", "unemployment_rate", "mean_aggression"},
+    )
+    pair_scores.append(_pair_sustainability(m, f))
+
+    # 14. Gini (lower is better): is inequality declining, backed by
+    #     redistribution capacity and employment quality?
+    m = _metric_score(history, "all_gini", lower_is_better=True)
+    f = _foundation_score(
+        history,
+        ["planner_tax_revenue", "worker_min", "unemployment_rate"],
+        lower_is_better={"unemployment_rate"},
+    )
+    pair_scores.append(_pair_sustainability(m, f))
+
     hi = float(np.min(pair_scores))
 
     # Additional HI brake for high inequality: once Gini rises above 0.5,
