@@ -300,14 +300,14 @@ class PlannerAgent(Agent):
         else: reward = current_obj
         reward = np.clip(reward, -REWARD_CLIP, REWARD_CLIP)
         self._reward_baseline = REWARD_BASELINE_DECAY * self._reward_baseline + (1 - REWARD_BASELINE_DECAY) * current_obj
-        # FIX 4: discounted return G. Rolling 120-step window of per-step objectives,
-        # newest weighted by 1 and oldest by gamma^(n-1). Green/slow levers
-        # (green_tech, education, infrastructure) pay off ~50 steps after investment;
-        # G carries that signal back to the perturbation region that triggered it.
+        # FIX 4: discounted return G. Per-perturbation window of per-step objectives.
+        # Buffer is cleared after use so each perturbation is scored only on rewards
+        # collected during its own evaluation window, not earlier perturbations'.
         if self._per_step_returns:
             _G = 0.0
             for _r in list(self._per_step_returns):  # oldest to newest
                 _G = _r + _GAMMA * _G               # newest weight=1, oldest=gamma^(n-1)
+            self._per_step_returns.clear()  # reset before advancing to next perturbation
         else:
             _G = current_obj
         self._linear.record_reward(_G)
