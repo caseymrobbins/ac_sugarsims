@@ -756,7 +756,7 @@ class WorkerAgent(Agent):
         displace_penalty = float(np.exp(-poll_excess * 0.024))
 
         P_eff = (resources / (1.0 + M)) * health_penalty
-        O_eff = max(options * VE, 1e-9) * food_penalty
+        O_eff = options * max(VE, 0.1) * food_penalty
         L_eff = levers * CI * displace_penalty
         I_eff = max(impact * tau_c, 1e-9)      # I: pollution affects through P/O/L, not direct impact
 

@@ -799,7 +799,9 @@ def episode_summary(metrics_history: List[Dict]) -> Dict[str, Any]:
     tail = metrics_history[max(0, int(n * 0.8)):]
 
     def avg(key):
-        vals = [m[key] for m in tail if key in m and not (isinstance(m[key], float) and math.isnan(m[key]))]
+        vals = [m[key] for m in tail if key in m
+                and isinstance(m[key], (int, float, bool))
+                and not (isinstance(m[key], float) and math.isnan(m[key]))]
         return float(np.mean(vals)) if vals else float("nan")
 
     def last(key):
